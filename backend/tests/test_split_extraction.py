@@ -175,7 +175,7 @@ def test_extract_chapter_artifacts_runs_three_steps_with_fake_llm(split_workflow
 
 
 def test_new_extractor_profiles_exist() -> None:
-    for name in ("entity_extractor", "chapter_memory_extractor", "relation_extractor"):
+    for name in ("entity_extractor", "chapter_memory_extractor", "relation_extractor", "prose_polish"):
         p = get_profile(name)
         assert p.agent_name == name
         assert p.model

@@ -291,6 +291,101 @@ pre {
   border: 1px solid #ef4444;
 }
 
+.muted {
+  color: #94a3b8;
+  font-size: 0.9rem;
+}
+
+.mono {
+  font-family: ui-monospace, monospace;
+  font-size: 0.8rem;
+}
+
+.graph-intro code {
+  font-size: 0.85em;
+}
+
+.graph-view-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: 1fr 1fr;
+}
+
+.graph-visual-column {
+  grid-column: 1 / -1;
+}
+
+.graph-svg {
+  width: 100%;
+  max-width: 720px;
+  height: auto;
+  border: 1px solid #1e293b;
+  border-radius: 12px;
+}
+
+.graph-table-wrap {
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+}
+
+.graph-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.graph-table th,
+.graph-table td {
+  padding: 0.45rem 0.6rem;
+  text-align: left;
+  border-bottom: 1px solid #1e293b;
+}
+
+.graph-table th {
+  background: #0f172a;
+  position: sticky;
+  top: 0;
+}
+
+.graph-json-split {
+  grid-template-columns: 1fr 1fr;
+}
+
+.graph-raw-json {
+  grid-column: 1 / -1;
+}
+
+.agent-output-meta {
+  margin-bottom: 0.75rem;
+}
+
+.small-hint {
+  font-size: 0.85rem;
+  margin: 0 0 0.5rem;
+}
+
+.agent-state-pre {
+  max-height: 360px;
+}
+
+.step-list details.step-latest > summary {
+  color: #93c5fd;
+}
+
+.step-list details {
+  margin-bottom: 0.5rem;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  padding: 0.25rem 0.5rem;
+  background: #020617;
+}
+
+.step-list details pre {
+  max-height: 280px;
+}
+
 @media (max-width: 960px) {
   .hero,
   .hitl-grid,

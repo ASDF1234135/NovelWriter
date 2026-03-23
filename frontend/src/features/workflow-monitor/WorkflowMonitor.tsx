@@ -31,6 +31,7 @@ export function WorkflowMonitor({ workflow }: Props) {
         <div>
           <strong>狀態</strong>
           <div>{workflow.run.status}</div>
+          <div className="muted">workflow_status: {String(state.workflow_status ?? "-")}</div>
         </div>
         <div>
           <strong>章節</strong>
@@ -42,6 +43,8 @@ export function WorkflowMonitor({ workflow }: Props) {
         <span>Epoch: {String(state.active_epoch_id ?? "-")}</span>
         <span>Anchor: {String(state.target_anchor_id ?? "-")}</span>
         <span>Reader Score: {String(state.last_reader_score ?? "-")}</span>
+        <span>HITL: {String(state.hitl_reason ?? workflow.run.hitl_reason ?? "-")}</span>
+        <span>resume_from: {String(state.resume_from ?? "-")}</span>
       </div>
     </section>
   );

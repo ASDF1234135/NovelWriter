@@ -6,7 +6,7 @@ from difflib import SequenceMatcher
 from app.domain.schema import PlanSupervisorOutput, SuggestionType, ViolationType
 from app.services.llm import MockLLMClient
 from app.services.workflow.context import WorkflowContext
-from app.services.workflow.masking import build_plan_supervisor_payload
+from app.services.workflow.masking import build_plan_supervisor_payload, compact_plan_supervisor_payload_for_prompt
 from app.services.workflow.profiles import get_profile
 
 
@@ -44,6 +44,10 @@ def run_plan_supervisor(state: dict, context: WorkflowContext) -> tuple[dict, di
     violations.extend(violation for violation in deterministic_violations if violation not in violations)
     feedback.extend(deterministic_feedback)
 
+    wc_violations, wc_feedback = _detect_word_count_violations(payload)
+    violations.extend(violation for violation in wc_violations if violation not in violations)
+    feedback.extend(wc_feedback)
+
     output = PlanSupervisorOutput(
         is_approved=not violations,
         violation_type=violations or [ViolationType.NONE],
@@ -59,6 +63,7 @@ def run_plan_supervisor(state: dict, context: WorkflowContext) -> tuple[dict, di
 
 
 def _build_plan_supervisor_prompt(payload) -> str:
+    compact_json = compact_plan_supervisor_payload_for_prompt(payload)
     return (
         "請依下列規則審核 JSON payload：\n"
         "1. 若 target_anchor_chapter > current_chapter_id，允許 partial convergence。\n"
@@ -73,12 +78,20 @@ def _build_plan_supervisor_prompt(payload) -> str:
         "若語意上為同一地點或別名、或過渡已寫清楚，則不可誤判。\n"
         "8. 若表層劇本把秘密行動、私下發現或 POV 不可能知道的資訊寫成公開常識，可使用 POV_LEAK。\n"
         "9. 若劇本涉及移動，必須能清楚判斷角色章末有效位置；若移動後位置無法落地，也可視為問題。\n"
-        f"\nPayload:\n{payload.model_dump_json(indent=2)}"
+        "10. 字數邊界：target_word_count 必須落在 chapter_word_min ~ chapter_word_max；否則標 WORD_COUNT_UNMATCH。\n"
+        "11. 字數與節點：若 len(must_include_beats) * words_per_beat_floor 明顯大於 target_word_count，"
+        "表示節點過多或字數過低，應標 WORD_COUNT_UNMATCH，並在 feedback 要求提高字數或刪減／合併 beats。\n"
+        "12. 字數與劇本密度：若 narrative_script 明顯過短、空泛，但 target_word_count 極高，可標 WORD_COUNT_UNMATCH，"
+        "要求降低字數或充實大綱；若 narrative_script 極度具體繁複但 target_word_count 過低，亦可標 WORD_COUNT_UNMATCH。\n"
+        "（後端已做部分確定性檢查；你的判斷用於補足邊界案例。）\n"
+        f"\nPayload:\n{compact_json}"
     )
 
 
 def _apply_deterministic_checks(output: PlanSupervisorOutput, payload) -> PlanSupervisorOutput:
-    violations, feedback = _detect_continuity_violations(payload)
+    continuity_violations, continuity_feedback = _detect_continuity_violations(payload)
+    word_violations, word_feedback = _detect_word_count_violations(payload)
+    violations = [*continuity_violations, *word_violations]
     if not violations:
         return output
 
@@ -87,7 +100,7 @@ def _apply_deterministic_checks(output: PlanSupervisorOutput, payload) -> PlanSu
         if violation not in merged_violations:
             merged_violations.append(violation)
     merged_feedback = output.feedback_to_agent.strip()
-    for message in feedback:
+    for message in [*continuity_feedback, *word_feedback]:
         if message not in merged_feedback:
             merged_feedback = f"{merged_feedback} {message}".strip()
 
@@ -98,6 +111,34 @@ def _apply_deterministic_checks(output: PlanSupervisorOutput, payload) -> PlanSu
         feedback_to_agent=merged_feedback,
         anchor_achieved=False if violations else output.anchor_achieved,
     )
+
+
+def _detect_word_count_violations(payload) -> tuple[list[ViolationType], list[str]]:
+    violations: list[ViolationType] = []
+    feedback: list[str] = []
+    tw = int(payload.target_word_count)
+    low = int(payload.chapter_word_min)
+    high = int(payload.chapter_word_max)
+    if tw < low:
+        violations.append(ViolationType.WORD_COUNT_UNMATCH)
+        feedback.append(f"target_word_count={tw} 低於允許下限 {low}，請提高字數或調整大綱。")
+    if tw > high:
+        violations.append(ViolationType.WORD_COUNT_UNMATCH)
+        feedback.append(f"target_word_count={tw} 高於允許上限 {high}，請降低字數或簡化大綱。")
+    beats = payload.must_include_beats or []
+    per = int(payload.words_per_beat_floor)
+    needed = len(beats) * per
+    if beats and needed > tw:
+        violations.append(ViolationType.WORD_COUNT_UNMATCH)
+        feedback.append(
+            f"字數目標 {tw} 與 {len(beats)} 個必寫節點不匹配（粗略下限約 {needed}，每節點 {per}）；"
+            "請提高 target_word_count 或刪減／合併 must_include_beats。"
+        )
+    script = (payload.narrative_script or "").strip()
+    if len(script) < 80 and tw > 5000:
+        violations.append(ViolationType.WORD_COUNT_UNMATCH)
+        feedback.append("表層劇本過短但字數目標過高；請降低 target_word_count 或充實 narrative_script。")
+    return violations, feedback
 
 
 def _detect_continuity_violations(payload) -> tuple[list[ViolationType], list[str]]:

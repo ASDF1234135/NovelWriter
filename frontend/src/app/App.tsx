@@ -1,13 +1,16 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   createStory,
   downloadChapterTxt,
   fetchChapter,
+  fetchChapterIfExists,
   fetchChapters,
   fetchGraph,
   fetchWorkflow,
   macroCompile,
   runChapter,
+  subscribeWorkflowEvents,
+  sendDraftEdit,
   sendHitlDecision,
   sendOutlineEdit,
   sendStateInjection,
@@ -31,6 +34,36 @@ export default function App() {
   const [selectedChapter, setSelectedChapter] = useState<ChapterContent | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>("");
+  const [chapterAlreadyCompleted, setChapterAlreadyCompleted] = useState(false);
+  const workflowEventsUnsubRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    return () => {
+      workflowEventsUnsubRef.current?.();
+      workflowEventsUnsubRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!storyId || chapterId < 1) {
+      setChapterAlreadyCompleted(false);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const row = await fetchChapterIfExists(storyId, chapterId);
+        if (!cancelled) {
+          setChapterAlreadyCompleted(row?.status === "completed");
+        }
+      } catch {
+        if (!cancelled) setChapterAlreadyCompleted(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [storyId, chapterId]);
 
   const storySummary = useMemo(() => {
     if (!macroData) {
@@ -80,16 +113,57 @@ export default function App() {
     if (!storyId) return;
     setBusy(true);
     setError("");
+    workflowEventsUnsubRef.current?.();
+    workflowEventsUnsubRef.current = null;
     try {
-      const result = await runChapter(storyId, chapterId);
-      setWorkflow(result);
-      setGraph(await fetchGraph(storyId));
-      const chapterList = await fetchChapters(storyId);
-      setChapters(chapterList);
-      setSelectedChapter(await fetchChapter(storyId, chapterId));
+      const initial = await runChapter(storyId, chapterId);
+      setWorkflow(initial);
+      const runId = initial.run.run_id;
+
+      workflowEventsUnsubRef.current = subscribeWorkflowEvents(runId, {
+        onProgress: async () => {
+          try {
+            setWorkflow(await fetchWorkflow(runId));
+            if (storyId) {
+              try {
+                setGraph(await fetchGraph(storyId));
+              } catch {
+                /* graph optional during run */
+              }
+            }
+          } catch {
+            /* ignore transient fetch errors */
+          }
+        },
+        onEnd: async () => {
+          workflowEventsUnsubRef.current = null;
+          try {
+            setWorkflow(await fetchWorkflow(runId));
+            if (storyId) {
+              setGraph(await fetchGraph(storyId));
+              setChapters(await fetchChapters(storyId));
+              try {
+                setSelectedChapter(await fetchChapter(storyId, chapterId));
+              } catch {
+                /* chapter row may be missing on hard failure */
+              }
+              const probe = await fetchChapterIfExists(storyId, chapterId);
+              setChapterAlreadyCompleted(probe?.status === "completed");
+            }
+          } catch (err) {
+            setError(err instanceof Error ? err.message : "Workflow 結束後更新失敗");
+          } finally {
+            setBusy(false);
+          }
+        },
+        onError: (err) => {
+          workflowEventsUnsubRef.current = null;
+          setError(err.message);
+          setBusy(false);
+        },
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to run chapter");
-    } finally {
       setBusy(false);
     }
   }
@@ -102,6 +176,12 @@ export default function App() {
       setChapters(await fetchChapters(storyId));
       if (selectedChapter) {
         setSelectedChapter(await fetchChapter(storyId, selectedChapter.chapter_id));
+      }
+      try {
+        const probe = await fetchChapterIfExists(storyId, chapterId);
+        setChapterAlreadyCompleted(probe?.status === "completed");
+      } catch {
+        setChapterAlreadyCompleted(false);
       }
     }
   }
@@ -118,9 +198,10 @@ export default function App() {
             1. Macro Compile
           </button>
           <input type="number" value={chapterId} onChange={(event) => setChapterId(Number(event.target.value))} min={1} />
-          <button onClick={handleRunChapter} disabled={!storyId || busy}>
+          <button onClick={handleRunChapter} disabled={!storyId || busy || chapterAlreadyCompleted} title={chapterAlreadyCompleted ? "本章已完整生成並入庫，無法再次執行" : undefined}>
             2. Run Chapter
           </button>
+          {chapterAlreadyCompleted ? <span className="muted">（第 {chapterId} 章已完成，無法重跑流程）</span> : null}
           <button onClick={refreshWorkflow} disabled={!workflow || busy}>
             Refresh
           </button>
@@ -182,6 +263,22 @@ export default function App() {
         onOutlineEdit={async (payload) => {
           if (!workflow) return;
           setWorkflow(await sendOutlineEdit(workflow.run.run_id, payload));
+        }}
+        onDraftEdit={async (payload) => {
+          if (!workflow) return;
+          setBusy(true);
+          setError("");
+          try {
+            setWorkflow(await sendDraftEdit(workflow.run.run_id, payload));
+            if (storyId) {
+              setGraph(await fetchGraph(storyId));
+              setChapters(await fetchChapters(storyId));
+            }
+          } catch (err) {
+            setError(err instanceof Error ? err.message : "Draft edit failed");
+          } finally {
+            setBusy(false);
+          }
         }}
         onStateInjection={async (payload) => {
           if (!workflow) return;

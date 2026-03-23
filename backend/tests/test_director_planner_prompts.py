@@ -34,14 +34,12 @@ def test_director_prompt_includes_story_premise_volume_summary_and_anchor_descri
     assert "## 故事核心" in prompt
     assert "story_premise: 一名被流放的年輕騎士回到王都，追查皇室命案背後的真正凶手。" in prompt
     assert "volume_summary: 建立世界與主角困境，鋪設核心衝突。" in prompt
-    assert "volume_target_words: 18000" in prompt
-    assert "suggested_target_word_count" in prompt
-    assert "suggested_word_count_range" in prompt
+    assert "本章字數由後續 Planner 決定" in prompt
     assert "current_anchor_description: 主角離開原本安穩場域，正式捲入主線。" in prompt
     assert "visible_unachieved_anchors" in prompt
     assert "anchor_01" in prompt
     assert "bible_context: 世界規則：皇室血脈涉及禁忌契約。" in prompt
-    assert "target_word_count 必須優先參考 volume_target_words" in prompt
+    assert "請決定本章 POV、Epoch、tone 與 narrative_directive" in prompt
     assert "narrative_directive 必須明確指出本章要新增的劇情推進" in prompt
     assert "起點、目的地或章末有效位置" in prompt
 
@@ -74,9 +72,15 @@ def test_planner_prompt_includes_story_premise_volume_summary_and_anchor_descrip
             continuity_notes=["灰鴉的警告尚未處理。"],
             recent_entity_names=["Kaelen", "灰鴉"],
             prior_feedback=[],
+            default_chapter_words=2500,
+            chapter_word_min=800,
+            chapter_word_max=12000,
         )
     )
 
+    assert "## 字數與本章內容（必做）" in prompt
+    assert "target_word_count" in prompt
+    assert "800 ~ 12000" in prompt
     assert "## 前情提要" in prompt
     assert "## 本章劇情發展方向" in prompt
     assert "- story_premise: 一名被流放的年輕騎士回到王都，追查皇室命案背後的真正凶手。" in prompt

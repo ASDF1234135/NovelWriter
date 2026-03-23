@@ -13,6 +13,7 @@ from app.domain.schema import (
     StateTransactionStatus,
     StateUpdaterOutput,
     StoryInput,
+    WorkflowStatus,
 )
 from app.domain.state import build_initial_state
 from app.repositories.sqlite.story_repository import StoryRepository
@@ -25,14 +26,30 @@ from app.services.vector_store import VectorStore
 from app.services.workflow.context import WorkflowContext
 from app.services.workflow.graph import build_chapter_graph
 
+_ALLOWED_HITL_RESUME_NODES = frozenset(
+    {
+        "director",
+        "planner",
+        "author",
+        "draft_supervisor",
+        "reader",
+        "prose_polish",
+        "state_updater",
+    }
+)
 
-class HitlNotWaitingError(ValueError):
-    """Raised when a HITL action is submitted but the run is not paused for HITL."""
+
+class HitlNotWaitingError(RuntimeError):
+    """Raised when HITL APIs are called but the run is not paused for human input."""
 
 
-def _assert_hitl_waiting(state: dict) -> None:
-    if state.get("workflow_status") != "WAITING_HITL" or not state.get("requires_hitl"):
-        raise HitlNotWaitingError("This run is not waiting for human review (expected WAITING_HITL + requires_hitl).")
+class ChapterAlreadyCompletedError(RuntimeError):
+    """Raised when attempting to run the full agent pipeline for a chapter already committed as completed."""
+
+
+def _ensure_hitl_waiting(state: dict) -> None:
+    if not state.get("requires_hitl") or state.get("workflow_status") != WorkflowStatus.WAITING_HITL.value:
+        raise HitlNotWaitingError("Workflow is not waiting for HITL")
 
 
 class WorkflowService:
@@ -121,14 +138,27 @@ class WorkflowService:
         }
 
     def run_chapter(self, story_id: str, chapter_id: int) -> dict:
+        """Blocking: create run and execute graph to completion (tests / scripts)."""
+        wf = self.start_run_chapter(story_id, chapter_id)
+        self.execute_stored_run(wf["run"]["run_id"])
+        return self.get_workflow(wf["run"]["run_id"])
+
+    def start_run_chapter(self, story_id: str, chapter_id: int) -> dict:
+        """Create workflow run and persist initial state only (graph not executed yet)."""
+        story = self.story_repository.get_story(story_id)
+        if not story:
+            raise KeyError(f"Story not found: {story_id}")
+        existing = self.story_repository.get_chapter(story_id, chapter_id)
+        if existing and (existing.get("status") or "").lower() == "completed":
+            raise ChapterAlreadyCompletedError(
+                f"Chapter {chapter_id} is already generated and stored (status=completed); "
+                "full agent run is not allowed for this chapter."
+            )
         unachieved_anchors = [
             anchor
             for anchor in self.story_repository.list_anchors(story_id)
             if anchor["chapter_target"] >= chapter_id
         ]
-        story = self.story_repository.get_story(story_id)
-        if not story:
-            raise KeyError(f"Story not found: {story_id}")
         pov_raw = (story.get("protagonist_character_id") or "").strip()
         pov_character_id = pov_raw if pov_raw else "char_public_observer"
         initial_state = build_initial_state(
@@ -141,12 +171,23 @@ class WorkflowService:
             pov_character_id=pov_character_id,
         )
         run = self.workflow_repository.create_run(story_id, chapter_id, initial_state)
-        final_state = self._execute_workflow(run.run_id, initial_state)
-        return {
-            "run": self.workflow_repository.get_run(run.run_id).model_dump(mode="json"),
-            "state": final_state,
-            "steps": self.workflow_repository.list_steps(run.run_id),
-        }
+        return self.get_workflow(run.run_id)
+
+    def execute_stored_run(self, run_id: str) -> None:
+        """Resume graph from DB state (used after start_run_chapter or HITL)."""
+        state = self.workflow_repository.get_run_state(run_id)
+        try:
+            self._execute_workflow(run_id, state)
+        except Exception as exc:
+            try:
+                state = self.workflow_repository.get_run_state(run_id)
+                state["workflow_status"] = WorkflowStatus.FAILED.value
+                state["requires_hitl"] = False
+                state["hitl_reason"] = str(exc)[:500]
+                self.workflow_repository.update_run(run_id, state)
+            except Exception:
+                pass
+            raise
 
     def get_workflow(self, run_id: str) -> dict:
         run = self.workflow_repository.get_run(run_id)
@@ -173,21 +214,30 @@ class WorkflowService:
 
     def handle_hitl_decision(self, run_id: str, request: HitlDecisionRequest) -> dict:
         state = self.workflow_repository.get_run_state(run_id)
+        _ensure_hitl_waiting(state)
+        prev_hitl_reason = state.get("hitl_reason", "")
         self.workflow_repository.append_hitl_action(run_id, "decision", request.model_dump(mode="json"))
-        state["requires_hitl"] = False
-        state["hitl_reason"] = ""
-        state["hitl_decision_mode"] = "NONE"
-        state["workflow_status"] = "RUNNING"
-        state["pending_hitl_options"] = []
+
         if request.option_id == "relax_word_count":
             state["target_word_count"] = max(800, int(state["target_word_count"] * 0.6))
-        if request.option_id == "force_rewrite_plan":
+        if request.option_id in ("force_rewrite_plan", "allow_adjust_anchor"):
             state["plan_retry_count"] = 0
             state["plan_feedback"] = []
-        if state.get("hitl_reason") == "Draft_Loop_Exceeded":
+        if request.option_id == "keep_current_logic":
             state["draft_loop_retry_count"] = 0
             state["draft_retry_count"] = 0
             state["reader_retry_count"] = 0
+
+        if prev_hitl_reason == "Draft_Loop_Exceeded":
+            state["draft_loop_retry_count"] = 0
+            state["draft_retry_count"] = 0
+            state["reader_retry_count"] = 0
+
+        state["requires_hitl"] = False
+        state["hitl_reason"] = ""
+        state["hitl_decision_mode"] = "NONE"
+        state["workflow_status"] = WorkflowStatus.RUNNING.value
+        state["pending_hitl_options"] = []
         state["resume_from"] = state.get("resume_from", "director")
         self.workflow_repository.update_run(run_id, state)
         self._execute_workflow(run_id, state)
@@ -195,6 +245,8 @@ class WorkflowService:
 
     def handle_hitl_outline_edit(self, run_id: str, request: HitlOutlineEditRequest) -> dict:
         state = self.workflow_repository.get_run_state(run_id)
+        _ensure_hitl_waiting(state)
+        prev_hitl_reason = state.get("hitl_reason", "")
         state["ground_truth_events"] = [event.model_dump(mode="json") for event in request.ground_truth_events]
         if request.narrative_script:
             state["narrative_script"] = request.narrative_script
@@ -202,7 +254,11 @@ class WorkflowService:
         state["hitl_reason"] = ""
         state["hitl_decision_mode"] = "NONE"
         state["pending_hitl_options"] = []
-        state["resume_from"] = "author"
+        state["workflow_status"] = WorkflowStatus.RUNNING.value
+        if prev_hitl_reason == "Plan_Loop_Exceeded":
+            state["resume_from"] = "planner"
+        else:
+            state["resume_from"] = "author"
         self.workflow_repository.append_hitl_action(run_id, "outline_edit", request.model_dump(mode="json"))
         self.workflow_repository.update_run(run_id, state)
         self._execute_workflow(run_id, state)
@@ -210,13 +266,36 @@ class WorkflowService:
 
     def handle_hitl_state_injection(self, run_id: str, request: HitlStateInjectionRequest) -> dict:
         state = self.workflow_repository.get_run_state(run_id)
+        _ensure_hitl_waiting(state)
+        resume = state.get("resume_from", "author")
         self.graph_store.apply_mutations(state["story_id"], request.mutations)
         state["requires_hitl"] = False
         state["hitl_reason"] = ""
         state["hitl_decision_mode"] = "NONE"
         state["pending_hitl_options"] = []
-        state["resume_from"] = state.get("resume_from", "author")
+        state["workflow_status"] = WorkflowStatus.RUNNING.value
+        state["resume_from"] = resume
         self.workflow_repository.append_hitl_action(run_id, "state_injection", request.model_dump(mode="json"))
+        self.workflow_repository.update_run(run_id, state)
+        self._execute_workflow(run_id, state)
+        return self.get_workflow(run_id)
+
+    def handle_hitl_draft_edit(self, run_id: str, request: HitlDraftEditRequest) -> dict:
+        state = self.workflow_repository.get_run_state(run_id)
+        _ensure_hitl_waiting(state)
+        resume = (request.resume_from or "reader").strip()
+        if resume not in _ALLOWED_HITL_RESUME_NODES:
+            resume = "reader"
+        state["current_draft"] = request.chapter_content
+        best_raw = (request.best_draft_content or "").strip()
+        state["best_draft_content"] = best_raw if best_raw else request.chapter_content
+        state["requires_hitl"] = False
+        state["hitl_reason"] = ""
+        state["hitl_decision_mode"] = "NONE"
+        state["pending_hitl_options"] = []
+        state["workflow_status"] = WorkflowStatus.RUNNING.value
+        state["resume_from"] = resume
+        self.workflow_repository.append_hitl_action(run_id, "draft_edit", request.model_dump(mode="json"))
         self.workflow_repository.update_run(run_id, state)
         self._execute_workflow(run_id, state)
         return self.get_workflow(run_id)

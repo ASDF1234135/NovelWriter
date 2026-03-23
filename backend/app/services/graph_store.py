@@ -34,6 +34,10 @@ class GraphStore(Protocol):
     def query_context(self, request: GraphQueryRequest) -> GraphSnapshot:
         ...
 
+    def dump_story_graph(self, story_id: str) -> GraphSnapshot:
+        """Return all nodes and edges for the story (no POV / epoch / epistemic filtering)."""
+        ...
+
     def apply_mutations(self, story_id: str, mutations: Iterable[NodeMutation | EdgeMutation]) -> None:
         ...
 
@@ -69,6 +73,12 @@ class InMemoryGraphStore:
             and _is_visible_to_pov(edge, request.pov_character_id)
             and _is_active_edge(edge)
         ]
+        return GraphSnapshot(nodes=nodes, edges=edges)
+
+    def dump_story_graph(self, story_id: str) -> GraphSnapshot:
+        self.seed_story(story_id)
+        nodes = list(self.story_nodes[story_id].values())
+        edges = list(self.story_edges[story_id].values())
         return GraphSnapshot(nodes=nodes, edges=edges)
 
     def clear_macro_cast_characters(self, story_id: str) -> None:
@@ -254,6 +264,33 @@ class Neo4jGraphStore:
                 nodes = [GraphNodeAdapter.from_neo4j_node(node) for node in raw_nodes]
                 edges = [GraphNodeAdapter.edge_from_neo4j(edge) for edge in raw_edges]
                 result = GraphSnapshot(nodes=nodes, edges=edges)
+        self._run_with_retry(operation)
+        return result or GraphSnapshot(nodes=[], edges=[])
+
+    def dump_story_graph(self, story_id: str) -> GraphSnapshot:
+        self.seed_story(story_id)
+        result: GraphSnapshot | None = None
+
+        def operation() -> None:
+            nonlocal result
+            with self.driver.session(database=self.database) as session:
+                node_row = session.run(
+                    "MATCH (n:StoryNode {story_id: $story_id}) RETURN collect(DISTINCT n) AS nodes",
+                    story_id=story_id,
+                ).single()
+                edge_row = session.run(
+                    """
+                    MATCH (a:StoryNode {story_id: $story_id})-[r]->(b:StoryNode {story_id: $story_id})
+                    RETURN collect(DISTINCT r) AS rels
+                    """,
+                    story_id=story_id,
+                ).single()
+                raw_nodes = node_row["nodes"] if node_row else []
+                raw_rels = edge_row["rels"] if edge_row else []
+                nodes = [GraphNodeAdapter.from_neo4j_node(n) for n in raw_nodes]
+                edges = [_graph_edge_from_neo4j_relationship(rel) for rel in raw_rels]
+                result = GraphSnapshot(nodes=nodes, edges=edges)
+
         self._run_with_retry(operation)
         return result or GraphSnapshot(nodes=[], edges=[])
 
@@ -443,21 +480,33 @@ class GraphNodeAdapter:
 
     @staticmethod
     def edge_from_neo4j(rel: object) -> GraphEdge:
-        props = dict(rel)
-        return GraphEdge(
-            edge_id=props["edge_id"],
-            source_id=props["source_id"],
-            relation_type=props["relation_type"],
-            target_id=props["target_id"],
-            valid_epoch=props["valid_epoch"],
-            start_event_id=props["start_event_id"],
-            end_event_id=props.get("end_event_id"),
-            is_truth=props["is_truth"],
-            is_public=props.get("is_public", False),
-            known_by=props.get("known_by", []),
-            holder=props.get("holder", []),
-            context_details=props.get("context_details", ""),
-        )
+        return _graph_edge_from_neo4j_relationship(rel)
+
+
+def _graph_edge_from_neo4j_relationship(rel: object) -> GraphEdge:
+    """Build GraphEdge from a Neo4j relationship; tolerates missing optional props."""
+    props = dict(rel)
+    rel_type_raw = props.get("relation_type") or getattr(rel, "type", None)
+    if rel_type_raw is None:
+        rel_type_raw = "LOCATED_IN"
+    relation_type = EdgeType(rel_type_raw) if isinstance(rel_type_raw, str) else rel_type_raw
+    source_id = props.get("source_id", "")
+    target_id = props.get("target_id", "")
+    edge_id = props.get("edge_id") or f"{source_id}:{relation_type.value}:{target_id}"
+    return GraphEdge(
+        edge_id=edge_id,
+        source_id=source_id,
+        relation_type=relation_type,
+        target_id=target_id,
+        valid_epoch=props.get("valid_epoch", ""),
+        start_event_id=props.get("start_event_id", ""),
+        end_event_id=props.get("end_event_id"),
+        is_truth=bool(props.get("is_truth", True)),
+        is_public=bool(props.get("is_public", False)),
+        known_by=list(props.get("known_by", []) or []),
+        holder=list(props.get("holder", []) or []),
+        context_details=str(props.get("context_details", "") or ""),
+    )
 
 
 def _extract_query_terms(narrative_directive: str) -> list[str]:

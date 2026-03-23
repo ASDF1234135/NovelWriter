@@ -221,6 +221,20 @@ def build_chapter_graph(context: WorkflowContext):
         workflow_repository.update_run(context.run_id, {**state, **merged})
         return merged
 
+    def prose_polish_node(state: AgentWorkflowState) -> dict:
+        start = timed()
+        output = run_prose_polish(state, context)
+        merged = {**output}
+        recorder.record(
+            "prose_polish",
+            dict(state),
+            merged,
+            latency_ms=elapsed_ms(start),
+            route_decision="state_updater",
+        )
+        workflow_repository.update_run(context.run_id, {**state, **merged})
+        return merged
+
     def state_updater_node(state: AgentWorkflowState) -> dict:
         start = timed()
         output = run_state_updater(state, context)
@@ -322,8 +336,8 @@ def build_chapter_graph(context: WorkflowContext):
             "director": "director",
             "planner": "planner",
             "author": "author",
-            "reader": "reader",
             "state_updater": "state_updater",
+            "prose_polish": "prose_polish",
         },
     )
     graph.add_edge("director", "graph_rag")

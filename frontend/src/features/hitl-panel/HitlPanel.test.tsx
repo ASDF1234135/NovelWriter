@@ -7,6 +7,7 @@ describe("HitlPanel", () => {
     const onDecision = vi.fn().mockResolvedValue(undefined);
     const onOutlineEdit = vi.fn().mockResolvedValue(undefined);
     const onStateInjection = vi.fn().mockResolvedValue(undefined);
+    const onDraftEdit = vi.fn().mockResolvedValue(undefined);
 
     render(
       <HitlPanel
@@ -28,6 +29,7 @@ describe("HitlPanel", () => {
         onDecision={onDecision}
         onOutlineEdit={onOutlineEdit}
         onStateInjection={onStateInjection}
+        onDraftEdit={onDraftEdit}
       />,
     );
 

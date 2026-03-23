@@ -54,7 +54,8 @@
 5. `author`
 6. `draft_supervisor`
 7. `reader`
-8. `state_updater`
+8. `prose_polish`（僅在 reader 核准或耗盡重試、即將定稿時執行；入庫前輕修飾：繁體統一、標點分段等，不改劇情）
+9. `state_updater`
 
 其中 `plan_supervisor`、`draft_supervisor`、`reader` 都可能把流程打回前一層；若重試次數過多，會進入 HITL。
 
@@ -318,7 +319,18 @@
 - 通常會退回 `author`
 - 若多次仍不理想，系統可能保留最高分版本往下走
 
-### 8. State Updater
+### 8. Prose polish
+
+用途：
+
+- 在 **入庫前** 對已定稿選定的正文做最後輕修飾（標點、分段、病句、格式漂移）
+- **統一為台灣繁體中文**（簡體或混用時轉為繁體慣用寫法；專名已在文中固定者可保留）
+
+限制（後端硬護欄）：
+
+- 字數變化與與原文相似度須在設定門檻內，否則捨棄修飾、沿用 reader 通過之原文
+
+### 9. State Updater
 
 用途：
 
@@ -384,11 +396,19 @@
 - 新的 `ground_truth_events`
 - 新的 `narrative_script`
 
-提交後流程會從 `author` 繼續。
+提交後續跑節點依暫停原因：**`Plan_Loop_Exceeded` 時從 `planner` 重算**；**`Draft_Loop_Exceeded` 時從 `author`**。
+
+### 正文人工修訂
+
+人工可直接覆寫 `current_draft`（可選同步 `best_draft_content`），並指定 `resume_from`（預設 `reader`，亦可 `draft_supervisor` 或 `author`）。API：`POST /workflows/{run_id}/hitl/draft-edit`。
 
 ### 狀態注入
 
-人工也可以直接對 graph 注入 mutation，修正世界狀態後再續跑。
+人工也可以直接對 graph 注入 mutation，修正世界狀態後再續跑（保留暫停當下的 `resume_from`）。
+
+### HITL API 防呆
+
+若 run 並非 `WAITING_HITL` / `requires_hitl`，HITL 相關 POST 會回 **409**，避免誤寫 state。
 
 ## 每章最終會留下什麼
 

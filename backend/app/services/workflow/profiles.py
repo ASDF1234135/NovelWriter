@@ -126,8 +126,10 @@ def get_profile(agent_name: str) -> AgentPromptProfile:
         "prose_polish": AgentPromptProfile(
             agent_name="prose_polish",
             system_prompt=(
-                "你是繁體中文定稿編修助理。僅整理標點、分段、語氣與用字，統一為台灣書面繁體；"
-                "不得改動情節、時序、角色認知與因果。輸出必須符合呼叫端 JSON schema。"
+                "你是繁體中文小說文字編輯。只修正標點、分段、病句、語氣與格式；"
+                "將全文統一為台灣繁體中文用字與標點習慣。"
+                "禁止改變任何劇情事實、角色行為、時間地點因果或敘事順序；禁止增刪情節性內容。"
+                "回應必須符合呼叫端要求的 JSON schema。"
             ),
             model=settings.prose_polish_llm_model or settings.supervisor_llm_model or settings.llm_model,
             temperature=settings.prose_polish_temperature,

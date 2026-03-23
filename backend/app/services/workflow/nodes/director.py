@@ -17,16 +17,14 @@ def run_director(state: dict, context: WorkflowContext) -> dict:
     story = context.story_repository.get_story(state["story_id"]) or {}
     volumes = context.story_repository.list_volumes(state["story_id"])
     bible_context = context.bible_service.compile_context(story.get("bible_json", {}))
-    guidance = _compute_target_word_guidance(state["chapter_id"], volumes, next_anchor)
+    current_volume = _resolve_current_volume(state["chapter_id"], volumes)
     if not isinstance(context.llm_client, MockLLMClient):
         profile = get_profile("director")
         prompt = _build_director_prompt(
-            state, story, volumes, next_anchor, anchor_prompt_window, bible_context, guidance
+            state, story, volumes, next_anchor, anchor_prompt_window, bible_context, current_volume
         )
         output, _ = context.llm_client.invoke_json(prompt, DirectorOutput, profile)
-        return output.model_dump(mode="json") | {
-            "target_word_count": _clamp_target_word_count(output.target_word_count, guidance),
-        }
+        return output.model_dump(mode="json")
 
     output = DirectorOutput(
         chapter_id=state["chapter_id"],
@@ -38,7 +36,6 @@ def run_director(state: dict, context: WorkflowContext) -> dict:
             else f"推進第 {state['chapter_id']} 章的結局收束"
         ),
         tone_direction="懸疑壓抑",
-        target_word_count=guidance["suggested_target_word_count"],
         target_anchor_id=next_anchor["anchor_id"] if next_anchor else None,
     )
     return output.model_dump()
@@ -51,24 +48,20 @@ def _build_director_prompt(
     next_anchor: dict[str, Any] | None,
     visible_unachieved_anchors: list[dict[str, Any]],
     bible_context: str = "",
-    guidance: dict[str, Any] | None = None,
+    current_volume: dict[str, Any] | None = None,
 ) -> str:
-    current_volume = _resolve_current_volume(state["chapter_id"], volumes)
-    guidance = guidance or _compute_target_word_guidance(state["chapter_id"], volumes, next_anchor)
+    vol = current_volume if current_volume is not None else _resolve_current_volume(state["chapter_id"], volumes)
+    vol = vol or {}
     return (
         "## 章節定位\n"
         f"- chapter_id: {state['chapter_id']}\n\n"
         "## 故事核心\n"
         f"- story_title: {story.get('title', '')}\n"
         f"- story_premise: {story.get('premise', '')}\n\n"
-        "## 當前卷資訊\n"
-        f"- volume_title: {(current_volume or {}).get('title', '')}\n"
-        f"- volume_summary: {(current_volume or {}).get('summary', '')}\n\n"
-        f"- volume_target_words: {(current_volume or {}).get('target_volume_words', 0)}\n"
-        f"- volume_chapter_range: {((current_volume or {}).get('chapter_start', ''), (current_volume or {}).get('chapter_end', ''))}\n"
-        f"- chapter_position_in_volume: {guidance['chapter_position_in_volume']}/{guidance['volume_chapter_count']}\n"
-        f"- suggested_target_word_count: {guidance['suggested_target_word_count']}\n"
-        f"- suggested_word_count_range: {guidance['min_target_word_count']}-{guidance['max_target_word_count']}\n\n"
+        "## 當前卷資訊（敘事節奏參考；本章字數由後續 Planner 決定，與卷字數預算無硬性綁定）\n"
+        f"- volume_title: {vol.get('title', '')}\n"
+        f"- volume_summary: {vol.get('summary', '')}\n"
+        f"- volume_chapter_range: {(vol.get('chapter_start', ''), vol.get('chapter_end', ''))}\n\n"
         "## 本章主要推進目標\n"
         f"- current_anchor_id: {(next_anchor or {}).get('anchor_id')}\n"
         f"- current_anchor_title: {(next_anchor or {}).get('title', '')}\n"
@@ -80,8 +73,7 @@ def _build_director_prompt(
         f"- bible_context: {bible_context[:1800]}\n"
         f"- graph_hint: {state.get('graph_context', '')[:1800]}\n\n"
         "## 你的輸出要求\n"
-        "- 請決定本章 POV、Epoch、tone、target_word_count 與 narrative_directive。\n"
-        "- target_word_count 必須優先參考 volume_target_words、chapter_position_in_volume 與 suggested_target_word_count，不可明顯偏離 suggested_word_count_range。\n"
+        "- 請決定本章 POV、Epoch、tone 與 narrative_directive。\n"
         "- narrative_directive 必須明確指出本章要新增的劇情推進，不能只寫氛圍延續。\n"
         "- 請讓本章至少推進一個新的行動或發現，並與當前 anchor 收斂。\n"
         "- 若本章涉及移動、潛入、撤離或追逐，必須把起點、目的地或章末有效位置寫清楚。\n"
@@ -96,50 +88,3 @@ def _resolve_current_volume(chapter_id: int, volumes: list[dict[str, Any]]) -> d
         if isinstance(start, int) and isinstance(end, int) and start <= chapter_id <= end:
             return volume
     return None
-
-
-def _compute_target_word_guidance(
-    chapter_id: int,
-    volumes: list[dict[str, Any]],
-    next_anchor: dict[str, Any] | None,
-) -> dict[str, int]:
-    current_volume = _resolve_current_volume(chapter_id, volumes)
-    volume_start = int((current_volume or {}).get("chapter_start", chapter_id))
-    volume_end = int((current_volume or {}).get("chapter_end", chapter_id))
-    volume_chapter_count = max(1, volume_end - volume_start + 1)
-    chapter_position = max(1, chapter_id - volume_start + 1)
-    volume_target_words = int((current_volume or {}).get("target_volume_words", 0) or 0)
-    fallback_words = volume_chapter_count * 2500
-    base_target = max(1600, int(round((volume_target_words or fallback_words) / volume_chapter_count / 50) * 50))
-
-    multiplier = 1.0
-    if chapter_position == 1:
-        multiplier += 0.08
-    if chapter_position == volume_chapter_count:
-        multiplier += 0.10
-    anchor_target = int(next_anchor.get("chapter_target", -999)) if next_anchor else -999
-    if anchor_target == chapter_id:
-        multiplier += 0.12
-    elif volume_start <= anchor_target <= volume_end:
-        distance_to_anchor = anchor_target - chapter_id
-        if distance_to_anchor == 1:
-            multiplier += 0.08
-        elif distance_to_anchor == 2:
-            multiplier += 0.04
-
-    suggested = max(1600, int(round(base_target * multiplier / 50) * 50))
-    min_target = max(1200, int(round(base_target * 0.8 / 50) * 50))
-    max_target = max(min_target, int(round(base_target * 1.2 / 50) * 50))
-    return {
-        "chapter_position_in_volume": chapter_position,
-        "volume_chapter_count": volume_chapter_count,
-        "suggested_target_word_count": suggested,
-        "min_target_word_count": min_target,
-        "max_target_word_count": max_target,
-    }
-
-
-def _clamp_target_word_count(target_word_count: int, guidance: dict[str, Any]) -> int:
-    lower = int(guidance["min_target_word_count"])
-    upper = int(guidance["max_target_word_count"])
-    return max(lower, min(upper, target_word_count))

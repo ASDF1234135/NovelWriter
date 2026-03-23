@@ -1,4 +1,6 @@
-from app.domain.schema import EventOutline, HitlOutlineEditRequest, StoryInput
+import pytest
+
+from app.domain.schema import EventOutline, HitlDecisionRequest, HitlOutlineEditRequest, StoryInput
 from app.domain.state import build_initial_state
 from app.repositories.sqlite.database import SQLiteDatabase
 from app.repositories.sqlite.story_repository import StoryRepository
@@ -9,7 +11,7 @@ from app.services.graph_store import InMemoryGraphStore
 from app.services.llm import MockLLMClient
 from app.services.vector_store import InMemoryVectorStore
 from app.services.workflow.graph import build_chapter_graph
-from app.services.workflow.service import WorkflowService
+from app.services.workflow.service import ChapterAlreadyCompletedError, HitlNotWaitingError, WorkflowService
 
 
 def build_service(db_path: str) -> WorkflowService:
@@ -49,6 +51,22 @@ def test_full_workflow_runs_end_to_end(tmp_path) -> None:
     assert result["state"]["current_draft"]
     assert result["steps"]
     assert result["state"]["pov_character_id"] == macro["protagonist_character_id"]
+
+
+def test_run_chapter_rejects_when_chapter_already_completed(tmp_path) -> None:
+    service = build_service(str(tmp_path / "workflow_dup_chapter.sqlite3"))
+    story = service.create_story(
+        StoryInput(
+            title="測試故事",
+            premise="主角回到王都追查命案。",
+            bible={"rules": ["秘密不能無代價揭露"]},
+            target_total_words=30000,
+        )
+    )
+    service.macro_compile(story["story_id"])
+    service.run_chapter(story["story_id"], 1)
+    with pytest.raises(ChapterAlreadyCompletedError):
+        service.run_chapter(story["story_id"], 1)
 
 
 def test_story_persists_retry_limits(tmp_path) -> None:
@@ -145,7 +163,7 @@ def test_draft_and_reader_share_combined_retry_limit(tmp_path, monkeypatch) -> N
     assert final_state["draft_retry_count"] == 1
     assert final_state["reader_retry_count"] == 1
     assert final_state["draft_loop_retry_count"] == 2
-    assert final_state["reader_route"] == "state_updater"
+    assert final_state["reader_route"] == "prose_polish"
     assert final_state["reader_feedback"] == [
         {
             "score": 55,
@@ -207,7 +225,7 @@ def test_reader_pass_does_not_append_feedback_or_return_author(tmp_path, monkeyp
     final_state = build_chapter_graph(service._build_context(run.run_id)).invoke(initial_state)
 
     assert final_state["workflow_status"] == "COMPLETED"
-    assert final_state["reader_route"] == "state_updater"
+    assert final_state["reader_route"] == "prose_polish"
     assert final_state["reader_feedback"] == []
 
 
@@ -232,6 +250,7 @@ def test_hitl_outline_edit_auto_resumes(tmp_path) -> None:
         pov_character_id=story_row.get("protagonist_character_id") or "char_public_observer",
     )
     state["requires_hitl"] = True
+    state["workflow_status"] = "WAITING_HITL"
     state["hitl_reason"] = "Plan_Loop_Exceeded"
     state["hitl_decision_mode"] = "MANUAL_EDIT"
     state["resume_from"] = "planner"
@@ -250,6 +269,101 @@ def test_hitl_outline_edit_auto_resumes(tmp_path) -> None:
     assert response["run"]["status"] == "COMPLETED"
     assert response["state"]["workflow_status"] == "COMPLETED"
     assert response["state"]["state_transaction_id"]
+
+
+def test_hitl_decision_resets_counters_after_draft_loop(monkeypatch, tmp_path) -> None:
+    service = build_service(str(tmp_path / "workflow_hitl_draft_reset.sqlite3"))
+    story = service.create_story(
+        StoryInput(
+            title="測試故事",
+            premise="主角回到王都追查命案。",
+            bible={"rules": ["秘密不能無代價揭露"]},
+            target_total_words=30000,
+        )
+    )
+    service.macro_compile(story["story_id"])
+    anchors = service.story_repository.list_anchors(story["story_id"])
+    story_row = service.story_repository.get_story(story["story_id"])
+    state = build_initial_state(
+        story["story_id"],
+        1,
+        anchors,
+        "trace-hitl-draft",
+        pov_character_id=story_row.get("protagonist_character_id") or "char_public_observer",
+    )
+    state["requires_hitl"] = True
+    state["workflow_status"] = "WAITING_HITL"
+    state["hitl_reason"] = "Draft_Loop_Exceeded"
+    state["draft_loop_retry_count"] = 9
+    state["draft_retry_count"] = 9
+    state["reader_retry_count"] = 4
+    state["resume_from"] = "author"
+    run = service.workflow_repository.create_run(story["story_id"], 1, state)
+    monkeypatch.setattr(service, "_execute_workflow", lambda _rid, _s: _s)
+
+    service.handle_hitl_decision(run.run_id, HitlDecisionRequest(option_id="relax_word_count"))
+    st = service.workflow_repository.get_run_state(run.run_id)
+    assert st["draft_loop_retry_count"] == 0
+    assert st["draft_retry_count"] == 0
+    assert st["reader_retry_count"] == 0
+
+
+def test_hitl_outline_sets_resume_from_by_reason(monkeypatch, tmp_path) -> None:
+    service = build_service(str(tmp_path / "workflow_hitl_resume.sqlite3"))
+    story = service.create_story(
+        StoryInput(
+            title="測試故事",
+            premise="主角回到王都追查命案。",
+            bible={"rules": ["秘密不能無代價揭露"]},
+            target_total_words=30000,
+        )
+    )
+    service.macro_compile(story["story_id"])
+    anchors = service.story_repository.list_anchors(story["story_id"])
+    story_row = service.story_repository.get_story(story["story_id"])
+    base = build_initial_state(
+        story["story_id"],
+        1,
+        anchors,
+        "trace-resume",
+        pov_character_id=story_row.get("protagonist_character_id") or "char_public_observer",
+    )
+    monkeypatch.setattr(service, "_execute_workflow", lambda _rid, _s: _s)
+
+    for reason, expected in (
+        ("Plan_Loop_Exceeded", "planner"),
+        ("Draft_Loop_Exceeded", "author"),
+    ):
+        state = {**base, "requires_hitl": True, "workflow_status": "WAITING_HITL", "hitl_reason": reason}
+        run = service.workflow_repository.create_run(story["story_id"], 1, state)
+        service.handle_hitl_outline_edit(
+            run.run_id,
+            HitlOutlineEditRequest(
+                ground_truth_events=[
+                    EventOutline(event_id="event_manual_01", description="手動事件", caused_by_event_id=None)
+                ],
+            ),
+        )
+        st = service.workflow_repository.get_run_state(run.run_id)
+        assert st["resume_from"] == expected
+
+
+def test_hitl_decision_raises_when_not_paused(tmp_path) -> None:
+    service = build_service(str(tmp_path / "workflow_hitl_guard.sqlite3"))
+    story = service.create_story(
+        StoryInput(
+            title="測試故事",
+            premise="主角回到王都追查命案。",
+            bible={"rules": ["秘密不能無代價揭露"]},
+            target_total_words=30000,
+        )
+    )
+    service.macro_compile(story["story_id"])
+    result = service.run_chapter(story["story_id"], 1)
+    run_id = result["run"]["run_id"]
+
+    with pytest.raises(HitlNotWaitingError):
+        service.handle_hitl_decision(run_id, HitlDecisionRequest(option_id="relax_word_count"))
 
 
 def test_state_transaction_replay(tmp_path) -> None:

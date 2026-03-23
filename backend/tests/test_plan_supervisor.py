@@ -53,6 +53,7 @@ def test_plan_supervisor_allows_partial_convergence_before_anchor_chapter(tmp_pa
         "graph_context": "{}",
         "vector_context": "{}",
         "bible_context": "{}",
+        "target_word_count": 2500,
     }
 
     output, payload = run_plan_supervisor(state, context)
@@ -91,6 +92,7 @@ def test_plan_supervisor_requires_anchor_completion_on_target_chapter(tmp_path) 
         "graph_context": "{}",
         "vector_context": "{}",
         "bible_context": "{}",
+        "target_word_count": 2500,
     }
 
     output, payload = run_plan_supervisor(state, context)
@@ -124,6 +126,7 @@ def test_plan_supervisor_blocks_timeline_rollback(tmp_path) -> None:
         "graph_context": "{}",
         "vector_context": "{}",
         "bible_context": "{}",
+        "target_word_count": 2500,
     }
 
     output, _ = run_plan_supervisor(state, context)
@@ -131,6 +134,35 @@ def test_plan_supervisor_blocks_timeline_rollback(tmp_path) -> None:
     assert output["is_approved"] is False
     assert "INCONSISTENCY" in output["violation_type"]
     assert "重演上一章" in output["feedback_to_agent"]
+
+
+def test_plan_supervisor_rejects_word_count_below_beat_floor(tmp_path) -> None:
+    context = build_context(str(tmp_path / "plan_supervisor_words.sqlite3"))
+    state = {
+        "chapter_id": 1,
+        "active_epoch_id": "epoch_present",
+        "target_anchor_id": "anchor_06",
+        "unachieved_anchors": [{"anchor_id": "anchor_06", "chapter_target": 6}],
+        "ground_truth_events": [
+            {"event_id": "e1", "description": "新事件。", "caused_by_event_id": None},
+        ],
+        "narrative_script": "本章推進調查。",
+        "chapter_start_location": "A",
+        "chapter_end_location_hint": "A",
+        "must_include_beats": ["a", "b", "c", "d", "e"],
+        "previous_chapter_summary": "",
+        "recent_chapter_context": "",
+        "last_known_location": "A",
+        "graph_context": "{}",
+        "vector_context": "{}",
+        "bible_context": "{}",
+        "target_word_count": 400,
+    }
+
+    output, _ = run_plan_supervisor(state, context)
+
+    assert output["is_approved"] is False
+    assert "WORD_COUNT_UNMATCH" in output["violation_type"]
 
 
 def test_plan_supervisor_teleportation_is_llm_only_mock_does_not_block(tmp_path) -> None:
@@ -158,6 +190,7 @@ def test_plan_supervisor_teleportation_is_llm_only_mock_does_not_block(tmp_path)
         "graph_context": "{}",
         "vector_context": "{}",
         "bible_context": "{}",
+        "target_word_count": 2500,
     }
 
     output, _ = run_plan_supervisor(state, context)

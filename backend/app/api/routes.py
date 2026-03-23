@@ -5,20 +5,22 @@ import json
 from urllib.parse import quote
 from typing import AsyncIterator
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
-from app.dependencies import get_graph_store, get_workflow_service, get_workflow_repository
+from app.dependencies import get_graph_store, get_story_repository, get_workflow_service, get_workflow_repository
 from app.domain.schema import (
     GraphQueryRequest,
     HitlDecisionRequest,
+    HitlDraftEditRequest,
     HitlOutlineEditRequest,
     HitlStateInjectionRequest,
     StoryInput,
 )
 from app.services.graph_store import GraphStore
 from app.services.llm import LLMProviderError
-from app.services.workflow.service import WorkflowService
+from app.services.workflow.service import ChapterAlreadyCompletedError, WorkflowService
+from app.repositories.sqlite.story_repository import StoryRepository
 from app.repositories.sqlite.workflow_repository import WorkflowRepository
 
 router = APIRouter()
@@ -47,10 +49,18 @@ def macro_compile(
 def run_chapter(
     story_id: str,
     chapter_id: int,
+    background_tasks: BackgroundTasks,
     workflow_service: WorkflowService = Depends(get_workflow_service),
 ) -> dict:
     try:
-        return workflow_service.run_chapter(story_id, chapter_id)
+        payload = workflow_service.start_run_chapter(story_id, chapter_id)
+        run_id = payload["run"]["run_id"]
+        background_tasks.add_task(workflow_service.execute_stored_run, run_id)
+        return payload
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ChapterAlreadyCompletedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except LLMProviderError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -145,6 +155,8 @@ def hitl_decision(
 ) -> dict:
     try:
         return workflow_service.handle_hitl_decision(run_id, request)
+    except HitlNotWaitingError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except LLMProviderError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -157,6 +169,8 @@ def hitl_outline(
 ) -> dict:
     try:
         return workflow_service.handle_hitl_outline_edit(run_id, request)
+    except HitlNotWaitingError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except LLMProviderError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -169,6 +183,22 @@ def hitl_state_injection(
 ) -> dict:
     try:
         return workflow_service.handle_hitl_state_injection(run_id, request)
+    except HitlNotWaitingError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except LLMProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/workflows/{run_id}/hitl/draft-edit")
+def hitl_draft_edit(
+    run_id: str,
+    request: HitlDraftEditRequest,
+    workflow_service: WorkflowService = Depends(get_workflow_service),
+) -> dict:
+    try:
+        return workflow_service.handle_hitl_draft_edit(run_id, request)
+    except HitlNotWaitingError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except LLMProviderError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -189,6 +219,18 @@ def story_graph(
             narrative_directive=narrative_directive,
         )
     ).model_dump(mode="json")
+
+
+@router.get("/stories/{story_id}/graph/full")
+def story_graph_full(
+    story_id: str,
+    graph_store: GraphStore = Depends(get_graph_store),
+    story_repository: StoryRepository = Depends(get_story_repository),
+) -> dict:
+    """All StoryNode nodes and relationships for this story (no POV/epoch epistemic filter)."""
+    if not story_repository.get_story(story_id):
+        raise HTTPException(status_code=404, detail=f"Story not found: {story_id}")
+    return graph_store.dump_story_graph(story_id).model_dump(mode="json")
 
 
 @router.post("/state-transactions/{transaction_id}/replay")

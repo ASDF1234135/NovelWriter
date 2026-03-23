@@ -2,10 +2,27 @@ from __future__ import annotations
 
 import json
 
+from app.core.config import get_settings
 from app.domain.schema import EventOutline, PlannerOutput
 from app.domain.state import SafePlannerPayload
 from app.services.llm import MockLLMClient
+from app.services.workflow.chapter_words import clamp_chapter_word_count
 from app.services.workflow.context import WorkflowContext
+from app.services.workflow.constants import (
+    PLANNER_BIBLE_CONTEXT_CAP,
+    PLANNER_CONTINUITY_NOTE_MAX_CHARS,
+    PLANNER_CONTINUITY_NOTE_MAX_ITEMS,
+    PLANNER_ENTITY_NAME_MAX_CHARS,
+    PLANNER_ENTITY_NAME_MAX_ITEMS,
+    PLANNER_GRAPH_CONTEXT_CAP,
+    PLANNER_PREVIOUS_CHAPTER_SUMMARY_CAP,
+    PLANNER_PREVIOUS_NARRATIVE_CAP,
+    PLANNER_PRIOR_FEEDBACK_MAX_ITEMS,
+    PLANNER_RECENT_CHAPTER_CONTEXT_CAP,
+    PLANNER_UPCOMING_ANCHORS_JSON_CAP,
+    PLANNER_VECTOR_CONTEXT_CAP,
+    PLANNER_VOLUME_SUMMARY_CAP,
+)
 from app.services.workflow.masking import build_planner_payload
 from app.services.workflow.profiles import get_profile
 
@@ -25,7 +42,34 @@ def _mock_author_safe_continuity_notes(raw: list[str]) -> list[str]:
     return safe
 
 
+def _clip(text: str, max_len: int) -> str:
+    if not text:
+        return text
+    return text[:max_len] if len(text) > max_len else text
+
+
+def _clip_note_lines(notes: list[str]) -> list[str]:
+    out: list[str] = []
+    for raw in (notes or [])[:PLANNER_CONTINUITY_NOTE_MAX_ITEMS]:
+        line = (raw or "").strip()
+        if not line:
+            continue
+        out.append(_clip(line, PLANNER_CONTINUITY_NOTE_MAX_CHARS))
+    return out
+
+
+def _clip_entity_names(names: list[str]) -> list[str]:
+    out: list[str] = []
+    for raw in (names or [])[:PLANNER_ENTITY_NAME_MAX_ITEMS]:
+        n = (raw or "").strip()
+        if not n:
+            continue
+        out.append(_clip(n, PLANNER_ENTITY_NAME_MAX_CHARS))
+    return out
+
+
 def run_planner(state: dict, context: WorkflowContext) -> tuple[dict, dict, int, int]:
+    settings = get_settings()
     story = context.story_repository.get_story(state["story_id"]) or {}
     volumes = context.story_repository.list_volumes(state["story_id"])
     payload = build_planner_payload(state, story=story, volumes=volumes)
@@ -33,12 +77,14 @@ def run_planner(state: dict, context: WorkflowContext) -> tuple[dict, dict, int,
     if not isinstance(context.llm_client, MockLLMClient):
         profile = get_profile("planner")
         structured_output, llm_result = context.llm_client.invoke_json(prompt, PlannerOutput, profile)
-        return (
-            structured_output.model_dump(mode="json"),
-            payload.model_dump(mode="json"),
-            llm_result.token_usage,
-            llm_result.latency_ms,
+        clamped = clamp_chapter_word_count(
+            structured_output.target_word_count,
+            settings.chapter_word_min,
+            settings.chapter_word_max,
         )
+        out = structured_output.model_dump(mode="json")
+        out["target_word_count"] = clamped
+        return out, payload.model_dump(mode="json"), llm_result.token_usage, llm_result.latency_ms
 
     llm_result = context.llm_client.invoke(prompt)
     anchor_hint = payload.target_anchor_id or "無特定錨點"
@@ -47,6 +93,11 @@ def run_planner(state: dict, context: WorkflowContext) -> tuple[dict, dict, int,
     start_location = payload.last_known_location or "延續上一場景"
     end_location = payload.last_known_location or "當前行動場景"
     boundary_rule = f"本章最遠只能收束在 {end_location}；若需要進入下一個完整場景、室內空間或新任務節點，必須留到下一章。"
+    mock_target = clamp_chapter_word_count(
+        payload.default_chapter_words,
+        settings.chapter_word_min,
+        settings.chapter_word_max,
+    )
     output = PlannerOutput(
         ground_truth_events=[
             EventOutline(
@@ -67,6 +118,7 @@ def run_planner(state: dict, context: WorkflowContext) -> tuple[dict, dict, int,
             f"章節必須朝向 {anchor_hint} 推進，不能只是重講上一章。"
             f"{continuity_notes}"
         ),
+        target_word_count=mock_target,
         chapter_start_location=start_location,
         author_goal="讓本章完成一個可見的劇情推進，並把主角推向下一步行動。",
         must_include_beats=[
@@ -101,36 +153,46 @@ def run_planner(state: dict, context: WorkflowContext) -> tuple[dict, dict, int,
 
 
 def _build_planner_prompt(payload: SafePlannerPayload) -> str:
+    upcoming_json = json.dumps(payload.upcoming_unachieved_anchors, ensure_ascii=False)
+    upcoming_json = _clip(upcoming_json, PLANNER_UPCOMING_ANCHORS_JSON_CAP)
+    prior_fb = (payload.prior_feedback or [])[-PLANNER_PRIOR_FEEDBACK_MAX_ITEMS:]
+    prev_events = [event.model_dump(mode="json") for event in payload.previous_attempt_ground_truth_events]
     return (
         "請依照以下安全載荷產出底層真實大綱與表層敘事劇本。\n\n"
+        "## 字數與本章內容（必做）\n"
+        f"- default_chapter_words: {payload.default_chapter_words}（僅作參考起點，**非**卷字數攤分或硬性配額）\n"
+        f"- 允許的 target_word_count 硬邊界：{payload.chapter_word_min} ~ {payload.chapter_word_max}（後端會截斷越界值）\n"
+        "- 你必須輸出 `target_word_count`（整數）。請依本章 **ground_truth_events 複雜度、場景轉換、對白與動作量、must_include_beats 數量** 決定；\n"
+        "  字數必須足以讓所列 beats 在正文中有空間展開，又不得明顯過長以免灌水。\n"
+        "- 若大綱極簡卻字數極大、或節點極多卻字數極小，後續審核會退件，請自行避免。\n\n"
         "## 前情提要\n"
-        f"- previous_chapter_summary: {payload.previous_chapter_summary}\n"
-        f"- recent_chapter_context: {payload.recent_chapter_context[:2500]}\n"
+        f"- previous_chapter_summary: {_clip(payload.previous_chapter_summary, PLANNER_PREVIOUS_CHAPTER_SUMMARY_CAP)}\n"
+        f"- recent_chapter_context: {_clip(payload.recent_chapter_context, PLANNER_RECENT_CHAPTER_CONTEXT_CAP)}\n"
         f"- last_known_location: {payload.last_known_location}\n"
-        f"- continuity_notes: {payload.continuity_notes}\n"
-        f"- recent_entities: {payload.recent_entity_names}\n\n"
+        f"- continuity_notes: {_clip_note_lines(list(payload.continuity_notes))}\n"
+        f"- recent_entities: {_clip_entity_names(list(payload.recent_entity_names))}\n\n"
         "## 本章劇情發展方向\n"
         f"- directive: {payload.narrative_directive}\n"
         f"- active_epoch: {payload.active_epoch_id}\n"
         f"- pov_character: {payload.pov_character_id}\n"
         f"- current_volume_title: {payload.current_volume_title}\n"
-        f"- current_volume_summary: {payload.current_volume_summary}\n"
+        f"- current_volume_summary: {_clip(payload.current_volume_summary, PLANNER_VOLUME_SUMMARY_CAP)}\n"
         f"- current_anchor_id: {payload.target_anchor_id}\n"
         f"- current_anchor_title: {payload.current_anchor_title}\n"
         f"- current_anchor_description: {payload.current_anchor_description}\n"
         "- upcoming_unachieved_anchors: 以下為「最近數個」未完成錨點（滑動視窗，含 id／title／chapter_target）；"
         "**以 current_anchor 為本章主目標**，其餘僅供節奏參考，勿替更遠錨點寫出具體橋段或結局。\n"
-        f"- upcoming_unachieved_anchors: {json.dumps(payload.upcoming_unachieved_anchors, ensure_ascii=False)}\n\n"
+        f"- upcoming_unachieved_anchors: {upcoming_json}\n\n"
         "## 世界與檢索背景\n"
         f"- story_premise: {payload.story_premise}\n"
-        f"- bible_context: {payload.bible_context[:1200]}\n"
-        f"- graph_context: {payload.graph_context[:1800]}\n"
-        f"- vector_context: {payload.vector_context[:1200]}\n\n"
+        f"- bible_context: {_clip(payload.bible_context, PLANNER_BIBLE_CONTEXT_CAP)}\n"
+        f"- graph_context: {_clip(payload.graph_context, PLANNER_GRAPH_CONTEXT_CAP)}\n"
+        f"- vector_context: {_clip(payload.vector_context, PLANNER_VECTOR_CONTEXT_CAP)}\n\n"
         "## 上一版規劃（供修正參考）\n"
-        f"- previous_attempt_ground_truth_events: {[event.model_dump(mode='json') for event in payload.previous_attempt_ground_truth_events]}\n"
-        f"- previous_attempt_narrative_script: {payload.previous_attempt_narrative_script[:2200]}\n\n"
+        f"- previous_attempt_ground_truth_events: {prev_events}\n"
+        f"- previous_attempt_narrative_script: {_clip(payload.previous_attempt_narrative_script, PLANNER_PREVIOUS_NARRATIVE_CAP)}\n\n"
         "## 前次規劃回饋\n"
-        f"- prior_feedback: {payload.prior_feedback}\n\n"
+        f"- prior_feedback: {prior_fb}\n\n"
         "## 你的輸出要求\n"
         "- 若上方已提供 previous_attempt_ground_truth_events 或 previous_attempt_narrative_script，代表這次是修稿，不是從零重做。\n"
         "- 若上一版只有局部違規，優先保留已經合理的事件鏈與章節方向，只修正被 feedback 指出的段落、事件或位置欄位。\n"

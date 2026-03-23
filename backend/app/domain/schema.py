@@ -202,7 +202,6 @@ class DirectorOutput(BaseModel):
     pov_character_id: str
     narrative_directive: str
     tone_direction: str
-    target_word_count: int
     target_anchor_id: Optional[str] = None
 
 
@@ -215,6 +214,7 @@ class EventOutline(BaseModel):
 class PlannerOutput(BaseModel):
     ground_truth_events: list[EventOutline]
     narrative_script: str
+    target_word_count: int = Field(..., ge=1, description="本章目標字數（正規化計數語意與 draft 審核一致）。")
     chapter_start_location: str = ""
     author_goal: str = ""
     must_include_beats: list[str] = Field(default_factory=list)
@@ -285,8 +285,10 @@ class ReaderOutput(BaseModel):
 
 
 class ProsePolishOutput(BaseModel):
-    polished_text: str = Field(..., description="Full polished chapter body")
-    change_summary: str = Field(default="", description="Optional short note of edits")
+    """LLM output for post-reader polish (format / language only, no plot changes)."""
+
+    polished_text: str = Field(..., description="Full chapter text after light editing.")
+    change_summary: str = Field(default="", description="Optional short note of edits applied.")
 
 
 class ExtractedEntity(BaseModel):
@@ -460,11 +462,15 @@ class HitlOutlineEditRequest(BaseModel):
     reason: str = ""
 
 
-class HitlDraftEditRequest(BaseModel):
-    chapter_content: str
+class HitlStateInjectionRequest(BaseModel):
+    mutations: list[Union[NodeMutation, EdgeMutation]]
     reason: str = ""
 
 
-class HitlStateInjectionRequest(BaseModel):
-    mutations: list[Union[NodeMutation, EdgeMutation]]
+class HitlDraftEditRequest(BaseModel):
+    """Human replaces draft while paused at HITL; workflow resumes for another quality pass."""
+
+    chapter_content: str
+    best_draft_content: str = ""
+    resume_from: str = "reader"
     reason: str = ""

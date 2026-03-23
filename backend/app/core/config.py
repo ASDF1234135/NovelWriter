@@ -44,6 +44,12 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_embedding_model: str = "text-embedding-3-small"
     openai_timeout_seconds: float = 120.0
+    # Chapter word targets (Planner output is clamped; independent of volume budgets).
+    chapter_word_min: int = 800
+    chapter_word_max: int = 12000
+    default_chapter_words: int = 2500
+    # Plan supervisor: heuristic min normalized words per must_include_beat.
+    plan_supervisor_words_per_beat_floor: int = 200
     cors_origins: str = Field(default="http://localhost:5173")
     extraction_entity_text_budget: int = 9000
     extraction_memory_full_text_budget: int = 14000
@@ -53,12 +59,12 @@ class Settings(BaseSettings):
     # Relation extractor: chunk canonical_entities into batches (smaller N reduces provider timeouts).
     # 0 = legacy single call with all entities in one prompt.
     extraction_relation_entity_batch_size: int = 12
-    # After reader approval: light prose polish (Traditional Chinese unification, formatting).
+    # After reader approves: light prose polish before persist (Traditional Chinese unification, format).
     prose_polish_enabled: bool = True
-    prose_polish_max_relative_length_delta: float = 0.12
-    prose_polish_min_similarity_ratio: float = 0.88
     prose_polish_llm_model: str = ""
-    prose_polish_temperature: float = 0.2
+    prose_polish_temperature: float = 0.15
+    prose_polish_max_relative_length_change: float = 0.12
+    prose_polish_min_similarity_ratio: float = 0.82
 
     @property
     def sqlite_file(self) -> Path:

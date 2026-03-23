@@ -1,10 +1,25 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
+from app.core.config import get_settings
 from app.domain.schema import EventOutline
 from app.domain.state import SafeAuthorPayload, SafePlannerPayload, SafeSupervisorPayload
-from app.services.workflow.constants import VISIBLE_UNACHIEVED_ANCHOR_LIMIT
+from app.services.workflow.constants import (
+    PLAN_SUPERVISOR_BIBLE_CAP,
+    PLAN_SUPERVISOR_ENDING_BOUNDARY_CAP,
+    PLAN_SUPERVISOR_EVENT_DESC_CAP,
+    PLAN_SUPERVISOR_GRAPH_CAP,
+    PLAN_SUPERVISOR_MAX_BEATS_IN_PROMPT,
+    PLAN_SUPERVISOR_MAX_EVENTS_IN_PROMPT,
+    PLAN_SUPERVISOR_NARRATIVE_SCRIPT_CAP,
+    PLAN_SUPERVISOR_PREVIOUS_SUMMARY_CAP,
+    PLAN_SUPERVISOR_RECENT_CONTEXT_CAP,
+    PLAN_SUPERVISOR_VECTOR_CAP,
+    PLAN_SUPERVISOR_BEAT_STRING_CAP,
+    VISIBLE_UNACHIEVED_ANCHOR_LIMIT,
+)
 from app.services.workflow.utils import normalized_text_length
 
 
@@ -15,6 +30,7 @@ def visible_unachieved_anchors(state: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def build_planner_payload(state: dict, story: dict | None = None, volumes: list[dict] | None = None) -> SafePlannerPayload:
+    settings = get_settings()
     target_anchor = _resolve_target_anchor(state)
     current_volume = _resolve_current_volume(state["chapter_id"], volumes or [])
     window = visible_unachieved_anchors(state)
@@ -50,6 +66,9 @@ def build_planner_payload(state: dict, story: dict | None = None, volumes: list[
         continuity_notes=state.get("continuity_notes", []),
         recent_entity_names=state.get("recent_entity_names", []),
         prior_feedback=state["plan_feedback"],
+        default_chapter_words=int(state.get("target_word_count") or settings.default_chapter_words),
+        chapter_word_min=settings.chapter_word_min,
+        chapter_word_max=settings.chapter_word_max,
     )
 
 
@@ -83,6 +102,7 @@ def build_author_payload(state: dict) -> SafeAuthorPayload:
 
 
 def build_plan_supervisor_payload(state: dict) -> SafeSupervisorPayload:
+    settings = get_settings()
     target_anchor = _resolve_target_anchor(state)
     target_anchor_chapter = target_anchor["chapter_target"] if target_anchor else None
     chapters_until_anchor = (
@@ -99,6 +119,9 @@ def build_plan_supervisor_payload(state: dict) -> SafeSupervisorPayload:
         chapters_until_anchor=chapters_until_anchor,
         partial_convergence_allowed=bool(chapters_until_anchor is not None and chapters_until_anchor > 0),
         target_word_count=state.get("target_word_count", 0),
+        chapter_word_min=settings.chapter_word_min,
+        chapter_word_max=settings.chapter_word_max,
+        words_per_beat_floor=settings.plan_supervisor_words_per_beat_floor,
         previous_chapter_summary=state.get("previous_chapter_summary", ""),
         recent_chapter_context=state.get("recent_chapter_context", ""),
         last_known_location=state.get("last_known_location", ""),
@@ -116,6 +139,7 @@ def build_plan_supervisor_payload(state: dict) -> SafeSupervisorPayload:
 
 
 def build_draft_supervisor_payload(state: dict) -> SafeSupervisorPayload:
+    settings = get_settings()
     target_anchor = _resolve_target_anchor(state)
     target_anchor_chapter = target_anchor["chapter_target"] if target_anchor else None
     chapters_until_anchor = (
@@ -132,6 +156,9 @@ def build_draft_supervisor_payload(state: dict) -> SafeSupervisorPayload:
         chapters_until_anchor=chapters_until_anchor,
         partial_convergence_allowed=bool(chapters_until_anchor is not None and chapters_until_anchor > 0),
         target_word_count=state.get("target_word_count", 0),
+        chapter_word_min=settings.chapter_word_min,
+        chapter_word_max=settings.chapter_word_max,
+        words_per_beat_floor=settings.plan_supervisor_words_per_beat_floor,
         normalized_current_draft_length=normalized_text_length(state["current_draft"]),
         previous_chapter_summary=state.get("previous_chapter_summary", ""),
         recent_chapter_context=state.get("recent_chapter_context", ""),
@@ -148,6 +175,51 @@ def build_draft_supervisor_payload(state: dict) -> SafeSupervisorPayload:
         vector_context=state["vector_context"],
         bible_context=state["bible_context"],
     )
+
+
+def compact_plan_supervisor_payload_for_prompt(payload: SafeSupervisorPayload) -> str:
+    """Shrink JSON embedded in plan_supervisor LLM prompt (full payload may be huge)."""
+    events: list[dict[str, Any]] = []
+    for event in payload.ground_truth_events[:PLAN_SUPERVISOR_MAX_EVENTS_IN_PROMPT]:
+        events.append(
+            {
+                "event_id": event.event_id,
+                "description": (event.description or "")[:PLAN_SUPERVISOR_EVENT_DESC_CAP],
+                "caused_by_event_id": event.caused_by_event_id,
+            }
+        )
+    beats: list[str] = []
+    for beat in (payload.must_include_beats or [])[:PLAN_SUPERVISOR_MAX_BEATS_IN_PROMPT]:
+        beats.append((beat or "")[:PLAN_SUPERVISOR_BEAT_STRING_CAP])
+    forbidden = [
+        (x or "")[:PLAN_SUPERVISOR_BEAT_STRING_CAP]
+        for x in (payload.forbidden_next_scene_actions or [])[:8]
+    ]
+    compact: dict[str, Any] = {
+        "chapter_id": payload.chapter_id,
+        "current_chapter_id": payload.current_chapter_id,
+        "target_word_count": payload.target_word_count,
+        "chapter_word_min": payload.chapter_word_min,
+        "chapter_word_max": payload.chapter_word_max,
+        "words_per_beat_floor": payload.words_per_beat_floor,
+        "target_anchor_id": payload.target_anchor_id,
+        "target_anchor_chapter": payload.target_anchor_chapter,
+        "partial_convergence_allowed": payload.partial_convergence_allowed,
+        "previous_chapter_summary": (payload.previous_chapter_summary or "")[:PLAN_SUPERVISOR_PREVIOUS_SUMMARY_CAP],
+        "recent_chapter_context": (payload.recent_chapter_context or "")[:PLAN_SUPERVISOR_RECENT_CONTEXT_CAP],
+        "last_known_location": payload.last_known_location,
+        "chapter_start_location": payload.chapter_start_location,
+        "chapter_end_location_hint": payload.chapter_end_location_hint,
+        "ending_boundary_rule": (payload.ending_boundary_rule or "")[:PLAN_SUPERVISOR_ENDING_BOUNDARY_CAP],
+        "narrative_script": (payload.narrative_script or "")[:PLAN_SUPERVISOR_NARRATIVE_SCRIPT_CAP],
+        "ground_truth_events": events,
+        "must_include_beats": beats,
+        "forbidden_next_scene_actions": forbidden,
+        "graph_context": (payload.graph_context or "")[:PLAN_SUPERVISOR_GRAPH_CAP],
+        "vector_context": (payload.vector_context or "")[:PLAN_SUPERVISOR_VECTOR_CAP],
+        "bible_context": (payload.bible_context or "")[:PLAN_SUPERVISOR_BIBLE_CAP],
+    }
+    return json.dumps(compact, ensure_ascii=False, indent=2)
 
 
 def _resolve_target_anchor(state: dict) -> dict | None:

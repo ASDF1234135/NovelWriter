@@ -68,6 +68,7 @@ class AgentWorkflowState(TypedDict):
     manual_override_payload: NotRequired[dict[str, Any]]
     state_updater_output: NotRequired[dict[str, Any]]
     state_transaction_id: NotRequired[str]
+    prose_polish_diagnostics: NotRequired[dict[str, Any]]
 
 
 class SafeAuthorPayload(BaseModel):
@@ -118,6 +119,12 @@ class SafePlannerPayload(BaseModel):
     continuity_notes: list[str] = Field(default_factory=list)
     recent_entity_names: list[str] = Field(default_factory=list)
     prior_feedback: list[dict[str, Any]] = Field(default_factory=list)
+    default_chapter_words: int = Field(
+        default=2500,
+        description="建議字數起點（來自 state／設定），Planner 可依本章內容調整，非卷攤分。",
+    )
+    chapter_word_min: int = 800
+    chapter_word_max: int = 12000
 
 
 class SafeSupervisorPayload(BaseModel):
@@ -129,6 +136,9 @@ class SafeSupervisorPayload(BaseModel):
     chapters_until_anchor: int | None = None
     partial_convergence_allowed: bool = False
     target_word_count: int = 0
+    chapter_word_min: int = 800
+    chapter_word_max: int = 12000
+    words_per_beat_floor: int = 200
     normalized_current_draft_length: int = 0
     previous_chapter_summary: str = ""
     recent_chapter_context: str = ""
