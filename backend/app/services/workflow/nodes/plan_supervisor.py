@@ -9,6 +9,61 @@ from app.services.workflow.context import WorkflowContext
 from app.services.workflow.masking import build_plan_supervisor_payload, compact_plan_supervisor_payload_for_prompt
 from app.services.workflow.profiles import get_profile
 
+_PLAN_VIOLATION_FEEDBACK: list[tuple[ViolationType, str, tuple[str, ...]]] = [
+    (
+        ViolationType.WORD_COUNT_UNMATCH,
+        "（系統補充）target_word_count 或節點／字數配比不符合硬性區間，請調整大綱、beats 或目標字數。",
+        ("target_word_count", "字數", "beats"),
+    ),
+    (
+        ViolationType.INCONSISTENCY,
+        "（系統補充）大綱與底層事件、時序或連續性不一致，請對照 ground_truth_events 與前情修正。",
+        ("底層", "事件", "連續", "時序"),
+    ),
+    (
+        ViolationType.ANCHOR_DIVERGENCE,
+        "（系統補充）表層劇本未朝目標錨點收斂或偏離過遠，請調整 narrative_script。",
+        ("錨點", "收斂"),
+    ),
+    (
+        ViolationType.PHYSICAL_CONFLICT,
+        "（系統補充）規劃與已知空間／因果狀態衝突，請對照 last_known_location 與事件鏈修正。",
+        ("空間", "因果", "位置"),
+    ),
+    (
+        ViolationType.POV_LEAK,
+        "（系統補充）劇本將不應公開的資訊寫成讀者可見常識，請調整敘述層級。",
+        ("POV", "公開"),
+    ),
+    (
+        ViolationType.MISSING_DIRECTIVE,
+        "（系統補充）未滿足導演硬性要求（如新元素未進 proposed_new_nodes），請補齊。",
+        ("導演", "proposed_new", "元素"),
+    ),
+]
+
+
+def _ensure_plan_supervisor_feedback_covers_violations(output: PlanSupervisorOutput) -> PlanSupervisorOutput:
+    if output.is_approved:
+        return output
+    violations = [v for v in output.violation_type if v != ViolationType.NONE]
+    if not violations:
+        return output
+    feedback = output.feedback_to_agent.strip()
+    extras: list[str] = []
+    for vtype, snippet, skip_tokens in _PLAN_VIOLATION_FEEDBACK:
+        if vtype not in violations:
+            continue
+        if snippet in feedback:
+            continue
+        if any(tok in feedback for tok in skip_tokens):
+            continue
+        extras.append(snippet)
+    if not extras:
+        return output
+    merged = f"{feedback} {' '.join(extras)}".strip()
+    return output.model_copy(update={"feedback_to_agent": merged})
+
 
 def run_plan_supervisor(state: dict, context: WorkflowContext) -> tuple[dict, dict]:
     payload = build_plan_supervisor_payload(state)
@@ -17,7 +72,11 @@ def run_plan_supervisor(state: dict, context: WorkflowContext) -> tuple[dict, di
         prompt = _build_plan_supervisor_prompt(payload)
         structured_output, _ = context.llm_client.invoke_json(prompt, PlanSupervisorOutput, profile)
         output = _apply_deterministic_checks(structured_output, payload)
-        return output.model_dump(mode="json"), payload.model_dump(mode="json")
+        output = _ensure_plan_supervisor_feedback_covers_violations(output)
+        data = output.model_dump(mode="json")
+        if not data.get("soft_warnings"):
+            data["soft_warnings"] = []
+        return data, payload.model_dump(mode="json")
 
     violations: list[ViolationType] = []
     feedback: list[str] = []
@@ -34,11 +93,23 @@ def run_plan_supervisor(state: dict, context: WorkflowContext) -> tuple[dict, di
         payload.target_anchor_chapter is not None
         and payload.current_chapter_id >= payload.target_anchor_chapter
     )
-    if requires_anchor_completion and payload.target_anchor_id and payload.target_anchor_id not in payload.narrative_script:
+    ct = str(payload.chapter_type or "PLOT_DRIVEN")
+    dist = payload.distance_to_anchor
+    strict_anchor = ct == "PLOT_DRIVEN" or (dist is not None and int(dist) <= 1)
+    if (
+        strict_anchor
+        and requires_anchor_completion
+        and payload.target_anchor_id
+        and payload.target_anchor_id not in payload.narrative_script
+    ):
         violations.append(ViolationType.ANCHOR_DIVERGENCE)
         feedback.append("表層劇本沒有明確朝目標錨點收斂。")
-    elif payload.partial_convergence_allowed and payload.target_anchor_id:
+    elif payload.partial_convergence_allowed and payload.target_anchor_id and strict_anchor:
         feedback.append("目前仍在遠期錨點前期章節，允許 partial convergence，只要求方向一致與伏筆有效。")
+
+    directive_violations, directive_feedback = _detect_genesis_and_bstory_violations(payload)
+    violations.extend(v for v in directive_violations if v not in violations)
+    feedback.extend(directive_feedback)
 
     deterministic_violations, deterministic_feedback = _detect_continuity_violations(payload)
     violations.extend(violation for violation in deterministic_violations if violation not in violations)
@@ -57,9 +128,12 @@ def run_plan_supervisor(state: dict, context: WorkflowContext) -> tuple[dict, di
             not violations
             and payload.target_anchor_id
             and requires_anchor_completion
+            and strict_anchor
         ),
+        soft_warnings=[],
     )
-    return output.model_dump(mode="json"), payload.model_dump(mode="json")
+    data = output.model_dump(mode="json")
+    return data, payload.model_dump(mode="json")
 
 
 def _build_plan_supervisor_prompt(payload) -> str:
@@ -71,6 +145,11 @@ def _build_plan_supervisor_prompt(payload) -> str:
         "3. 遠期錨點尚未完成時，anchor_achieved=false 屬正常，不可單獨作為 blocking 理由。\n"
         "4. 只有 current_chapter_id >= target_anchor_chapter 時，才以明確達成錨點作為主要要求。\n"
         "5. 若 chapter_target - current_chapter >= 2，禁止因『尚未完成最終錨點』直接否決。\n"
+        "5b. 若 chapter_type 為 CHARACTER_DRIVEN 或 WORLD_BUILDING，不得以『未推進主線錨點』單獨否決；"
+        "但若超前揭曉錨點或因果硬衝突仍可否決。\n"
+        "5c. Hard：Director 的 new_elements_to_introduce 每一項都必須在 proposed_new_nodes 有對應 role／canonical_name；"
+        "b_story_directive 非空時 narrative_script 必須涵蓋其核心動詞或對象（不可空泛帶過）。否則 MISSING_DIRECTIVE。\n"
+        "5d. Soft：idle beat 不足、超前解錨疑慮可記入 soft_warnings 但仍可 is_approved=true（若無其他 Hard）。\n"
         "6. Timeline Rollback：把 previous_chapter_summary 或 recent_chapter_context 中已完成的事件，重新包裝成本章新的 ground_truth_events，可視為 INCONSISTENCY。\n"
         "7. Teleportation / Location Paradox（僅由你判斷，後端不做字串規則）："
         "比對 last_known_location 與 chapter_start_location，並閱讀 ground_truth_events、narrative_script。"
@@ -89,9 +168,10 @@ def _build_plan_supervisor_prompt(payload) -> str:
 
 
 def _apply_deterministic_checks(output: PlanSupervisorOutput, payload) -> PlanSupervisorOutput:
+    directive_violations, directive_feedback = _detect_genesis_and_bstory_violations(payload)
     continuity_violations, continuity_feedback = _detect_continuity_violations(payload)
     word_violations, word_feedback = _detect_word_count_violations(payload)
-    violations = [*continuity_violations, *word_violations]
+    violations = [*directive_violations, *continuity_violations, *word_violations]
     if not violations:
         return output
 
@@ -100,7 +180,7 @@ def _apply_deterministic_checks(output: PlanSupervisorOutput, payload) -> PlanSu
         if violation not in merged_violations:
             merged_violations.append(violation)
     merged_feedback = output.feedback_to_agent.strip()
-    for message in [*continuity_feedback, *word_feedback]:
+    for message in [*directive_feedback, *continuity_feedback, *word_feedback]:
         if message not in merged_feedback:
             merged_feedback = f"{merged_feedback} {message}".strip()
 
@@ -110,6 +190,7 @@ def _apply_deterministic_checks(output: PlanSupervisorOutput, payload) -> PlanSu
         suggestion_type=output.suggestion_type if output.suggestion_type != SuggestionType.NONE else SuggestionType.MODIFY,
         feedback_to_agent=merged_feedback,
         anchor_achieved=False if violations else output.anchor_achieved,
+        soft_warnings=list(output.soft_warnings or []),
     )
 
 
@@ -138,6 +219,41 @@ def _detect_word_count_violations(payload) -> tuple[list[ViolationType], list[st
     if len(script) < 80 and tw > 5000:
         violations.append(ViolationType.WORD_COUNT_UNMATCH)
         feedback.append("表層劇本過短但字數目標過高；請降低 target_word_count 或充實 narrative_script。")
+    return violations, feedback
+
+
+def _detect_genesis_and_bstory_violations(payload) -> tuple[list[ViolationType], list[str]]:
+    violations: list[ViolationType] = []
+    feedback: list[str] = []
+    script = payload.narrative_script or ""
+    proposed = payload.proposed_new_nodes or []
+
+    def _role_match(label: str) -> bool:
+        label = (label or "").strip()
+        if not label:
+            return True
+        for p in proposed:
+            if not isinstance(p, dict):
+                continue
+            role = str(p.get("role") or "")
+            cname = str(p.get("canonical_name") or "")
+            if label in role or label in cname or role in label or cname in label:
+                return True
+        return False
+
+    for label in payload.new_elements_to_introduce or []:
+        if not _role_match(str(label)):
+            violations.append(ViolationType.MISSING_DIRECTIVE)
+            feedback.append(f"導演要求的新元素「{label}」未在 proposed_new_nodes 具現化。")
+
+    bdir = (payload.b_story_directive or "").strip()
+    if bdir and not bdir.startswith("探索周遭環境與風土民情"):
+        # 取前段作為核心片段，避免過長比對失敗
+        core = bdir[:24].strip()
+        if core and core not in script:
+            violations.append(ViolationType.MISSING_DIRECTIVE)
+            feedback.append("b_story_directive 的核心內容未編入 narrative_script。")
+
     return violations, feedback
 
 

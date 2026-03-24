@@ -13,7 +13,7 @@ def run_reader(state: dict, context: WorkflowContext) -> dict:
         profile = get_profile("reader")
         prompt = _build_reader_prompt(draft)
         structured_output, _ = context.llm_client.invoke_json(prompt, ReaderOutput, profile)
-        return _normalize_reader_output(structured_output).model_dump(mode="json")
+        return _normalize_reader_output(structured_output, from_llm=True).model_dump(mode="json")
 
     score = 70
     critique: list[str] = []
@@ -34,7 +34,7 @@ def run_reader(state: dict, context: WorkflowContext) -> dict:
         suggestion_type=SuggestionType.MODIFY if score < READER_PASS_SCORE else SuggestionType.NONE,
         critique=" ".join(critique) or "文筆穩定，節奏合格。",
     )
-    return _normalize_reader_output(output).model_dump(mode="json")
+    return _normalize_reader_output(output, from_llm=False).model_dump(mode="json")
 
 
 def _build_reader_prompt(draft: str) -> str:
@@ -44,18 +44,34 @@ def _build_reader_prompt(draft: str) -> str:
         "不要猜測或迎合任何通過線／及格分，你也未被告知此類數值。\n"
         "是否核准與後續建議類型由系統依內部規則從 literary_score 換算；"
         "若模型仍須填 is_approved、suggestion_type，可與你的直覺一致即可，實際以系統覆寫結果為準。\n"
-        "分數偏低時請給 1–3 句具體修改建議；分數高時 critique 保持簡短總結，不要要求重寫。\n"
+        "分數偏低或未達核准時，critique 必須具體指出 1–3 個可改面向（例如節奏、對白、畫面、情緒轉折），"
+        "避免只寫『尚可』『需加強』等空泛評語。\n"
+        "分數高時 critique 保持簡短總結，不要要求重寫。\n"
         "**禁止**在 critique 中提及字數、篇幅、增刪字、擴寫／縮寫以符合某長度，或任何與章節長度目標有關的要求；"
         "長度與字數範圍由 draft_supervisor 處理，與你無關。只評文筆、節奏、情緒張力、對白、畫面與可讀性。\n\n"
         f"draft=\n{draft[:6000]}"
     )
 
 
-def _normalize_reader_output(output: ReaderOutput) -> ReaderOutput:
+# Only pad when the model returns a near-empty critique (specific feedback stays untouched).
+_READER_VAGUE_CRITIQUE_MAX_LEN = 8
+_READER_FALLBACK_HINT = (
+    "請自查：節奏是否拖沓、對白是否功能化不足、畫面是否單薄、情緒轉折是否突兀。"
+)
+
+
+def _normalize_reader_output(output: ReaderOutput, *, from_llm: bool = False) -> ReaderOutput:
     is_approved = output.literary_score >= READER_PASS_SCORE
+    critique = (output.critique or "").strip()
+    if not is_approved:
+        if from_llm and len(critique) < _READER_VAGUE_CRITIQUE_MAX_LEN:
+            critique = f"{critique} {_READER_FALLBACK_HINT}".strip()
+        critique = critique or _READER_FALLBACK_HINT
+    else:
+        critique = critique or "文筆穩定，節奏合格。"
     return ReaderOutput(
         is_approved=is_approved,
         literary_score=output.literary_score,
         suggestion_type=SuggestionType.NONE if is_approved else SuggestionType.MODIFY,
-        critique=output.critique if not is_approved else (output.critique or "文筆穩定，節奏合格。"),
+        critique=critique,
     )

@@ -64,3 +64,23 @@ def test_reader_failed_score_keeps_modification_feedback() -> None:
     assert output["literary_score"] == 55
     assert output["suggestion_type"] == SuggestionType.MODIFY.value
     assert output["critique"] == "節奏偏平，畫面與情緒層次可再加強。"
+
+
+def test_reader_short_llm_critique_gets_fallback_hint() -> None:
+    output = run_reader(
+        {
+            "target_word_count": 2500,
+            "current_draft": "夜色與陰影交錯的一段文字，用於滿足最低長度。",
+        },
+        DummyContext(
+            ReaderOutput(
+                is_approved=True,
+                literary_score=40,
+                suggestion_type=SuggestionType.NONE,
+                critique="差",
+            )
+        ),
+    )
+
+    assert output["is_approved"] is False
+    assert "節奏是否拖沓" in output["critique"]

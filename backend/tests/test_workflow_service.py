@@ -113,7 +113,11 @@ def test_draft_and_reader_share_combined_retry_limit(tmp_path, monkeypatch) -> N
     def fake_run_author(state, context):
         author_calls["count"] += 1
         return (
-            {"chapter_content": f"第1章\n\n草稿版本 {author_calls['count']}"},
+            {
+                "chapter_content": f"第1章\n\n草稿版本 {author_calls['count']}",
+                "author_extraction_surface_hints": [],
+                "word_count": 12,
+            },
             {"safe": True},
             0,
             0,
@@ -163,7 +167,7 @@ def test_draft_and_reader_share_combined_retry_limit(tmp_path, monkeypatch) -> N
     assert final_state["draft_retry_count"] == 1
     assert final_state["reader_retry_count"] == 1
     assert final_state["draft_loop_retry_count"] == 2
-    assert final_state["reader_route"] == "prose_polish"
+    assert final_state["reader_route"] == "extraction_gate"
     assert final_state["reader_feedback"] == [
         {
             "score": 55,
@@ -189,7 +193,11 @@ def test_reader_pass_does_not_append_feedback_or_return_author(tmp_path, monkeyp
 
     def fake_run_author(state, context):
         return (
-            {"chapter_content": "第1章\n\n完成稿。"},
+            {
+                "chapter_content": "第1章\n\n完成稿。",
+                "author_extraction_surface_hints": [],
+                "word_count": 8,
+            },
             {"safe": True},
             0,
             0,
@@ -225,7 +233,7 @@ def test_reader_pass_does_not_append_feedback_or_return_author(tmp_path, monkeyp
     final_state = build_chapter_graph(service._build_context(run.run_id)).invoke(initial_state)
 
     assert final_state["workflow_status"] == "COMPLETED"
-    assert final_state["reader_route"] == "prose_polish"
+    assert final_state["reader_route"] == "extraction_gate"
     assert final_state["reader_feedback"] == []
 
 

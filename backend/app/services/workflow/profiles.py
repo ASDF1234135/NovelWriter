@@ -72,6 +72,7 @@ def get_profile(agent_name: str) -> AgentPromptProfile:
                 "Teleportation / Location Paradox 指的是上一章章末位置與本章開場位置不一致，"
                 "卻沒有規劃可辨識的移動或過渡。"
                 "若表層劇本讓不該公開的秘密行動變成任何人都可知，或空間移動無法落地到有效位置，也應視為規劃缺陷。"
+                "feedback_to_agent 須與你標出的 violation_type 逐條對應，說明具體問題，避免空泛套話。"
             ),
             model=settings.supervisor_llm_model or settings.llm_model,
             temperature=settings.supervisor_temperature,
@@ -89,7 +90,8 @@ def get_profile(agent_name: str) -> AgentPromptProfile:
                 "3. PHYSICAL_CONFLICT 只用於明確違反 bible_context、graph_context 或已知事件因果的硬衝突。"
                 "4. INCONSISTENCY 只用於草稿與 narrative_script 或 ground_truth_events 的直接矛盾，"
                 "不得因正常小說化擴寫、感官描寫、象徵重複或氣氛鋪陳而判定。"
-                "5. feedback_to_agent 只能描述這一版草稿目前仍存在的問題，1 到 3 句即可。"
+                "5. feedback_to_agent 必須逐條對應你標出的每個 violation_type：說明『哪裡、為何』違規；"
+                "禁止只輸出『需要修改』等無訊息句。篇幅仍宜精簡，1 到 3 句可合併多點。"
                 "6. 若草稿把秘密行動、私下發現或 POV 不可能知道的資訊寫成公開事實，可使用 POV_LEAK。"
                 "7. 若草稿涉及移動，必須能判斷角色離開了哪裡、抵達或停留在哪裡；"
                 "若章末位置模糊到無法建立穩定空間狀態，也可視為問題。"
@@ -119,20 +121,30 @@ def get_profile(agent_name: str) -> AgentPromptProfile:
                 "你沒有 rewrite authority；你的工作是客觀提供 literary_score（0–100 整數，100 為滿分）與評論，"
                 "不要臆測通過線；後續是否核准由系統依內部規則處理。"
                 "不得在評論中要求調整字數、篇幅或長度；字數審核由其他節點負責。"
+                "未核准時 critique 須具體點出 1–3 個可改面向，禁止空泛套話。"
             ),
             model=settings.reader_llm_model or settings.llm_model,
             temperature=settings.reader_temperature,
         ),
-        "prose_polish": AgentPromptProfile(
-            agent_name="prose_polish",
+        "author_extraction_hints": AgentPromptProfile(
+            agent_name="author_extraction_hints",
             system_prompt=(
-                "你是繁體中文小說文字編輯。只修正標點、分段、病句、語氣與格式；"
-                "將全文統一為台灣繁體中文用字與標點習慣。"
-                "禁止改變任何劇情事實、角色行為、時間地點因果或敘事順序；禁止增刪情節性內容。"
-                "回應必須符合呼叫端要求的 JSON schema。"
+                "你是抽取對齊助理。任務：閱讀章節正文與規劃節點 id，"
+                "列出每個相關 node_id 在正文中實際出現的稱呼或短語。"
+                "輸出必須為嚴格 JSON schema；不得輸出正文全文。"
             ),
-            model=settings.prose_polish_llm_model or settings.supervisor_llm_model or settings.llm_model,
-            temperature=settings.prose_polish_temperature,
+            model=settings.author_hints_llm_model or settings.supervisor_llm_model or settings.llm_model,
+            temperature=settings.author_hints_temperature,
+        ),
+        "b_story_resolver": AgentPromptProfile(
+            agent_name="b_story_resolver",
+            system_prompt=(
+                "你是副線核銷員。你只能依據輸入中列出的 ground_truth_events 的 event_id 作為 resolution_evidence_event_ids；"
+                "不得捏造 event_id。若證據不足以證明副線在本章不可逆完結，resolved_b_stories 必須為空。"
+                "resolution_analysis 必須逐步說明推理，並明確引用證據事件的描述要點。"
+            ),
+            model=settings.supervisor_llm_model or settings.llm_model,
+            temperature=0.0,
         ),
         "state_extractor": AgentPromptProfile(
             agent_name="state_extractor",

@@ -3,11 +3,45 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from app.domain.schema import DirectorOutput
+from app.domain.schema import ChapterType, DirectorOutput
 from app.services.llm import MockLLMClient
 from app.services.workflow.context import WorkflowContext
 from app.services.workflow.masking import visible_unachieved_anchors
 from app.services.workflow.profiles import get_profile
+
+
+def _active_b_stories_nonempty(active: list) -> bool:
+    for row in active or []:
+        if isinstance(row, dict) and str(row.get("id") or "").strip():
+            return True
+    return False
+
+
+def normalize_director_output(state: dict, raw: dict) -> dict:
+    """Graceful degradation: fill chapter_type / b_story when distance>=2 and pool empty."""
+    out = dict(raw)
+    dist = state.get("distance_to_anchor")
+    active = state.get("active_b_stories") or []
+    bdir = (out.get("b_story_directive") or "").strip()
+    try:
+        dval = int(dist) if dist is not None else None
+    except (TypeError, ValueError):
+        dval = None
+    if dval is not None and dval >= 2:
+        if not _active_b_stories_nonempty(active) or not bdir:
+            out["chapter_type"] = ChapterType.WORLD_BUILDING.value
+            out["b_story_directive"] = (
+                bdir
+                or "探索周遭環境與風土民情，累積感官與生活細節，不強制推進主線。"
+            )
+    if dval is not None and dval <= 1:
+        out["chapter_type"] = ChapterType.PLOT_DRIVEN.value
+    ct = str(out.get("chapter_type") or ChapterType.PLOT_DRIVEN.value)
+    neo = list(out.get("new_elements_to_introduce") or [])
+    if ct in (ChapterType.CHARACTER_DRIVEN.value, ChapterType.WORLD_BUILDING.value) and not neo:
+        neo = ["本章敘事變數（背景人物、地點或道具擇一，勿與 graph 既有專名重複）"]
+    out["new_elements_to_introduce"] = neo
+    return out
 
 
 def run_director(state: dict, context: WorkflowContext) -> dict:
@@ -15,6 +49,7 @@ def run_director(state: dict, context: WorkflowContext) -> dict:
     next_anchor = anchors[0] if anchors else None
     anchor_prompt_window = visible_unachieved_anchors(state)
     story = context.story_repository.get_story(state["story_id"]) or {}
+    active = state.get("active_b_stories") or []
     volumes = context.story_repository.list_volumes(state["story_id"])
     bible_context = context.bible_service.compile_context(story.get("bible_json", {}))
     current_volume = _resolve_current_volume(state["chapter_id"], volumes)
@@ -24,8 +59,12 @@ def run_director(state: dict, context: WorkflowContext) -> dict:
             state, story, volumes, next_anchor, anchor_prompt_window, bible_context, current_volume
         )
         output, _ = context.llm_client.invoke_json(prompt, DirectorOutput, profile)
-        return output.model_dump(mode="json")
+        return normalize_director_output(state, output.model_dump(mode="json"))
 
+    dist = state.get("distance_to_anchor")
+    dval = int(dist) if isinstance(dist, int) else 0
+    b_first = (active[0].get("desc") if active and isinstance(active[0], dict) else None) or None
+    mock_type = ChapterType.PLOT_DRIVEN if dval <= 1 else ChapterType.CHARACTER_DRIVEN
     output = DirectorOutput(
         chapter_id=state["chapter_id"],
         active_epoch_id="epoch_present",
@@ -37,8 +76,11 @@ def run_director(state: dict, context: WorkflowContext) -> dict:
         ),
         tone_direction="懸疑壓抑",
         target_anchor_id=next_anchor["anchor_id"] if next_anchor else None,
+        chapter_type=mock_type,
+        b_story_directive=b_first,
+        new_elements_to_introduce=(["側寫配角"] if mock_type != ChapterType.PLOT_DRIVEN else []),
     )
-    return output.model_dump()
+    return normalize_director_output(state, output.model_dump(mode="json"))
 
 
 def _build_director_prompt(
@@ -71,11 +113,16 @@ def _build_director_prompt(
         f"- visible_unachieved_anchors: {json.dumps(visible_unachieved_anchors, ensure_ascii=False)}\n\n"
         "## 世界與狀態背景\n"
         f"- bible_context: {bible_context[:1800]}\n"
-        f"- graph_hint: {state.get('graph_context', '')[:1800]}\n\n"
+        f"- graph_hint: {state.get('graph_context', '')[:1800]}\n"
+        f"- distance_to_anchor: {state.get('distance_to_anchor')}\n"
+        f"- active_b_stories: {json.dumps(state.get('active_b_stories') or [], ensure_ascii=False)[:1200]}\n\n"
         "## 你的輸出要求\n"
-        "- 請決定本章 POV、Epoch、tone 與 narrative_directive。\n"
+        "- 請決定 chapter_type（PLOT_DRIVEN / CHARACTER_DRIVEN / WORLD_BUILDING）、POV、Epoch、tone、narrative_directive。\n"
+        "- 若 distance_to_anchor >= 2：chapter_type 必須為 CHARACTER_DRIVEN 或 WORLD_BUILDING，"
+        "並從 active_b_stories 指定一條副線寫入 b_story_directive；主線 narrative_directive 不可大幅跳躍完結錨點。\n"
+        "- 若 distance_to_anchor 為 0 或 1：chapter_type 必須為 PLOT_DRIVEN，並全力收束朝向 target_anchor。\n"
+        "- CHARACTER_DRIVEN 或 WORLD_BUILDING 時 new_elements_to_introduce 至少 1 項，且須避免與 graph 重複專名。\n"
         "- narrative_directive 必須明確指出本章要新增的劇情推進，不能只寫氛圍延續。\n"
-        "- 請讓本章至少推進一個新的行動或發現，並與當前 anchor 收斂。\n"
         "- 若本章涉及移動、潛入、撤離或追逐，必須把起點、目的地或章末有效位置寫清楚。\n"
         "- 若本章存在秘密行動，narrative_directive 應點出其戲劇功能，但不要把秘密誤寫成任何人都知道的常識。\n"
     )

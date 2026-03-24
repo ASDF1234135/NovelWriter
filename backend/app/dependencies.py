@@ -64,6 +64,11 @@ def get_llm_client() -> LLMClient:
         api_key=settings.openai_api_key,
         model=settings.llm_model,
         timeout=settings.openai_timeout_seconds,
+        stream_chat=settings.openai_stream_chat,
+        stream_structured=settings.openai_stream_structured,
+        stream_include_usage=settings.openai_stream_include_usage,
+        connect_timeout=settings.openai_connect_timeout_seconds,
+        stream_read_timeout=settings.openai_stream_read_timeout_seconds,
     )
 
 

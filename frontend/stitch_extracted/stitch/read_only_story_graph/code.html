@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&amp;family=Newsreader:ital,opsz,wght@0,6..72,200..800;1,6..72,200..800&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            colors: {
+              "secondary-container": "#af8d11",
+              "primary-fixed": "#e1e0ff",
+              "surface-container-lowest": "#060e20",
+              "on-surface-variant": "#c7c4d7",
+              "inverse-on-surface": "#283044",
+              "primary": "#c0c1ff",
+              "secondary": "#e9c349",
+              "on-tertiary-fixed": "#301400",
+              "on-surface": "#dae2fd",
+              "surface-container": "#171f33",
+              "on-tertiary-fixed-variant": "#703700",
+              "secondary-fixed-dim": "#e9c349",
+              "surface-container-low": "#131b2e",
+              "surface-container-highest": "#2d3449",
+              "inverse-surface": "#dae2fd",
+              "surface-tint": "#c0c1ff",
+              "on-error-container": "#ffdad6",
+              "on-background": "#dae2fd",
+              "on-secondary-container": "#342800",
+              "background": "#0b1326",
+              "tertiary-fixed-dim": "#ffb783",
+              "error": "#ffb4ab",
+              "on-primary-container": "#0d0096",
+              "error-container": "#93000a",
+              "on-primary": "#1000a9",
+              "tertiary": "#ffb783",
+              "outline-variant": "#464554",
+              "outline": "#908fa0",
+              "on-primary-fixed": "#07006c",
+              "tertiary-container": "#d97721",
+              "inverse-primary": "#494bd6",
+              "surface": "#0b1326",
+              "surface-bright": "#31394d",
+              "on-secondary-fixed": "#241a00",
+              "tertiary-fixed": "#ffdcc5",
+              "on-tertiary-container": "#452000",
+              "on-error": "#690005",
+              "surface-container-high": "#222a3d",
+              "surface-dim": "#0b1326",
+              "on-tertiary": "#4f2500",
+              "on-secondary": "#3c2f00",
+              "on-secondary-fixed-variant": "#574500",
+              "secondary-fixed": "#ffe088",
+              "primary-container": "#8083ff",
+              "surface-variant": "#2d3449",
+              "primary-fixed-dim": "#c0c1ff",
+              "on-primary-fixed-variant": "#2f2ebe"
+            },
+            fontFamily: {
+              "headline": ["Manrope"],
+              "body": ["Newsreader"],
+              "label": ["Manrope"]
+            },
+            borderRadius: {"DEFAULT": "0.125rem", "lg": "0.25rem", "xl": "0.5rem", "full": "0.75rem"},
+          },
+        },
+      }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        .canvas-grid {
+            background-image: radial-gradient(rgba(192, 193, 255, 0.05) 1px, transparent 1px);
+            background-size: 40px 40px;
+        }
+    </style>
+</head>
+<body class="bg-background text-on-surface font-label selection:bg-primary/30 selection:text-primary">
+<!-- TopAppBar Navigation Shell -->
+<header class="bg-[#0b1326] text-[#c0c1ff] font-['Manrope'] tracking-tight full-width top-0 sticky bg-[#161d2f] flat no shadows flex justify-between items-center px-8 h-16 w-full z-50">
+<div class="text-xl font-bold text-[#c0c1ff] uppercase tracking-widest">The Digital Auteur</div>
+<nav class="hidden md:flex items-center gap-8">
+<a class="text-[#dae2fd]/60 font-medium hover:text-[#c0c1ff] transition-colors duration-300 scale-95 active:opacity-80 transition-all" href="#">Setup</a>
+<a class="text-[#dae2fd]/60 font-medium hover:text-[#c0c1ff] transition-colors duration-300 scale-95 active:opacity-80 transition-all" href="#">Manuscript</a>
+<a class="text-[#c0c1ff] border-b-2 border-[#c0c1ff] pb-1 font-semibold hover:text-[#c0c1ff] transition-colors duration-300 scale-95 active:opacity-80 transition-all" href="#">Universe Graph</a>
+</nav>
+<div class="flex items-center gap-4">
+<div class="px-3 py-1 rounded-full bg-secondary/10 border border-secondary/20 text-secondary text-[10px] uppercase font-bold tracking-widest">
+                Read-only View
+            </div>
+</div>
+</header>
+<div class="flex min-h-screen">
+<!-- SideNavBar Navigation Shell -->
+<aside class="bg-[#161d2f] text-[#c0c1ff] font-['Manrope'] text-sm font-medium h-screen w-64 left-0 top-0 fixed no-line tonal-shift shadow-[40px_0_60px_-15px_rgba(192,193,255,0.06)] flex flex-col py-8 gap-2 z-40">
+<div class="px-6 mb-8">
+<div class="text-[#e9c349] font-bold text-lg">Auteur AI</div>
+<div class="text-[#dae2fd]/40 text-[10px] uppercase tracking-widest">Creative Engine</div>
+</div>
+<a class="text-[#dae2fd]/50 py-3 px-6 hover:bg-[#dae2fd]/5 hover:text-[#dae2fd] hover:bg-[#ffffff]/5 transition-all ease-in-out duration-200 flex items-center gap-3" href="#">
+<span class="material-symbols-outlined" data-icon="auto_stories">auto_stories</span>
+                Library
+            </a>
+<a class="text-[#dae2fd]/50 py-3 px-6 hover:bg-[#dae2fd]/5 hover:text-[#dae2fd] hover:bg-[#ffffff]/5 transition-all ease-in-out duration-200 flex items-center gap-3" href="#">
+<span class="material-symbols-outlined" data-icon="edit_note">edit_note</span>
+                Active Story
+            </a>
+<a class="bg-[#c0c1ff]/10 text-[#c0c1ff] rounded-r-full py-3 px-6 border-l-4 border-[#c0c1ff] hover:text-[#dae2fd] hover:bg-[#ffffff]/5 transition-all ease-in-out duration-200 flex items-center gap-3" href="#">
+<span class="material-symbols-outlined" data-icon="hub">hub</span>
+                Universe Graph
+            </a>
+<div class="mt-auto px-6">
+<a class="text-[#dae2fd]/50 py-3 hover:text-[#dae2fd] transition-all flex items-center gap-3" href="#">
+<span class="material-symbols-outlined" data-icon="settings">settings</span>
+                    Settings
+                </a>
+</div>
+</aside>
+<!-- Main Content Canvas -->
+<main class="flex-1 ml-64 relative overflow-hidden canvas-grid bg-background h-screen">
+<!-- Graph Visualization Layer (Asymmetric/Cinematic nodes) -->
+<div class="absolute inset-0 p-20 flex items-center justify-center">
+<!-- Central Node: The Protagonist -->
+<div class="absolute top-[45%] left-[40%] group">
+<div class="w-24 h-24 rounded-full bg-gradient-to-br from-primary to-primary-container p-0.5 shadow-[0_0_30px_rgba(192,193,255,0.2)] hover:scale-110 transition-transform duration-500 cursor-default">
+<div class="w-full h-full rounded-full bg-surface-container flex items-center justify-center overflow-hidden">
+<img class="w-full h-full object-cover opacity-80" data-alt="close-up portrait of a mysterious man with sharp features and thoughtful expression in dramatic cinematic low light" src="https://lh3.googleusercontent.com/aida-public/AB6AXuDapoYsK6IrrEnDsvEPTx12rGY3YbUA0UJ0sl3UiPa_k0MeAq1_m9yXa834Nhf-EEwd6RzRYWF1IYlI_jDTyS4lmKvm9bnYJAz23wKwRCFlPfwnTtXo1zzT_so84tFj91L95NSDNzILw36jTmAjem_nnMVYrCwwdnvzzmdIq9MwtcHiFFkJctMS8cDGq0F0cnuabUyejLuvWtLkwY81LCrcK06d07UlSSC888cLWmxOPLvOcKck9WIhjqSncFfzxSSTe5a0Qc56"/>
+</div>
+</div>
+<div class="mt-4 text-center">
+<h3 class="text-primary font-bold text-sm tracking-wide">Elias Thorne</h3>
+<p class="text-[10px] text-on-surface-variant uppercase tracking-tighter">The Watchmaker</p>
+</div>
+</div>
+<!-- Connection Lines (SVG) -->
+<svg class="absolute inset-0 w-full h-full pointer-events-none opacity-30">
+<defs>
+<lineargradient id="lineGrad" x1="0%" x2="100%" y1="0%" y2="0%">
+<stop offset="0%" style="stop-color:var(--primary);stop-opacity:0.2"></stop>
+<stop offset="100%" style="stop-color:var(--secondary);stop-opacity:0.2"></stop>
+</lineargradient>
+</defs>
+<!-- Connection Elias to Sarah -->
+<path d="M 45% 48% Q 50% 30% 60% 35%" fill="none" stroke="#c0c1ff" stroke-dasharray="4 4" stroke-width="1.5"></path>
+<!-- Connection Elias to The Clocktower -->
+<path d="M 45% 52% Q 30% 65% 25% 60%" fill="none" stroke="#c0c1ff" stroke-width="1.5"></path>
+<!-- Connection Sarah to The Secret -->
+<path d="M 65% 35% Q 75% 45% 70% 60%" fill="none" stroke="#e9c349" stroke-width="1.5"></path>
+</svg>
+<!-- Secondary Node: The Antagonist/Ally -->
+<div class="absolute top-[28%] left-[62%] group">
+<div class="w-20 h-20 rounded-full border-2 border-primary/30 p-1 hover:border-primary transition-all duration-500 cursor-default bg-surface-container-low/80 backdrop-blur-md">
+<div class="w-full h-full rounded-full overflow-hidden grayscale hover:grayscale-0 transition-all">
+<img class="w-full h-full object-cover" data-alt="atmospheric portrait of a woman in high-fashion editorial style with soft golden light hitting her face" src="https://lh3.googleusercontent.com/aida-public/AB6AXuBkB-pPxWyW7szF-P7mCfeJd8Ce_9DIaSwsnHq-jRswuyysCF8zMYc8h8aSN_e0z3DGbW0WwYEM3TpWF1scMvDJxg_rRxXtXj-eCinXG6aevN5dcbTqotfqxBsrcH8ecpfHhdEL3kWra-8n1uOw7HR3WL5JOAN5uq6p9Mnf_bgs5nLUSvvNNcFZDl4CCqubVZ9XBO17FMFpgk1I1q0YZmGD7At--wKeWXMjvnsFoKSBoZ4qSTeDtLEcrSzfA08aawCdJxorCLWn"/>
+</div>
+</div>
+<div class="mt-3 text-center">
+<h3 class="text-on-surface font-semibold text-xs">Sarah Vane</h3>
+<p class="text-[9px] text-secondary font-medium uppercase tracking-widest">The Catalyst</p>
+</div>
+</div>
+<!-- Setting Node -->
+<div class="absolute bottom-[30%] left-[20%] group">
+<div class="w-16 h-16 rounded-xl bg-surface-container-highest border border-outline-variant/30 flex items-center justify-center rotate-3 group-hover:rotate-0 transition-all duration-500 shadow-xl overflow-hidden">
+<img class="w-full h-full object-cover opacity-60" data-alt="eerie gothic clocktower standing tall against a deep indigo twilight sky with glowing orange windows" src="https://lh3.googleusercontent.com/aida-public/AB6AXuAfkex8vlLgU9hOQjZGljo-cNNhTOtI6mAAK9zHm_1lCTE1jTVkzhnv7xRk6NRqGBHP6ark5tuATxAxSKpZiTUwHNQm3lLFbM7DFFPlwDC24hlKGT5BQpe88hHVcOpmq0vz_ik2iAwpEQtckJqnfQWecYgTfeX6NDFtUxwZktnf5ISiSDwkCPYHOgq47QM1XB3tNrqapDLpzYdXyJmNeNFiqnKg-qpaQRr5tqr62q1VpzUGABlXtxu2QNOHUlojMOrw0betqnWk"/>
+<div class="absolute inset-0 bg-primary/10"></div>
+</div>
+<div class="mt-3 text-left pl-2">
+<h3 class="text-on-surface font-semibold text-xs">The Obsidian Spire</h3>
+<p class="text-[9px] text-on-surface-variant font-medium uppercase tracking-widest">Key Location</p>
+</div>
+</div>
+<!-- Lore/Object Node -->
+<div class="absolute bottom-[25%] left-[68%] group">
+<div class="w-14 h-14 rounded-full bg-surface-container-low border border-secondary/20 flex items-center justify-center backdrop-blur-sm group-hover:scale-125 transition-all">
+<span class="material-symbols-outlined text-secondary text-2xl" data-icon="auto_awesome">auto_awesome</span>
+</div>
+<div class="mt-2 text-center">
+<h3 class="text-secondary font-bold text-[10px] uppercase tracking-tighter">The Chronos Key</h3>
+</div>
+</div>
+</div>
+<!-- Floating AI Monitoring Window (Glassmorphism) -->
+<div class="absolute top-8 right-8 w-72 bg-surface-bright/40 backdrop-blur-xl border border-white/5 rounded-xl p-6 shadow-[0_40px_60px_-15px_rgba(192,193,255,0.06)]">
+<div class="flex items-center gap-2 mb-4">
+<span class="w-2 h-2 rounded-full bg-secondary animate-pulse"></span>
+<span class="text-[10px] text-secondary font-bold uppercase tracking-widest">Agent Insights</span>
+</div>
+<h4 class="font-headline text-on-surface font-bold text-sm mb-2">Narrative Resonance</h4>
+<p class="font-body text-on-surface-variant text-sm leading-relaxed italic mb-4">
+                    "The connection between Elias and the Spire is deepening. Consider the mechanical failure of the 13th hour as a recurring motif."
+                </p>
+<div class="space-y-3">
+<div class="flex justify-between items-center text-[10px] uppercase tracking-widest text-on-surface/40">
+<span>Thematic Strength</span>
+<span class="text-primary">88%</span>
+</div>
+<div class="w-full bg-surface-container-highest h-1 rounded-full overflow-hidden">
+<div class="bg-primary h-full w-[88%]"></div>
+</div>
+</div>
+</div>
+<!-- Interaction Legend (Bottom Bar) -->
+<div class="absolute bottom-8 left-1/2 -translate-x-1/2 bg-surface-container-high/60 backdrop-blur-lg px-8 py-3 rounded-full border border-outline-variant/20 flex items-center gap-10">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-primary text-sm" data-icon="mouse">mouse</span>
+<span class="text-[11px] font-medium text-on-surface-variant">Pan / Zoom</span>
+</div>
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-secondary text-sm" data-icon="info">info</span>
+<span class="text-[11px] font-medium text-on-surface-variant">Click for Details</span>
+</div>
+<div class="h-4 w-[1px] bg-outline-variant/30"></div>
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-on-surface/40 text-sm" data-icon="visibility">visibility</span>
+<span class="text-[11px] font-bold text-on-surface/40 uppercase tracking-widest">Read Only Mode</span>
+</div>
+</div>
+<!-- Zoom Controls -->
+<div class="absolute bottom-8 right-8 flex flex-col gap-2">
+<button class="w-10 h-10 rounded-lg bg-surface-container-high hover:bg-surface-bright transition-colors flex items-center justify-center text-primary border border-outline-variant/20">
+<span class="material-symbols-outlined" data-icon="add">add</span>
+</button>
+<button class="w-10 h-10 rounded-lg bg-surface-container-high hover:bg-surface-bright transition-colors flex items-center justify-center text-primary border border-outline-variant/20">
+<span class="material-symbols-outlined" data-icon="remove">remove</span>
+</button>
+<button class="w-10 h-10 rounded-lg bg-surface-container-high hover:bg-surface-bright transition-colors flex items-center justify-center text-primary border border-outline-variant/20">
+<span class="material-symbols-outlined" data-icon="filter_center_focus">filter_center_focus</span>
+</button>
+</div>
+</main>
+</div>
+</body></html>

@@ -1,6 +1,6 @@
 # NovelBuilder v2
 
-NovelBuilder v2 是一套支援 **多 Agent 協作與人工介入（HITL）** 的長篇小說生成系統。它會先把故事 premise 與世界觀 **編譯成宏觀大綱**（卷、錨點、卡司），再對每一章執行 **LangGraph 章節工作流**（導演 → RAG → 企劃 → 督導 → 主筆 → 讀者 → 可選入庫前修飾 → 狀態結算），並以 SQLite、圖譜與向量庫分層儲存。
+NovelBuilder v2 是一套支援 **多 Agent 協作與人工介入（HITL）** 的長篇小說生成系統。它會先把故事 premise 與世界觀 **編譯成宏觀大綱**（卷、錨點、卡司），再對每一章執行 **LangGraph 章節工作流**（導演 → RAG → 企劃 → 督導 → 主筆 → 讀者 → 抽取關卡 → 狀態結算），並以 SQLite、圖譜與向量庫分層儲存。
 
 ---
 
@@ -12,7 +12,7 @@ NovelBuilder v2 是一套支援 **多 Agent 協作與人工介入（HITL）** �
    將整部故事拆成卷與卷內錨點，寫入卡司、在圖譜建立角色節點。細節見 **[`agent_workflow.md`](agent_workflow.md)** 的〈Macro Planning〉一節。
 
 2. **Chapter workflow（單章工作流）**  
-   產出單章：組裝上下文、雙軌大綱（planner）、多層審核、正文、讀者評分、通過後可選 **prose_polish**（繁體與格式輕修飾），最後抽取並落盤。節點順序、狀態欄位與 **HITL 暫停點** 見 **[`agent_workflow.md`](agent_workflow.md)** 的〈Chapter Workflow〉與後續章節。
+   產出單章：組裝上下文、雙軌大綱（planner）、多層審核、正文（含抽取用 surface hints）、讀者評分，通過後 **extraction_gate** 抽取並落盤。節點順序、狀態欄位與 **HITL 暫停點** 見 **[`agent_workflow.md`](agent_workflow.md)** 的〈Chapter Workflow〉與後續章節。
 
 ### 記憶與儲存
 

@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>The Digital Auteur | Story Setup</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&amp;family=Newsreader:ital,opsz,wght@0,6..72,200..800;1,6..72,200..800&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            colors: {
+              "secondary-container": "#af8d11",
+              "primary-fixed": "#e1e0ff",
+              "surface-container-lowest": "#060e20",
+              "on-surface-variant": "#c7c4d7",
+              "inverse-on-surface": "#283044",
+              "primary": "#c0c1ff",
+              "secondary": "#e9c349",
+              "on-tertiary-fixed": "#301400",
+              "on-surface": "#dae2fd",
+              "surface-container": "#171f33",
+              "on-tertiary-fixed-variant": "#703700",
+              "secondary-fixed-dim": "#e9c349",
+              "surface-container-low": "#131b2e",
+              "surface-container-highest": "#2d3449",
+              "inverse-surface": "#dae2fd",
+              "surface-tint": "#c0c1ff",
+              "on-error-container": "#ffdad6",
+              "on-background": "#dae2fd",
+              "on-secondary-container": "#342800",
+              "background": "#0b1326",
+              "tertiary-fixed-dim": "#ffb783",
+              "error": "#ffb4ab",
+              "on-primary-container": "#0d0096",
+              "error-container": "#93000a",
+              "on-primary": "#1000a9",
+              "tertiary": "#ffb783",
+              "outline-variant": "#464554",
+              "outline": "#908fa0",
+              "on-primary-fixed": "#07006c",
+              "tertiary-container": "#d97721",
+              "inverse-primary": "#494bd6",
+              "surface": "#0b1326",
+              "surface-bright": "#31394d",
+              "on-secondary-fixed": "#241a00",
+              "tertiary-fixed": "#ffdcc5",
+              "on-tertiary-container": "#452000",
+              "on-error": "#690005",
+              "surface-container-high": "#222a3d",
+              "surface-dim": "#0b1326",
+              "on-tertiary": "#4f2500",
+              "on-secondary": "#3c2f00",
+              "on-secondary-fixed-variant": "#574500",
+              "secondary-fixed": "#ffe088",
+              "primary-container": "#8083ff",
+              "surface-variant": "#2d3449",
+              "primary-fixed-dim": "#c0c1ff",
+              "on-primary-fixed-variant": "#2f2ebe"
+            },
+            fontFamily: {
+              "headline": ["Manrope"],
+              "body": ["Newsreader"],
+              "label": ["Manrope"]
+            },
+            borderRadius: {"DEFAULT": "0.125rem", "lg": "0.25rem", "xl": "0.5rem", "full": "0.75rem"},
+          },
+        },
+      }
+    </script>
+<style>
+      .material-symbols-outlined {
+        font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+      }
+      .glass-panel {
+        background: rgba(49, 57, 77, 0.6);
+        backdrop-filter: blur(12px);
+      }
+      .no-scrollbar::-webkit-scrollbar {
+        display: none;
+      }
+      .tab-active {
+        color: #c0c1ff;
+        border-bottom: 2px solid #c0c1ff;
+      }
+    </style>
+</head>
+<body class="bg-background text-on-surface font-body selection:bg-primary/30">
+<!-- TopAppBar -->
+<nav class="bg-[#0b1326] text-[#c0c1ff] font-['Manrope'] tracking-tight full-width top-0 sticky bg-[#161d2f] flex justify-between items-center px-8 h-16 w-full z-50">
+<div class="text-xl font-bold text-[#c0c1ff] uppercase tracking-widest">The Digital Auteur</div>
+<div class="hidden md:flex items-center gap-8">
+<a class="text-[#c0c1ff] border-b-2 border-[#c0c1ff] pb-1 font-semibold hover:text-[#c0c1ff] transition-colors duration-300 scale-95 active:opacity-80 transition-all" href="#">Setup</a>
+<a class="text-[#dae2fd]/60 font-medium hover:text-[#c0c1ff] transition-colors duration-300 scale-95 active:opacity-80 transition-all" href="#">Manuscript</a>
+<a class="text-[#dae2fd]/60 font-medium hover:text-[#c0c1ff] transition-colors duration-300 scale-95 active:opacity-80 transition-all" href="#">Universe Graph</a>
+</div>
+<div class="flex items-center gap-4">
+<span class="material-symbols-outlined text-primary">auto_fix_high</span>
+</div>
+</nav>
+<div class="flex min-h-[calc(100vh-64px)]">
+<!-- SideNavBar -->
+<aside class="hidden lg:flex flex-col py-8 gap-2 bg-[#161d2f] text-[#c0c1ff] font-['Manrope'] text-sm font-medium h-screen w-64 left-0 top-16 sticky no-line tonal-shift shadow-[40px_0_60px_-15px_rgba(192,193,255,0.06)] z-40">
+<div class="px-6 mb-8">
+<div class="text-[#e9c349] font-bold text-lg">Auteur AI</div>
+<div class="text-[10px] uppercase tracking-[0.2em] opacity-50">Creative Engine</div>
+</div>
+<a class="text-[#dae2fd]/50 py-3 px-6 hover:bg-[#dae2fd]/5 hover:text-[#dae2fd] transition-all ease-in-out duration-200 flex items-center gap-3" href="#">
+<span class="material-symbols-outlined">auto_stories</span>
+<span>Library</span>
+</a>
+<a class="bg-[#c0c1ff]/10 text-[#c0c1ff] rounded-r-full py-3 px-6 border-l-4 border-[#c0c1ff] hover:text-[#dae2fd] transition-all ease-in-out duration-200 flex items-center gap-3" href="#">
+<span class="material-symbols-outlined">edit_note</span>
+<span>Active Story</span>
+</a>
+<a class="text-[#dae2fd]/50 py-3 px-6 hover:bg-[#dae2fd]/5 hover:text-[#dae2fd] transition-all ease-in-out duration-200 flex items-center gap-3" href="#">
+<span class="material-symbols-outlined">settings</span>
+<span>Settings</span>
+</a>
+</aside>
+<!-- Main Content Canvas -->
+<main class="flex-1 flex flex-col md:flex-row gap-0 overflow-hidden">
+<!-- Left: Story Setup Panel -->
+<section class="w-full md:w-[400px] lg:w-[450px] bg-surface-container-low p-8 overflow-y-auto no-scrollbar border-r border-outline-variant/10">
+<header class="mb-10">
+<span class="font-label text-secondary text-[10px] uppercase tracking-[0.3em] font-bold mb-2 block">Configuration Phase</span>
+<h1 class="font-headline text-3xl font-extrabold tracking-tight text-on-surface">Architect Your Narrative</h1>
+</header>
+<div class="space-y-8">
+<!-- Title Input -->
+<div class="space-y-2">
+<label class="font-label text-sm text-on-surface-variant font-medium">Story Working Title</label>
+<input class="w-full bg-surface-container-highest border-none rounded-xl px-4 py-3 text-on-surface focus:ring-2 focus:ring-primary/20 transition-all font-body text-lg italic" placeholder="The Neon Weaver's Lament" type="text"/>
+</div>
+<!-- Dual Column Setup -->
+<div class="grid grid-cols-2 gap-4">
+<div class="space-y-2">
+<label class="font-label text-xs text-on-surface-variant font-medium uppercase tracking-wider">Target Genre</label>
+<select class="w-full bg-surface-container-highest border-none rounded-xl px-4 py-3 text-on-surface font-label appearance-none">
+<option>Cyber-Noir</option>
+<option>Gothic Fantasy</option>
+<option>Hard Sci-Fi</option>
+<option>Literary Fiction</option>
+</select>
+</div>
+<div class="space-y-2">
+<label class="font-label text-xs text-on-surface-variant font-medium uppercase tracking-wider">Word Count Goal</label>
+<input class="w-full bg-surface-container-highest border-none rounded-xl px-4 py-3 text-on-surface font-label text-center" type="text" value="85,000"/>
+</div>
+</div>
+<!-- Narrative Complexity -->
+<div class="space-y-4">
+<div class="flex justify-between items-center">
+<label class="font-label text-xs text-on-surface-variant font-medium uppercase tracking-wider">Narrative Complexity</label>
+<span class="text-secondary text-xs font-bold font-label">MAESTRO LEVEL</span>
+</div>
+<div class="h-1.5 w-full bg-surface-container-highest rounded-full overflow-hidden">
+<div class="h-full bg-gradient-to-r from-primary to-primary-container w-3/4 rounded-full"></div>
+</div>
+</div>
+<!-- Premise/Abstract -->
+<div class="space-y-2">
+<label class="font-label text-sm text-on-surface-variant font-medium">Core Abstract</label>
+<textarea class="w-full bg-surface-container-highest border-none rounded-xl px-4 py-3 text-on-surface focus:ring-2 focus:ring-primary/20 transition-all font-body leading-relaxed text-base" placeholder="Describe the soul of your story in 200 words..." rows="5"></textarea>
+</div>
+<!-- Action Button -->
+<button class="w-full bg-gradient-to-br from-primary to-primary-container text-on-primary py-4 rounded-full font-headline font-bold text-base shadow-xl hover:scale-[1.02] active:scale-95 transition-all flex items-center justify-center gap-3">
+<span class="material-symbols-outlined">bolt</span>
+                    RUN MACRO COMPILE
+                </button>
+</div>
+</section>
+<!-- Right: Macro Compile Output -->
+<section class="flex-1 bg-background p-4 md:p-12 lg:p-16 overflow-y-auto">
+<div class="max-w-[750px] mx-auto">
+<div class="flex items-center justify-between mb-8">
+<div>
+<h2 class="font-headline text-sm font-bold text-primary tracking-[0.2em] uppercase mb-1">Macro Compile Output</h2>
+<p class="font-body text-on-surface-variant italic opacity-60">System Version 4.0 // Temporal Consistency: Locked</p>
+</div>
+<div class="flex gap-2">
+<button class="p-2 rounded-lg bg-surface-container text-on-surface hover:bg-surface-container-high transition-colors">
+<span class="material-symbols-outlined">download</span>
+</button>
+<button class="p-2 rounded-lg bg-surface-container text-on-surface hover:bg-surface-container-high transition-colors">
+<span class="material-symbols-outlined">share</span>
+</button>
+</div>
+</div>
+<!-- Sub-tab Navigation -->
+<nav class="flex gap-8 border-b border-outline-variant/10 mb-10 font-label text-sm font-bold uppercase tracking-widest">
+<button class="pb-4 tab-active transition-all">Volumes</button>
+<button class="pb-4 text-on-surface-variant/60 hover:text-on-surface transition-all">Cast</button>
+<button class="pb-4 text-on-surface-variant/60 hover:text-on-surface transition-all">Plot Anchors</button>
+</nav>
+<div class="space-y-16">
+<!-- Volumes View (Default Active) -->
+<div class="space-y-12">
+<!-- Volume 01 -->
+<div class="relative">
+<div class="absolute -left-8 top-0 h-full w-[1px] bg-gradient-to-b from-secondary/40 via-secondary/10 to-transparent"></div>
+<header class="mb-4 flex items-baseline gap-4">
+<h3 class="font-headline text-3xl font-extrabold text-on-surface">Volume I: The Static Pulse</h3>
+<span class="font-label text-[10px] font-bold text-secondary uppercase tracking-widest px-2 py-1 bg-secondary/10 rounded">Exposition Arc</span>
+</header>
+<p class="font-body text-lg leading-relaxed text-on-surface/80 max-w-2xl">
+                                In the rain-slicked neon sprawl of the lower sectors, an unlicensed data-weaver unearths a signal that shouldn't exist—a pulse originating from within the city's living infrastructure itself.
+                            </p>
+</div>
+<!-- Volume 02 -->
+<div class="relative">
+<div class="absolute -left-8 top-0 h-full w-[1px] bg-gradient-to-b from-primary/40 via-primary/10 to-transparent"></div>
+<header class="mb-4 flex items-baseline gap-4">
+<h3 class="font-headline text-3xl font-extrabold text-on-surface">Volume II: Echoes of Rust</h3>
+<span class="font-label text-[10px] font-bold text-primary-container uppercase tracking-widest px-2 py-1 bg-primary/10 rounded">Rising Action</span>
+</header>
+<p class="font-body text-lg leading-relaxed text-on-surface/80 max-w-2xl">
+                                As the Citadel's security layers fracture, the journey leads beyond the city walls into the Rust Wastes, where the true cost of digital immortality is revealed through a series of forgotten prototypes.
+                            </p>
+</div>
+</div>
+<!-- Note: In a real app, Cast and Plot Anchors would be toggled. For this static design, we focus on the requested structure. -->
+<!-- AI Agent Monitor Window (Floating) -->
+<div class="mt-20 p-6 glass-panel rounded-xl border border-outline-variant/20 shadow-[0_40px_60px_-15px_rgba(192,193,255,0.1)] relative overflow-hidden group">
+<div class="absolute top-0 right-0 p-4">
+<span class="flex h-2 w-2 rounded-full bg-tertiary animate-pulse"></span>
+</div>
+<div class="flex items-center gap-4 mb-4">
+<div class="w-10 h-10 rounded-full bg-primary/20 flex items-center justify-center">
+<span class="material-symbols-outlined text-primary">psychology</span>
+</div>
+<div>
+<h5 class="font-headline text-sm font-bold text-on-surface">Narrative Intelligence Engine</h5>
+<p class="font-label text-[10px] text-tertiary uppercase tracking-widest font-bold">Analysis Active</p>
+</div>
+</div>
+<p class="font-body text-sm text-on-surface-variant leading-relaxed mb-4">
+                            "Volume II requires a higher tension delta. Suggesting the addition of a 'Time-Critical Moral Dilemma' to align with the Cyber-Noir genre conventions."
+                        </p>
+<div class="flex gap-4">
+<button class="text-xs font-label text-primary font-bold hover:underline">Apply Suggestion</button>
+<button class="text-xs font-label text-on-surface-variant hover:text-on-surface transition-colors">Dismiss</button>
+</div>
+</div>
+</div>
+</div>
+</section>
+</main>
+</div>
+<!-- Background Decoration -->
+<div class="fixed inset-0 pointer-events-none -z-10 opacity-30">
+<div class="absolute top-[20%] right-[10%] w-[500px] h-[500px] bg-primary/5 rounded-full blur-[120px]"></div>
+<div class="absolute bottom-[10%] left-[5%] w-[400px] h-[400px] bg-secondary/5 rounded-full blur-[100px]"></div>
+</div>
+</body></html>

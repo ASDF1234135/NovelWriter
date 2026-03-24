@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.domain.schema import (
+    ChapterExtractionOutput,
     ChapterMemory,
     EdgeMutation,
     EdgeType,
@@ -37,7 +38,11 @@ def run_state_updater(state: dict, context: WorkflowContext) -> dict:
         state["pov_character_id"],
         "loc_unknown",
     }
-    extracted, _ = extract_chapter_artifacts(state, context, graph_snapshot, chapter_content, events)
+    pending_raw = state.get("pending_chapter_extraction") or {}
+    if pending_raw:
+        extracted = ChapterExtractionOutput.model_validate(pending_raw)
+    else:
+        extracted, _ = extract_chapter_artifacts(state, context, graph_snapshot, chapter_content, events)
     new_ids: set[str] = set()
     mutations: list[NodeMutation | EdgeMutation] = []
     resolved_entities, resolved_name_index = _resolve_extracted_entities(extracted.entities, existing_nodes_by_id)

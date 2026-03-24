@@ -5,7 +5,12 @@ from typing import Any
 
 from app.core.config import get_settings
 from app.domain.schema import EventOutline
-from app.domain.state import SafeAuthorPayload, SafePlannerPayload, SafeSupervisorPayload
+from app.domain.state import (
+    SafeAuthorPayload,
+    SafePlannerPayload,
+    SafeSupervisorPayload,
+    planned_nodes_to_mandatory_entities,
+)
 from app.services.workflow.constants import (
     PLAN_SUPERVISOR_BIBLE_CAP,
     PLAN_SUPERVISOR_ENDING_BOUNDARY_CAP,
@@ -69,11 +74,22 @@ def build_planner_payload(state: dict, story: dict | None = None, volumes: list[
         default_chapter_words=int(state.get("target_word_count") or settings.default_chapter_words),
         chapter_word_min=settings.chapter_word_min,
         chapter_word_max=settings.chapter_word_max,
+        chapter_type=str(state.get("chapter_type") or "PLOT_DRIVEN"),
+        b_story_directive=state.get("b_story_directive"),
+        new_elements_to_introduce=list(state.get("new_elements_to_introduce") or []),
+        distance_to_anchor=state.get("distance_to_anchor"),
+        active_b_stories=list(state.get("active_b_stories") or []),
     )
 
 
 def build_author_payload(state: dict) -> SafeAuthorPayload:
     target_word_count = state["target_word_count"]
+    nmin = int(state.get("normalized_length_min") or 0)
+    nmax = int(state.get("normalized_length_max") or 0)
+    if nmin <= 0 or nmax <= 0:
+        nmin = int(target_word_count * 0.65)
+        nmax = int(target_word_count * 1.35)
+    mandatory = planned_nodes_to_mandatory_entities(list(state.get("planned_graph_nodes") or []))
     return SafeAuthorPayload(
         narrative_script=state["narrative_script"],
         chapter_start_location=state.get("chapter_start_location", ""),
@@ -88,8 +104,8 @@ def build_author_payload(state: dict) -> SafeAuthorPayload:
         forbidden_reveals=state.get("forbidden_reveals", []),
         tone_direction=state["tone_direction"],
         target_word_count=target_word_count,
-        normalized_length_min=int(target_word_count * 0.65),
-        normalized_length_max=int(target_word_count * 1.35),
+        normalized_length_min=nmin,
+        normalized_length_max=nmax,
         previous_chapter_summary=state.get("previous_chapter_summary", ""),
         previous_attempt_draft=state.get("current_draft", ""),
         last_known_location=state.get("last_known_location", ""),
@@ -98,6 +114,7 @@ def build_author_payload(state: dict) -> SafeAuthorPayload:
         draft_feedback=state["draft_feedback"],
         reader_feedback=state["reader_feedback"],
         length_adjustment=state.get("length_adjustment", "NONE"),
+        mandatory_new_entities=mandatory,
     )
 
 
@@ -135,6 +152,11 @@ def build_plan_supervisor_payload(state: dict) -> SafeSupervisorPayload:
         graph_context=state["graph_context"],
         vector_context=state["vector_context"],
         bible_context=state["bible_context"],
+        chapter_type=str(state.get("chapter_type") or "PLOT_DRIVEN"),
+        distance_to_anchor=state.get("distance_to_anchor"),
+        b_story_directive=state.get("b_story_directive"),
+        new_elements_to_introduce=list(state.get("new_elements_to_introduce") or []),
+        proposed_new_nodes=list(state.get("planned_graph_nodes") or []),
     )
 
 
@@ -174,6 +196,14 @@ def build_draft_supervisor_payload(state: dict) -> SafeSupervisorPayload:
         graph_context=state["graph_context"],
         vector_context=state["vector_context"],
         bible_context=state["bible_context"],
+        chapter_type=str(state.get("chapter_type") or "PLOT_DRIVEN"),
+        distance_to_anchor=state.get("distance_to_anchor"),
+        b_story_directive=state.get("b_story_directive"),
+        new_elements_to_introduce=list(state.get("new_elements_to_introduce") or []),
+        proposed_new_nodes=list(state.get("planned_graph_nodes") or []),
+        normalized_length_min=int(state.get("normalized_length_min") or 0),
+        normalized_length_max=int(state.get("normalized_length_max") or 0),
+        mandatory_new_entities=planned_nodes_to_mandatory_entities(list(state.get("planned_graph_nodes") or [])),
     )
 
 
@@ -218,6 +248,11 @@ def compact_plan_supervisor_payload_for_prompt(payload: SafeSupervisorPayload) -
         "graph_context": (payload.graph_context or "")[:PLAN_SUPERVISOR_GRAPH_CAP],
         "vector_context": (payload.vector_context or "")[:PLAN_SUPERVISOR_VECTOR_CAP],
         "bible_context": (payload.bible_context or "")[:PLAN_SUPERVISOR_BIBLE_CAP],
+        "chapter_type": payload.chapter_type,
+        "distance_to_anchor": payload.distance_to_anchor,
+        "b_story_directive": (payload.b_story_directive or "")[:240],
+        "new_elements_to_introduce": (payload.new_elements_to_introduce or [])[:8],
+        "proposed_new_nodes": (payload.proposed_new_nodes or [])[:3],
     }
     return json.dumps(compact, ensure_ascii=False, indent=2)
 

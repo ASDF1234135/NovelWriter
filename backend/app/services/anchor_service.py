@@ -20,7 +20,7 @@ from app.services.workflow.profiles import get_profile
 class AnchorService:
     def compile_macro_plan(
         self, story_id: str, story_input: StoryInput, llm_client: LLMClient | None = None
-    ) -> tuple[list[VolumePlan], list[StateAnchor], list[StoryCastMemberStored]]:
+    ) -> tuple[list[VolumePlan], list[StateAnchor], list[StoryCastMemberStored], list[dict[str, str]]]:
         fixed_total_chapters = max(12, story_input.target_total_words // 2500)
         if llm_client is not None and not isinstance(llm_client, MockLLMClient):
             profile = get_profile("macro_planner")
@@ -33,7 +33,7 @@ class AnchorService:
 
     def _build_mock_macro_plan(
         self, story_id: str, story_input: StoryInput
-    ) -> tuple[list[VolumePlan], list[StateAnchor], list[StoryCastMemberStored]]:
+    ) -> tuple[list[VolumePlan], list[StateAnchor], list[StoryCastMemberStored], list[dict[str, str]]]:
         total_chapters = max(12, story_input.target_total_words // 2500)
         volume_breaks = [1, total_chapters // 3, (total_chapters // 3) * 2, total_chapters]
         total_words = max(12_000, story_input.target_total_words)
@@ -253,7 +253,7 @@ class AnchorService:
         fixed_total_chapters: int,
         target_total_words: int,
         story_input: StoryInput,
-    ) -> tuple[list[VolumePlan], list[StateAnchor], list[StoryCastMemberStored]]:
+    ) -> tuple[list[VolumePlan], list[StateAnchor], list[StoryCastMemberStored], list[dict[str, str]]]:
         total_chapters = max(6, fixed_total_chapters)
         raw_volumes = output.volumes or self._fallback_volume_plan_drafts(total_chapters)
         normalized_drafts = sorted(raw_volumes, key=lambda volume: volume.chapter_start)
@@ -309,7 +309,15 @@ class AnchorService:
                 )
             )
         cast_stored = self._normalize_cast_output(story_id, output.cast, story_input)
-        return volumes, anchors, cast_stored
+        b_seed: list[dict[str, str]] = []
+        for raw in output.initial_b_stories or []:
+            if not isinstance(raw, dict):
+                continue
+            bid = str(raw.get("id") or "").strip()
+            if not bid:
+                continue
+            b_seed.append({"id": bid, "desc": str(raw.get("desc") or "")[:800]})
+        return volumes, anchors, cast_stored, b_seed
 
     def _coerce_volume_anchors(self, volume: VolumePlan, raw: list[MacroNestedAnchorDraft]) -> list[MacroNestedAnchorDraft]:
         clamped: list[MacroNestedAnchorDraft] = []

@@ -4,7 +4,7 @@ from typing import Any, NotRequired, TypedDict
 
 from pydantic import BaseModel, Field
 
-from app.domain.schema import EventOutline, HitlDecisionMode, LengthAdjustment
+from app.domain.schema import EventOutline, HitlDecisionMode, LengthAdjustment, MandatoryNewEntity
 
 
 class AgentWorkflowState(TypedDict):
@@ -68,7 +68,20 @@ class AgentWorkflowState(TypedDict):
     manual_override_payload: NotRequired[dict[str, Any]]
     state_updater_output: NotRequired[dict[str, Any]]
     state_transaction_id: NotRequired[str]
-    prose_polish_diagnostics: NotRequired[dict[str, Any]]
+    author_extraction_surface_hints: NotRequired[list[dict[str, Any]]]
+    chapter_type: NotRequired[str]
+    b_story_directive: NotRequired[str | None]
+    new_elements_to_introduce: NotRequired[list[str]]
+    active_b_stories: NotRequired[list[dict[str, Any]]]
+    distance_to_anchor: NotRequired[int | None]
+    planned_graph_nodes: NotRequired[list[dict[str, Any]]]
+    normalized_length_min: NotRequired[int]
+    normalized_length_max: NotRequired[int]
+    plan_warnings: NotRequired[list[str]]
+    pending_chapter_extraction: NotRequired[dict[str, Any]]
+    b_story_resolution: NotRequired[dict[str, Any]]
+    post_polish_route: NotRequired[str]
+    pending_b_story_additions: NotRequired[list[dict[str, Any]]]
 
 
 class SafeAuthorPayload(BaseModel):
@@ -95,6 +108,7 @@ class SafeAuthorPayload(BaseModel):
     draft_feedback: list[dict[str, Any]] = Field(default_factory=list)
     reader_feedback: list[dict[str, Any]] = Field(default_factory=list)
     length_adjustment: LengthAdjustment = LengthAdjustment.NONE
+    mandatory_new_entities: list[MandatoryNewEntity] = Field(default_factory=list)
 
 
 class SafePlannerPayload(BaseModel):
@@ -125,6 +139,11 @@ class SafePlannerPayload(BaseModel):
     )
     chapter_word_min: int = 800
     chapter_word_max: int = 12000
+    chapter_type: str = "PLOT_DRIVEN"
+    b_story_directive: str | None = None
+    new_elements_to_introduce: list[str] = Field(default_factory=list)
+    distance_to_anchor: int | None = None
+    active_b_stories: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class SafeSupervisorPayload(BaseModel):
@@ -154,6 +173,14 @@ class SafeSupervisorPayload(BaseModel):
     graph_context: str = ""
     vector_context: str = ""
     bible_context: str = ""
+    chapter_type: str = "PLOT_DRIVEN"
+    distance_to_anchor: int | None = None
+    b_story_directive: str | None = None
+    new_elements_to_introduce: list[str] = Field(default_factory=list)
+    proposed_new_nodes: list[dict[str, Any]] = Field(default_factory=list)
+    normalized_length_min: int = 0
+    normalized_length_max: int = 0
+    mandatory_new_entities: list[MandatoryNewEntity] = Field(default_factory=list)
 
 
 class WorkflowBootstrapState(BaseModel):
@@ -231,4 +258,75 @@ def build_initial_state(
         draft_route="author",
         reader_route="author",
         resume_from="director",
+        chapter_type="PLOT_DRIVEN",
+        b_story_directive=None,
+        new_elements_to_introduce=[],
+        active_b_stories=[],
+        distance_to_anchor=None,
+        planned_graph_nodes=[],
+        normalized_length_min=0,
+        normalized_length_max=0,
+        plan_warnings=[],
+        post_polish_route="resolve_subplots",
+        author_extraction_surface_hints=[],
     )
+
+
+def normalize_workflow_state(state: dict[str, Any]) -> dict[str, Any]:
+    """Fill defaults for workflow state (migration / resume compatibility)."""
+    defaults: dict[str, Any] = {
+        "chapter_type": "WORLD_BUILDING",
+        "b_story_directive": None,
+        "new_elements_to_introduce": [],
+        "active_b_stories": [],
+        "distance_to_anchor": None,
+        "planned_graph_nodes": [],
+        "normalized_length_min": 0,
+        "normalized_length_max": 0,
+        "plan_warnings": [],
+        "post_polish_route": "resolve_subplots",
+        "pending_b_story_additions": [],
+        "author_extraction_surface_hints": [],
+    }
+    for key, val in defaults.items():
+        if key not in state:
+            state[key] = val
+    if state.get("resume_from") == "prose_polish":
+        state["resume_from"] = "extraction_gate"
+    return state
+
+
+def apply_length_bounds_to_state(state: dict[str, Any]) -> dict[str, Any]:
+    """SSOT: derive normalized length window from target_word_count (single writer)."""
+    tw = int(state.get("target_word_count") or 0)
+    if tw < 1:
+        tw = 2500
+    state["normalized_length_min"] = int(tw * 0.65)
+    state["normalized_length_max"] = int(tw * 1.35)
+    return state
+
+
+def planned_nodes_to_mandatory_entities(planned: list[dict[str, Any]]) -> list[MandatoryNewEntity]:
+    out: list[MandatoryNewEntity] = []
+    for row in planned:
+        if not row.get("mandatory", True):
+            continue
+        if row.get("node_type") not in ("CHARACTER", "PERSONA", "LOCATION", "ITEM"):
+            continue
+        node_id = (row.get("node_id") or "").strip()
+        if not node_id:
+            continue
+        role = (row.get("role") or "").strip()
+        canonical = (row.get("canonical_name") or "").strip()
+        brief = (row.get("writing_brief") or "").strip()
+        kws = [x for x in [role, canonical] if x]
+        out.append(
+            MandatoryNewEntity(
+                node_id=node_id,
+                role=role,
+                canonical_name=canonical,
+                writing_brief=brief or f"本章必須讓讀者能辨識此實體（{role or canonical or node_id}）。",
+                search_keywords=kws,
+            )
+        )
+    return out

@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&amp;family=Newsreader:ital,opsz,wght@0,6..72,200..800;1,6..72,200..800&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            colors: {
+              "secondary-container": "#af8d11",
+              "primary-fixed": "#e1e0ff",
+              "surface-container-lowest": "#060e20",
+              "on-surface-variant": "#c7c4d7",
+              "inverse-on-surface": "#283044",
+              "primary": "#c0c1ff",
+              "secondary": "#e9c349",
+              "on-tertiary-fixed": "#301400",
+              "on-surface": "#dae2fd",
+              "surface-container": "#171f33",
+              "on-tertiary-fixed-variant": "#703700",
+              "secondary-fixed-dim": "#e9c349",
+              "surface-container-low": "#131b2e",
+              "surface-container-highest": "#2d3449",
+              "inverse-surface": "#dae2fd",
+              "surface-tint": "#c0c1ff",
+              "on-error-container": "#ffdad6",
+              "on-background": "#dae2fd",
+              "on-secondary-container": "#342800",
+              "background": "#0b1326",
+              "tertiary-fixed-dim": "#ffb783",
+              "error": "#ffb4ab",
+              "on-primary-container": "#0d0096",
+              "error-container": "#93000a",
+              "on-primary": "#1000a9",
+              "tertiary": "#ffb783",
+              "outline-variant": "#464554",
+              "outline": "#908fa0",
+              "on-primary-fixed": "#07006c",
+              "tertiary-container": "#d97721",
+              "inverse-primary": "#494bd6",
+              "surface": "#0b1326",
+              "surface-bright": "#31394d",
+              "on-secondary-fixed": "#241a00",
+              "tertiary-fixed": "#ffdcc5",
+              "on-tertiary-container": "#452000",
+              "on-error": "#690005",
+              "surface-container-high": "#222a3d",
+              "surface-dim": "#0b1326",
+              "on-tertiary": "#4f2500",
+              "on-secondary": "#3c2f00",
+              "on-secondary-fixed-variant": "#574500",
+              "secondary-fixed": "#ffe088",
+              "primary-container": "#8083ff",
+              "surface-variant": "#2d3449",
+              "primary-fixed-dim": "#c0c1ff",
+              "on-primary-fixed-variant": "#2f2ebe"
+            },
+            fontFamily: {
+              "headline": ["Manrope"],
+              "body": ["Newsreader"],
+              "label": ["Manrope"]
+            },
+            borderRadius: {"DEFAULT": "0.125rem", "lg": "0.25rem", "xl": "0.5rem", "full": "0.75rem"},
+          },
+        },
+      }
+    </script>
+<style>
+      .material-symbols-outlined {
+        font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+      }
+      .glass-panel {
+        background: rgba(49, 57, 77, 0.6);
+        backdrop-filter: blur(12px);
+      }
+      ::-webkit-scrollbar { width: 4px; }
+      ::-webkit-scrollbar-track { background: transparent; }
+      ::-webkit-scrollbar-thumb { background: #464554; border-radius: 10px; }
+    </style>
+</head>
+<body class="bg-background text-on-surface font-label selection:bg-primary-container/30">
+<!-- Top Navigation Anchor -->
+<header class="bg-[#0b1326] text-[#c0c1ff] font-['Manrope'] tracking-tight full-width top-0 sticky bg-[#161d2f] flat no shadows flex justify-between items-center px-8 h-16 w-full z-50">
+<div class="text-xl font-bold text-[#c0c1ff] uppercase tracking-widest">The Digital Auteur</div>
+<nav class="hidden md:flex items-center gap-8">
+<a class="text-[#dae2fd]/60 font-medium hover:text-[#c0c1ff] transition-colors duration-300 scale-95 active:opacity-80 transition-all" href="#">Setup</a>
+<a class="text-[#c0c1ff] border-b-2 border-[#c0c1ff] pb-1 font-semibold hover:text-[#c0c1ff] transition-colors duration-300 scale-95 active:opacity-80 transition-all" href="#">Manuscript</a>
+<a class="text-[#dae2fd]/60 font-medium hover:text-[#c0c1ff] transition-colors duration-300 scale-95 active:opacity-80 transition-all" href="#">Universe Graph</a>
+</nav>
+<button class="bg-gradient-to-br from-primary to-primary-container text-on-primary px-5 py-2 rounded-full font-bold text-xs uppercase tracking-wider flex items-center gap-2 transition-all hover:shadow-[0_0_20px_rgba(192,193,255,0.3)]">
+<span class="material-symbols-outlined text-sm">download</span>
+            Download TXT
+        </button>
+</header>
+<div class="flex h-[calc(100vh-64px)] overflow-hidden">
+<!-- Left Sidebar Navigation -->
+<aside class="bg-[#161d2f] text-[#c0c1ff] font-['Manrope'] text-sm font-medium h-screen w-64 left-0 top-0 fixed no-line tonal-shift shadow-[40px_0_60px_-15px_rgba(192,193,255,0.06)] flex flex-col py-8 gap-2 relative z-40">
+<div class="px-6 mb-8">
+<div class="text-[#e9c349] font-bold text-lg">Auteur AI</div>
+<div class="text-xs opacity-50 uppercase tracking-widest">Creative Engine</div>
+</div>
+<a class="text-[#dae2fd]/50 py-3 px-6 hover:bg-[#dae2fd]/5 hover:text-[#dae2fd] transition-all ease-in-out duration-200 flex items-center gap-4" href="#">
+<span class="material-symbols-outlined">auto_stories</span>
+                Library
+            </a>
+<a class="bg-[#c0c1ff]/10 text-[#c0c1ff] rounded-r-full py-3 px-6 border-l-4 border-[#c0c1ff] hover:text-[#dae2fd] hover:bg-[#ffffff]/5 transition-all ease-in-out duration-200 flex items-center gap-4" href="#">
+<span class="material-symbols-outlined">edit_note</span>
+                Active Story
+            </a>
+<a class="text-[#dae2fd]/50 py-3 px-6 hover:bg-[#dae2fd]/5 hover:text-[#dae2fd] transition-all ease-in-out duration-200 flex items-center gap-4" href="#">
+<span class="material-symbols-outlined">settings</span>
+                Settings
+            </a>
+</aside>
+<!-- Main Content Layout -->
+<main class="flex-1 flex flex-col relative ml-64 bg-surface-container-lowest">
+<div class="flex-1 flex overflow-hidden">
+<!-- Manuscript Reading Canvas -->
+<section class="flex-1 overflow-y-auto px-20 py-16 scroll-smooth">
+<div class="max-w-[650px] mx-auto">
+<header class="mb-16">
+<span class="font-label text-secondary text-sm font-bold tracking-[0.2em] uppercase">Chapter IV</span>
+<h1 class="font-body italic text-5xl text-on-surface mt-4 leading-tight">The Obsidian Horizon</h1>
+<div class="mt-8 flex items-center gap-6 text-on-surface-variant font-label text-xs tracking-widest uppercase">
+<span>Word Count: 12,402</span>
+<span class="w-1 h-1 bg-outline-variant rounded-full"></span>
+<span>Tone: Melancholic Noir</span>
+</div>
+</header>
+<article class="font-body text-xl leading-[1.8] text-on-surface/90 space-y-8 first-letter:text-7xl first-letter:font-bold first-letter:mr-3 first-letter:float-left first-letter:text-primary">
+<p>
+                                The rain in New Aethelgard didn't just fall; it dissolved. It was a chemical mist that clung to the neon filaments of the lower wards, turning the world into a smeared watercolor of electric indigo and dying amber. Elias stood at the edge of the cantilevered pier, the haptic sensors in his coat humming as they translated the damp wind into a rhythmic vibration against his spine.
+                            </p>
+<p>
+                                Below him, the sea was a restless abyss of black oil. It swallowed the light of the orbital rings, reflecting nothing back but the void. "The algorithm suggests a change in tempo here," a voice crackled in his inner ear—the dry, synthetic rasp of the Narrative Architect. "Your pulse is spiking. It’s too soon for the confrontation."
+                            </p>
+<p>
+                                Elias ignored the voice. He watched a single freighter drift across the horizon, its silhouette cutting through the smog like a jagged obsidian knife. He could feel the story pulling at him, the inevitable gravity of a plot he hadn't written but was forced to inhabit. The agents were busy in the background, stitching together his past from fragments of data and discarded memories, weaving a noose of causality that he couldn't hope to escape.
+                            </p>
+<p>
+                                "Give me the coordinates," Elias whispered into the cold air. The rain tasted of copper and old circuits. "If the end is coming, I want to see it with my own eyes."
+                            </p>
+<p>
+                                The text continued to flow, emerging word by word on the virtual parchment as the generative engine processed the next sequence of events. There was no cursor, no blinking line—only the steady, relentless march of prose appearing as if from a ghost's typewriter.
+                            </p>
+</article>
+<div class="mt-20 py-10 flex flex-col items-center gap-4 opacity-40">
+<div class="w-px h-12 bg-gradient-to-b from-primary to-transparent"></div>
+<span class="text-[10px] tracking-[0.4em] uppercase font-label">Generating Continuation...</span>
+</div>
+</div>
+</section>
+<!-- Agent Observation Panel -->
+<aside class="w-80 bg-surface-container-low border-l border-outline-variant/10 flex flex-col">
+<div class="p-6 border-b border-outline-variant/10">
+<h2 class="font-label font-extrabold text-xs uppercase tracking-[0.2em] text-primary flex items-center gap-2">
+<span class="material-symbols-outlined text-sm">monitoring</span>
+                            Agent Observation
+                        </h2>
+</div>
+<div class="flex-1 overflow-y-auto p-4 space-y-4">
+<!-- Agent Card: Plot Weaver -->
+<div class="bg-surface-container-high rounded-xl p-4 transition-all hover:bg-surface-bright/20 border border-transparent hover:border-outline-variant/20">
+<div class="flex justify-between items-start mb-3">
+<div>
+<h3 class="text-xs font-bold text-on-surface">Plot Weaver</h3>
+<span class="text-[10px] text-tertiary uppercase font-bold tracking-tighter">Analyzing Pacing</span>
+</div>
+<span class="material-symbols-outlined text-primary text-lg" data-weight="fill">hub</span>
+</div>
+<p class="text-[11px] text-on-surface-variant leading-relaxed mb-3">Identifying tension peaks in the transition between Act I and II. Suggesting sub-plot integration for Elias's back-story.</p>
+<div class="flex items-center gap-2">
+<div class="flex-1 h-1 bg-surface-container-lowest rounded-full">
+<div class="h-full bg-secondary w-2/3"></div>
+</div>
+<span class="text-[9px] text-outline">67%</span>
+</div>
+</div>
+<!-- Agent Card: Stylist -->
+<div class="bg-surface-container-high rounded-xl p-4 transition-all hover:bg-surface-bright/20 border border-transparent hover:border-outline-variant/20">
+<div class="flex justify-between items-start mb-3">
+<div>
+<h3 class="text-xs font-bold text-on-surface">Style Architect</h3>
+<span class="text-[10px] text-primary uppercase font-bold tracking-tighter">Active Rendering</span>
+</div>
+<span class="material-symbols-outlined text-secondary text-lg">auto_fix_high</span>
+</div>
+<p class="text-[11px] text-on-surface-variant leading-relaxed mb-3">Enhancing sensory descriptions. Current focus: Atmospheric chemical rain and olfactory triggers.</p>
+<div class="flex gap-1">
+<span class="w-1 h-1 bg-primary rounded-full animate-pulse"></span>
+<span class="w-1 h-1 bg-primary rounded-full animate-pulse delay-75"></span>
+<span class="w-1 h-1 bg-primary rounded-full animate-pulse delay-150"></span>
+</div>
+</div>
+<!-- Agent Card: World Builder -->
+<div class="bg-surface-container-high rounded-xl p-4 transition-all hover:bg-surface-bright/20 border border-transparent hover:border-outline-variant/20">
+<div class="flex justify-between items-start mb-3">
+<div>
+<h3 class="text-xs font-bold text-on-surface">Lore Guardian</h3>
+<span class="text-[10px] text-on-surface-variant uppercase font-bold tracking-tighter">Idle / Watching</span>
+</div>
+<span class="material-symbols-outlined text-outline text-lg">public</span>
+</div>
+<p class="text-[11px] text-on-surface-variant leading-relaxed">No consistency errors detected in New Aethelgard history logs.</p>
+</div>
+<!-- Graph Thumbnail -->
+<div class="relative aspect-square w-full rounded-xl overflow-hidden mt-6 bg-surface-container-lowest border border-outline-variant/20 group">
+<img class="w-full h-full object-cover opacity-40 group-hover:scale-110 transition-transform duration-700" data-alt="Abstract network of glowing blue and gold lines on a dark background representing a complex digital brain or neural network" src="https://lh3.googleusercontent.com/aida-public/AB6AXuD_7qQIMeMyl2gwPZnREv0yGdVRU2KjF-nNIE0LNs0kDemKeAYL9V-dl1zYRH-CNKTTcqhJPuNPgn2aUkDaOiyWWX-xVrguev_Wgcdm_37gk1x-BN5vCDklwV2AHR6oEbH7hBQn9VYhE65E0zYrPLa51fMmcDPENjU8Qg1iqqu6FW0DEisGrkWpb2860DCbJk4_iRzTfUa5aPjanfoHsC80cPExlsZFFLmVo-YyzN3lLmSIY9JTb5abHANnqnh3qmnha8ZFURNd"/>
+<div class="absolute inset-0 flex flex-col items-center justify-center p-4 text-center">
+<span class="text-[10px] uppercase tracking-widest text-primary font-bold mb-2">Universe Synapse</span>
+<span class="material-symbols-outlined text-3xl text-secondary mb-2">model_training</span>
+<p class="text-[9px] text-on-surface-variant">Live visual of narrative node connections.</p>
+</div>
+</div>
+</div>
+</aside>
+</div>
+<!-- HITL Control Console -->
+</main>
+</div>
+</body></html>

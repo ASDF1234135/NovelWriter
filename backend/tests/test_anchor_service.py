@@ -102,7 +102,7 @@ class FakeStructuredLLMClient:
 
 def test_anchor_service_can_use_structured_llm_output() -> None:
     service = AnchorService()
-    volumes, anchors, cast = service.compile_macro_plan(
+    volumes, anchors, cast, b_seed = service.compile_macro_plan(
         "story_test",
         StoryInput(
             title="王都疑雲",
@@ -113,6 +113,7 @@ def test_anchor_service_can_use_structured_llm_output() -> None:
         FakeStructuredLLMClient(),
     )
 
+    assert b_seed == []
     assert len(volumes) == 3
     assert volumes[0].title == "卷一：流放歸來"
     assert volumes[-1].chapter_end == 18
@@ -128,7 +129,7 @@ def test_anchor_service_can_use_structured_llm_output() -> None:
 
 def test_anchor_service_clamps_llm_plan_to_formula_total_chapters() -> None:
     service = AnchorService()
-    volumes, anchors, cast = service.compile_macro_plan(
+    volumes, anchors, cast, b_seed = service.compile_macro_plan(
         "story_formula",
         StoryInput(
             title="短篇測試",
@@ -139,6 +140,7 @@ def test_anchor_service_clamps_llm_plan_to_formula_total_chapters() -> None:
         FakeStructuredLLMClient(),
     )
 
+    assert b_seed == []
     assert volumes[-1].chapter_end == 12
     assert max(anchor.chapter_target for anchor in anchors) <= 12
     assert sum(volume.target_volume_words for volume in volumes) == 30000

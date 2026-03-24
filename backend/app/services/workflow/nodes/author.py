@@ -1,11 +1,49 @@
 from __future__ import annotations
 
-from app.domain.schema import AuthorOutput
+import json
+
+from app.domain.schema import AuthorExtractionHintsOutput, AuthorExtractionSurfaceEntry, AuthorOutput
 from app.services.llm import MockLLMClient
 from app.services.workflow.context import WorkflowContext
 from app.services.workflow.masking import build_author_payload
 from app.services.workflow.profiles import get_profile
 from app.services.workflow.utils import normalized_text_length
+
+_MAX_HINTS_CHAPTER_CHARS = 28000
+
+
+def _filter_surface_hints_to_exact_substrings(chapter_content: str, hints: AuthorExtractionHintsOutput) -> list[dict]:
+    """Drop any surface string not occurring verbatim in chapter_content."""
+    out: list[dict] = []
+    for ent in hints.entries:
+        nid = (ent.node_id or "").strip()
+        if not nid:
+            continue
+        ok = [s for s in ent.surface_forms if isinstance(s, str) and s and s in chapter_content]
+        out.append({"node_id": nid, "surface_forms": ok})
+    return out
+
+
+def _build_extraction_hints_prompt(chapter_content: str, state: dict, payload) -> str:
+    excerpt = chapter_content[:_MAX_HINTS_CHAPTER_CHARS]
+    planned = list(state.get("planned_graph_nodes") or [])
+    mandatory = getattr(payload, "mandatory_new_entities", None) or []
+    mand_ids = [{"node_id": m.node_id, "role": m.role, "canonical_name": m.canonical_name} for m in mandatory]
+    instructions = {
+        "task": "author_extraction_surface_hints",
+        "rules": [
+            "輸出 JSON：entries 為陣列；每項含 node_id 與 surface_forms（字串陣列）。",
+            "僅處理本章規劃或必選相關的 node_id（見 planned_graph_nodes 與 mandatory_new_entities）。",
+            "surface_forms 中每個字串必須是章節正文中可找到的「精確子字串」：與原文完全一致，含標點與空白；禁止改寫、概括、增刪標點或同義替換。",
+            "若某 node_id 在正文沒有任何可逐字摘錄的稱呼，該項的 surface_forms 必須為空陣列 []。",
+            "禁止發明正文中不存在的字串。",
+        ],
+        "planned_graph_nodes": planned[:24],
+        "mandatory_new_entities": mand_ids,
+        "chapter_excerpt": excerpt,
+        "excerpt_was_truncated": len(chapter_content) > len(excerpt),
+    }
+    return json.dumps(instructions, ensure_ascii=False)
 
 
 def _format_author_safe_continuity(notes: list[str]) -> str:
@@ -78,11 +116,26 @@ def run_author(state: dict, context: WorkflowContext) -> tuple[dict, dict, int, 
             token_usage += repair_tokens
             latency_ms += repair_latency
 
+        hints_profile = get_profile("author_extraction_hints")
+        hints_prompt = _build_extraction_hints_prompt(chapter_content, state, payload)
+        try:
+            hints_struct, hints_res = context.llm_client.invoke_json(
+                hints_prompt, AuthorExtractionHintsOutput, hints_profile
+            )
+            token_usage += hints_res.token_usage
+            latency_ms += hints_res.latency_ms
+        except Exception:
+            hints_struct = AuthorExtractionHintsOutput(entries=[])
+        filtered = _filter_surface_hints_to_exact_substrings(chapter_content, hints_struct)
+        surface_models = [AuthorExtractionSurfaceEntry(node_id=e["node_id"], surface_forms=e["surface_forms"]) for e in filtered]
         output = AuthorOutput(
             chapter_content=chapter_content,
             word_count=normalized_text_length(chapter_content),
+            extraction_surface_hints=surface_models,
         )
-        return output.model_dump(mode="json"), payload.model_dump(mode="json"), token_usage, latency_ms
+        dumped = output.model_dump(mode="json")
+        dumped["author_extraction_surface_hints"] = dumped.pop("extraction_surface_hints", [])
+        return dumped, payload.model_dump(mode="json"), token_usage, latency_ms
 
     llm_result = context.llm_client.invoke(prompt)
     base_paragraphs = [
@@ -114,8 +167,25 @@ def run_author(state: dict, context: WorkflowContext) -> tuple[dict, dict, int, 
     output = AuthorOutput(
         chapter_content=chapter_content,
         word_count=normalized_text_length(chapter_content),
+        extraction_surface_hints=[],
     )
-    return output.model_dump(mode="json"), payload.model_dump(mode="json"), llm_result.token_usage, llm_result.latency_ms
+    dumped = output.model_dump(mode="json")
+    dumped["author_extraction_surface_hints"] = []
+    return dumped, payload.model_dump(mode="json"), llm_result.token_usage, llm_result.latency_ms
+
+
+def _format_mandatory_new_entities(payload) -> str:
+    rows = getattr(payload, "mandatory_new_entities", None) or []
+    if not rows:
+        return "無（本章無額外必選創世實體）。"
+    lines: list[str] = []
+    for m in rows:
+        lines.append(
+            f"- node_id={m.node_id} | role={m.role or '（未填）'} | 辨識名={m.canonical_name or '（未填）'}\n"
+            f"  寫作提示：{m.writing_brief or '請寫出可辨識特徵。'}\n"
+            f"  硬性要求：正文至少一處出現與 role 或辨識名可對齊的稱呼／特徵，供下游抽取對齊。"
+        )
+    return "\n".join(lines)
 
 
 def _build_author_prompt(payload) -> str:
@@ -164,6 +234,9 @@ def _build_author_prompt(payload) -> str:
 ## 本章必做內容
 必出節點：
 {payload.must_include_beats}
+
+## 本章必選創世實體（硬性；須可抽取對齊）
+{_format_mandatory_new_entities(payload)}
 
 章末狀態變化：
 {payload.ending_state_shift}
@@ -240,6 +313,23 @@ def _format_feedback_entries(entries: list[dict], source: str) -> str:
             lines.append(
                 f"- 第 {attempt} 次退稿 | violation={violation} | suggestion={suggestion} | message={message}"
             )
+            missing_struct = entry.get("missing_mandatory_entities")
+            if isinstance(missing_struct, list) and missing_struct:
+                sub: list[str] = []
+                for row in missing_struct:
+                    if not isinstance(row, dict):
+                        continue
+                    nid = row.get("node_id", "")
+                    note = row.get("note", "")
+                    if note == "not_in_planned":
+                        sub.append(f"  · {nid}（規劃表無此列）")
+                    else:
+                        sub.append(
+                            f"  · node_id={nid} | 類型={row.get('node_type', '')} | "
+                            f"規劃名稱={row.get('canonical_name', '')!r} | 任務角色={row.get('role', '')!r}"
+                        )
+                if sub:
+                    lines.append("  缺失實體（結構化）：\n" + "\n".join(sub))
         else:
             lines.append(
                 f"- 第 {attempt} 次讀者評審 | score={entry.get('score', '')} | suggestion={entry.get('suggestion', '')} | message={message}"

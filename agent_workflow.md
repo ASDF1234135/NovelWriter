@@ -1,451 +1,136 @@
-# Agent Workflow
+# Agent Workflow（繁體中文）
+
+> 英文版請見 [agent_workflow.en.md](./agent_workflow.en.md)。
 
 ## 文件目的
 
-這份文件說明 NovelBuilder 在「生成單一章節小說」時，各個 agent 如何接力工作、彼此傳遞哪些資料、在哪些地方做審核，以及何時會進入 HITL。
-
-本文盡量用人類技術人員可直接理解的流程描述，而不是程式碼細節。
+說明 NovelBuilder 在「生成單一章節小說」時，各 agent 如何接力、傳遞哪些資料、何處審核、何時進入 HITL，以及 **B 線核銷、實體綁定與定稿後抽取閘門** 等較新行為。以技術人員可讀的流程為主，不逐行對應程式碼。
 
 ## 系統分成兩個層級
 
 ### 1. Macro Planning
 
-這一層負責先把整個故事拆成：
+負責把整體故事拆成：
 
-- `volumes`：卷級規劃（LLM 輸出為**每卷內嵌** `anchors` 陣列）
-- 正規化後仍會展平成 SQLite 的 `anchors` 表，每筆帶 `volume_id`
+- **Volumes**：卷級規劃（LLM 輸出為每卷內嵌 `anchors`），正規化後展平寫入 SQLite `anchors` 表（含 `volume_id`）。
 
-**契約**：每一卷需 **3–5** 個錨點；各錨點的 `chapter_target` 必須落在該卷章節範圍內。若模型給太少，後端會補位；給太多則截到 5 個。
+**契約**：每卷 **3–5** 個錨點；`chapter_target` 須落在該卷章節範圍內。過少後端補位，過多截斷。
 
-主要輸入：
+**輸入**：標題、premise、bible、目標總字數。
 
-- 故事標題
-- premise
-- bible / 世界規則
-- 目標總字數
+**輸出**：
 
-主要輸出：
+- 各卷標題、摘要、章節範圍、字數預算
+- 各 anchor 的標題、描述、目標狀態、預計章節
+- **Cast**：至少一名 protagonist 與可選 supporting；後端指派穩定 `node_id`（`{story_id}_mc_01`…），寫入 `stories.cast_json` 與 `protagonist_character_id`
+- **圖譜**：macro compile 時清除舊 `{story_id}_mc_*` 角色節點，再為每位 cast 建立 CHARACTER 節點
+- **副線種子（可選）**：macro 規劃若產出 `initial_b_stories`，成功 compile 後會 **merge** 進 `stories.bible_json.active_b_stories`（依 id 去重）
 
-- 每一卷的標題、摘要、章節範圍、字數預算
-- 每個 anchor 的標題、描述、目標狀態、預計章節（存庫時依章節／優先序排序編號）
-- **`cast`**：至少一名 **protagonist** 與可選 **supporting**；後端指派穩定 `node_id`（`{story_id}_mc_01`…）並寫入 `stories.cast_json` 與 **`protagonist_character_id`**
-- **圖譜**：macro compile 結束時會先清除舊的 `{story_id}_mc_*` 角色節點，再為每位 cast 成員建立 **CHARACTER** 節點（`apply_mutations`）
+資料寫入 SQLite 與 GraphStore，作為章節級導航與 POV 基礎。
 
-這些資料會寫入 SQLite 與 GraphStore，成為後續章節生成的長期導航與 POV 解析基礎。
+**章節入口**：`start_run_chapter` 會從 bible 載入 **`active_b_stories`**，計算 **`distance_to_anchor`**（相對當前錨點章距），並對 **`target_word_count`** 套用 **`normalized_length_min/max`**（字數 SSOT 下限／上限）。
 
-**章節入口**：`run_chapter` 會把初始 `pov_character_id` 設為 **`protagonist_character_id`**（若尚未 macro 或為空則仍用 `char_public_observer`）。Mock `director` 會沿用 state 內已設定的 POV，避免覆寫回旁觀者。
-
-**章內導航（滑動視窗）**：`director` / `planner` 的 prompt 只帶「最近 5 個」未完成錨點摘要；workflow state 仍保留完整未完成列表與 `target_anchor_id`。故事往後章推進後，已過期的錨點會從篩選中消失，視窗自然滑動。
+**章內導航**：director / planner prompt 僅帶「最近數個」未完成錨點；state 仍保留完整未完成列表與 `target_anchor_id`。
 
 ### 2. Chapter Workflow
 
-這一層負責生成某一章，會從 `director` 開始，一路跑到 `state_updater`。
+從 `director` 起，經審核與定稿後進入 **抽取閘門（extraction_gate）**、**副線核銷（b_story_resolve）**，最後 **`state_updater`** 原子落盤。
 
-## 單章 workflow 全流程
+## 單章 workflow 全流程（總覽）
 
-### 總覽
+節點順序（主路徑）：
 
-每一章大致會經過以下節點：
+1. `director` — 章節類型、副線指令、POV、epoch、基調、敘事方向等  
+2. `graph_rag` — bible / graph / vector / 近章正文組上下文  
+3. `planner` — 底層事件 + 表層劇本 + **`proposed_new_nodes`（≤3）** + **`new_active_b_stories`（≤2，可選）** + `target_word_count`（並寫入字數 SSOT）  
+4. `plan_supervisor` — 大綱審核（**Hard / Soft** 分野；創世／B 線核心缺漏為 **Hard**）  
+5. `author` — 依安全任務卡寫正文；定稿後第二段 LLM 產出 **`author_extraction_surface_hints`**（`node_id` + 正文精確子字串）  
+6. `draft_supervisor` — 字數 SSOT；**必選實體**改由 **`author_extraction_surface_hints`**（正文精確子字串）決定性檢查  
+7. `reader` — 文學可讀性  
+8. **`extraction_gate`** — **抽取 + `remap_planned_entities`（R1/R5）+ `validate_mandatory_planned_nodes`（R6）**（併用 Author 登記的 surface hints）  
+   - 失敗 → 退回 **`author`**（`MISSING_MANDATORY_ENTITY_MAPPING` 類回饋）  
+   - 成功 → 寫入 **`pending_chapter_extraction`**，前往副線核銷  
+9. **`b_story_resolve`** — LLM 輸出 `resolution_analysis`、`resolution_evidence_event_ids`、`resolved_b_stories`；證據 event id 須在 **抽取結果中可佐證**（R2c）  
+10. **`state_updater`** — 以 `pending_chapter_extraction` 為主做 mutations + vector；SQLite 章節寫入後更新 bible：**剔除核銷副線**、**merge 本章新增副線種子**
 
-1. `director`
-2. `graph_rag`
-3. `planner`
-4. `plan_supervisor`
-5. `author`
-6. `draft_supervisor`
-7. `reader`
-8. `prose_polish`（僅在 reader 核准或耗盡重試、即將定稿時執行；入庫前輕修飾：繁體統一、標點分段等，不改劇情）
-9. `state_updater`
+`plan_supervisor`、`draft_supervisor`、`reader` 可將流程打回前一層；重試過多進入 HITL。`extraction_gate` 退回 author 亦會累積 `draft_feedback`。
 
-其中 `plan_supervisor`、`draft_supervisor`、`reader` 都可能把流程打回前一層；若重試次數過多，會進入 HITL。
+## Chapter State 重點欄位
 
-## Chapter State 是什麼
+除既有章節定位、上下文、大綱與草稿欄位外，尚包含：
 
-每一章執行時，都有一份中心狀態物件，可理解為「這一章目前所有 agent 共享的工作記錄」。
+- **敘事策略**：`chapter_type`、`b_story_directive`、`new_elements_to_introduce`  
+- **副線池**：`active_b_stories`（來自 bible）、**`pending_b_story_additions`**（planner 本輪擬新增，commit 時寫回）  
+- **距離與創世**：`distance_to_anchor`、`planned_graph_nodes`（通過 plan 後與 `proposed_new_nodes` 對齊）  
+- **字數 SSOT**：`target_word_count`、`normalized_length_min`、`normalized_length_max`  
+- **審核軌跡**：`plan_warnings`（含 plan_supervisor 的 soft_warnings 合併）  
+- **定稿後抽取**：`author_extraction_surface_hints`、`pending_chapter_extraction`、`b_story_resolution`、`post_polish_route`、`extraction_gate_*` 回饋（失敗時）
 
-它包含四種資訊：
+## 各 agent 角色與 I/O（精要）
 
-- 章節定位：`story_id`、`chapter_id`、`target_anchor_id`、`active_epoch_id`
-- 上下文資料：`bible_context`、`graph_context`、`vector_context`
-- 本章規劃：`narrative_directive`、`ground_truth_events`、`narrative_script`
-- 生成與審核結果：`current_draft`、`draft_feedback`、`reader_feedback`、`workflow_status`
+### Director
 
-## 各 agent 的角色與 I/O
+決定 **POV、epoch、敘事方向、基調**；輸出 **`chapter_type`**、**`b_story_directive`**、**`new_elements_to_introduce`** 等。  
+**`normalize_director_output`**：當離錨點較遠且副線池無有效 id 或副線指令為空時，降級為 **WORLD_BUILDING** 並補預設探索向副線描述。
 
-### 1. Director
+### Graph RAG
 
-用途：
+組裝 `bible_context`、`graph_context`、`vector_context`、前情與連續性欄位；不創作。
 
-- 決定本章該由誰當 POV
-- 決定本章位於哪個 epoch
-- 決定本章的主要劇情推進方向
-- 決定 tone 與目標字數
+### Planner
 
-主要輸入：
+將導演方向轉成可執行大綱：**`ground_truth_events`**、**`narrative_script`**、作者任務卡欄位、**`proposed_new_nodes`**、**`new_active_b_stories`**、**`target_word_count`**。  
+後端在 `planner` 節點將 **`planned_graph_nodes`** 與字數 SSOT 寫回 state。
 
-- 當前章號
-- 未完成 anchors
-- story premise
-- volume summary
-- anchor description
-- bible context
-- graph hint
+### Plan Supervisor
 
-主要輸出：
+審核大綱；**Hard** 包含：創世節點與 director 交代不一致、**B 線核心動作缺失**、時序／空間硬傷等。  
+**Soft**（寫入 `soft_warnings` 再進 **`plan_warnings`**）：idle 節奏、超前解錨疑慮、字數微偏等——**不得**掩蓋會導致下游缺欄的 Hard 問題。
 
-- `pov_character_id`
-- `active_epoch_id`
-- `narrative_directive`
-- `tone_direction`
-- `target_word_count`
-- `target_anchor_id`
+### Author
 
-對人的理解方式：
+依表層劇本寫作；payload 含 **`mandatory_new_entities`**（由 `planned_graph_nodes` 衍生），提示須寫出可對齊 **role / canonical_name** 的辨識特徵。
 
-- `director` 不是寫故事的人
-- 它像是「章節導演」，先決定這章要拍什麼、從誰的視角拍、節奏大概多長
+### Draft Supervisor
 
-### 2. Graph RAG
+**字數**以 state 的 **normalized_length_min/max** 為準。  
+**R4**：若 `mandatory_new_entities` 非空，正文須能以關鍵字／別名等 **可檢測方式** 對齊每一項，否則 **Hard** 退回 author。
 
-用途：
+### Reader
 
-- 把當前章節需要的世界記憶與前情提要整理出來
+文學評分與評論；不負責字數硬審。
 
-它會同時查三類來源：
+### Prose polish
 
-- Graph Store：角色、地點、事件、關係
-- Vector Store：章節摘要、片段、未解線索
-- SQLite 章節內容：最近幾章正文
+定稿輕修飾；完成後 **`resume_from`** 指向 **`extraction_gate`**。
 
-主要輸入：
+### Extraction gate（非 LLM「角色名」但為圖中節點）
 
-- `story_id`
-- `active_epoch_id`
-- `pov_character_id`
-- `narrative_directive`
+對 **已定稿正文** 跑抽取，**`remap_planned_entities`**（無法對齊時可保留新 id 並 log **R5**），再跑 **R6**：每個 **mandatory** 的 `planned_graph_nodes.node_id` 必須出現在抽取實體集合中，否則退回 author。  
+成功則 **`pending_chapter_extraction`** 供後續 resolve 與 state_updater 共用。
 
-主要輸出：
+### B story resolve
 
-- `bible_context`
-- `graph_context`
-- `vector_context`
-- `previous_chapter_summary`
-- `recent_chapter_context`
-- `last_known_location`
-- `continuity_notes`
-- `recent_entity_names`
+輸入含 **remap 後結構化抽取** 摘要；輸出 **CoT** + **`resolution_evidence_event_ids`** + **`resolved_b_stories`**。後端只接受 **在抽取結構中可佐證** 的 event id，避免 SQLite 核銷與圖譜狀態脫節（R2c）。
 
-對人的理解方式：
+### State updater
 
-- 這一層像「資料準備員」
-- 它不做創作，只做安全且可控的上下文組裝
+優先使用 **`pending_chapter_extraction`** 產生 graph / vector；與 SQLite 章節寫入同一 try 區塊內：依核銷結果 **更新 bible**（移除 resolved、merge 本章 `pending_b_story_additions`），並記錄 **state_transaction**。
 
-### 3. Planner
-
-用途：
-
-- 把 director 的章節方向，轉成真正可執行的「本章大綱」
-- 同時產生底層真實事件與給 author 的安全任務卡
-
-主要輸入：
-
-- `narrative_directive`
-- `active_epoch_id`
-- `pov_character_id`
-- story / volume / anchor 資訊
-- `previous_chapter_summary`
-- `recent_chapter_context`
-- `last_known_location`
-- `continuity_notes`
-- `recent_entity_names`
-- `bible_context`
-- `graph_context`
-- `vector_context`
-- 舊的 `plan_feedback`
-
-主要輸出：
-
-- `ground_truth_events`
-- `narrative_script`
-- `chapter_start_location`
-- `author_goal`
-- `must_include_beats`
-- `reader_visible_facts`
-- `reader_unresolved_questions`
-- `private_facts_or_secret_actions`
-- `ending_state_shift`
-- `chapter_end_location_hint`
-- `ending_boundary_rule`
-- `forbidden_next_scene_actions`
-- `forbidden_reveals`
-- `author_safe_continuity_notes`（0–4 條；由 planner 對 `continuity_notes` 做 POV／出場過濾後下發，**不得**把 RAG 未解線索原句直接交給 author）
-
-對人的理解方式：
-
-- `ground_truth_events`：系統內部認定本章真實發生了什麼
-- `narrative_script`：給作者看的表層劇本
-- `author_goal / must_include_beats`：作者這章一定要做到的任務
-- `ending_boundary_rule / forbidden_next_scene_actions`：作者不可越界到下一章的硬限制
-
-### 4. Plan Supervisor
-
-用途：
-
-- 審核 planner 大綱是否合理
-
-主要檢查：
-
-- 是否朝 anchor 收斂
-- 是否重演上一章已完成事件
-- 是否出現 timeline rollback
-- 是否出現 teleportation / location paradox（由 LLM 判斷；後端僅保留 timeline rollback 等確定性檢查）
-- 是否有 POV 洩漏
+## HITL
 
-主要輸入：
+與先前相同：**Plan_Loop_Exceeded**、**Draft_Loop_Exceeded**、大綱編輯、正文修訂、狀態注入。  
+`resume_from` 可包含 **`extraction_gate`**、**`b_story_resolve`**（見 `WorkflowService` 允許集合），以便從定稿後路徑恢復。
 
-- `ground_truth_events`
-- `narrative_script`
-- `previous_chapter_summary`
-- `recent_chapter_context`
-- `last_known_location`
-- `chapter_start_location`
-- `chapter_end_location_hint`
-- `must_include_beats`
-- anchor 資訊
+## 每章最終產物
 
-主要輸出：
+- SQLite：章節正文、workflow 狀態、步驟 log、HITL、transaction、**更新後的 `bible_json.active_b_stories`**  
+- Graph / Vector：由定稿抽取與事件一致寫入  
+- Workflow state：供下一章連續性使用  
 
-- `is_approved`
-- `violation_type`
-- `suggestion_type`
-- `feedback_to_agent`
-- `anchor_achieved`
+## 技術人員應記住的原則
 
-如果不通過：
-
-- 退回 `planner`
-- 超過一定次數後進入 HITL，要求人工改大綱
-
-### 5. Author
-
-用途：
-
-- 根據 planner 的安全任務卡，真正生成小說正文
-
-主要輸入：
-
-- `narrative_script`
-- `chapter_start_location`
-- `author_goal`
-- `must_include_beats`
-- `reader_visible_facts`
-- `reader_unresolved_questions`
-- `chapter_end_location_hint`
-- `ending_state_shift`
-- `ending_boundary_rule`
-- `forbidden_next_scene_actions`
-- `forbidden_reveals`
-- `tone_direction`
-- `target_word_count`
-- `normalized_length_min`
-- `normalized_length_max`
-- `previous_chapter_summary`
-- `last_known_location`
-- `author_safe_continuity_notes`（僅 planner 輸出之過濾版；**不再**直接餵 raw `continuity_notes`）
-- `recent_entity_names`
-- `draft_feedback`
-- `reader_feedback`
-
-主要輸出：
-
-- `chapter_content`
-- `word_count`
-
-重要特性：
-
-- Author 處於 Air-Gap 模式
-- 它看不到底層真實大綱細節，只能看安全版任務卡
-- 若正文太短，系統可能要求它補寫
-- 若正文越過章節終點邊界，系統可能要求它局部修正結尾
-
-### 6. Draft Supervisor
-
-用途：
-
-- 檢查 author 的正文是否違反本章劇本與硬邏輯
-
-主要檢查：
-
-- 字數是否在允許範圍內
-- 是否違反 `ground_truth_events`
-- 是否越過 `chapter_end_location_hint`
-- 是否違反 `ending_boundary_rule`
-- 是否提前做了 `forbidden_next_scene_actions`
-- 是否有 POV 洩漏
-
-主要輸出：
-
-- `is_approved`
-- `violation_type`
-- `suggestion_type`
-- `feedback_to_agent`
-
-如果不通過：
-
-- 退回 `author`
-- 系統會把本次退稿原因記錄進 `draft_feedback`
-- 超過一定次數後進入 HITL
-
-### 7. Reader
-
-用途：
-
-- 用讀者視角評估可讀性與文學體驗
-
-主要輸入：
-
-- `current_draft`
-- `target_word_count`
-
-主要輸出：
-
-- `is_approved`
-- `literary_score`
-- `suggestion_type`
-- `critique`
-
-如果不通過：
-
-- 通常會退回 `author`
-- 若多次仍不理想，系統可能保留最高分版本往下走
-
-### 8. Prose polish
-
-用途：
-
-- 在 **入庫前** 對已定稿選定的正文做最後輕修飾（標點、分段、病句、格式漂移）
-- **統一為台灣繁體中文**（簡體或混用時轉為繁體慣用寫法；專名已在文中固定者可保留）
-
-限制（後端硬護欄）：
-
-- 字數變化與與原文相似度須在設定門檻內，否則捨棄修飾、沿用 reader 通過之原文
-
-### 9. State Updater
-
-用途：
-
-- 在章節定稿後，將本章內容轉成可落盤的知識與記憶
-
-這一層會做兩件事：
-
-1. 呼叫 `state_extractor`，從正文抽出：
-   - 實體
-   - 關係
-   - 章節記憶
-
-2. 將抽取結果轉成：
-   - graph mutations
-   - vector documents
-   - SQLite chapter content 寫入
-
-主要輸出：
-
-- `mutations`
-- `vector_documents`
-
-此外，它還會建立一筆 `state_transaction`，確保：
-
-- Graph 寫入
-- Vector 寫入
-- SQLite 寫入
-
-是可以追蹤與 replay 的。
-
-## HITL 會在哪些地方出現
-
-### Plan Loop
-
-當 `plan_supervisor` 多次退回 planner 後：
-
-- `workflow_status = WAITING_HITL`
-- `hitl_reason = Plan_Loop_Exceeded`
-- `resume_from = planner`
-
-人工可做的事：
-
-- 允許調整 anchor
-- 強制重寫大綱
-
-### Draft Loop
-
-當 `draft_supervisor` 多次退回 author 後：
-
-- `workflow_status = WAITING_HITL`
-- `hitl_reason = Draft_Loop_Exceeded`
-- `resume_from = author`
-
-人工可做的事：
-
-- 保持邏輯並重寫
-- 放寬字數要求
-
-### 手動大綱編輯
-
-人工可以直接提交：
-
-- 新的 `ground_truth_events`
-- 新的 `narrative_script`
-
-提交後續跑節點依暫停原因：**`Plan_Loop_Exceeded` 時從 `planner` 重算**；**`Draft_Loop_Exceeded` 時從 `author`**。
-
-### 正文人工修訂
-
-人工可直接覆寫 `current_draft`（可選同步 `best_draft_content`），並指定 `resume_from`（預設 `reader`，亦可 `draft_supervisor` 或 `author`）。API：`POST /workflows/{run_id}/hitl/draft-edit`。
-
-### 狀態注入
-
-人工也可以直接對 graph 注入 mutation，修正世界狀態後再續跑（保留暫停當下的 `resume_from`）。
-
-### HITL API 防呆
-
-若 run 並非 `WAITING_HITL` / `requires_hitl`，HITL 相關 POST 會回 **409**，避免誤寫 state。
-
-## 每章最終會留下什麼
-
-每一章完成後，系統會留下四類結果：
-
-1. SQLite
-   - 章節標題
-   - 章節正文
-   - workflow run 狀態
-   - 每一步 agent log
-   - HITL 操作紀錄
-   - state transaction
-
-2. Graph
-   - 新事件節點
-   - 新實體或更新過的實體
-   - 新關係
-   - 新位置狀態
-
-3. Vector
-   - 章節摘要
-   - 摘錄片段
-   - 未解線索
-   - 實體名單
-   - location metadata
-
-4. Workflow State
-   - 供下一章繼續使用的 continuity 與回饋資料
-
-## 技術人員最該注意的幾個關鍵原則
-
-- `director` 定方向，`planner` 定章節真實事件，`author` 只負責表層寫作
-- `author` 不能直接看到底層真相
-- `plan_supervisor` 與 `draft_supervisor` 是兩道不同的審核
-- `state_updater` 不是直接把正文存起來而已，而是把正文轉成可查詢的長期記憶
-- 真正的 continuity 品質，取決於：
-  - POV ID 是否對齊圖譜節點
-  - `previous_chapter_summary` 是否乾淨
-  - `last_known_location` 是否正確
-  - `chapter_end_location_hint` 與 `ending_boundary_rule` 是否足夠清楚
+- **Director / Planner** 定方向與可執行大綱；**Author** 僅看表層任務卡。  
+- **R4（draft）** 與 **R6（extraction_gate）** 分工：前者偏「正文可讀的對齊」，後者偏「抽取結果是否落到 planned `node_id`」。  
+- **R5** 允許非 mandatory 實體以新 id 落圖並打 log；**mandatory** 不得在未對齊情況下通過 R6。  
+- **副線核銷** 必須綁 **抽取可佐證的 event id**，再與 graph 寫入同次 commit 更新 bible。  

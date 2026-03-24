@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 from collections.abc import Iterable
+from typing import Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
@@ -82,6 +83,7 @@ class ExtractionContext:
     chapter_text_for_memory: str
     chapter_text_for_relations: str
     planner_visibility_contract: dict
+    author_surface_hints: list[dict[str, Any]] = field(default_factory=list)
     settings_snapshot: dict = field(default_factory=dict)
 
 
@@ -106,6 +108,8 @@ def build_extraction_context(
         "chapter_end_location_hint": state.get("chapter_end_location_hint", ""),
         "last_known_location": state.get("last_known_location", ""),
     }
+    hints_raw = state.get("author_extraction_surface_hints") or []
+    author_hints = [h for h in hints_raw if isinstance(h, dict)]
     return ExtractionContext(
         state=state,
         graph_snapshot=graph_snapshot,
@@ -117,6 +121,7 @@ def build_extraction_context(
         chapter_text_for_memory=mem_text,
         chapter_text_for_relations=rel_text,
         planner_visibility_contract=contract,
+        author_surface_hints=author_hints[:80],
         settings_snapshot={
             "entity_budget": settings.extraction_entity_text_budget,
             "memory_budget": settings.extraction_memory_full_text_budget,
@@ -547,7 +552,12 @@ def _build_entity_prompt(ctx: ExtractionContext) -> str:
             "story_id": ctx.state["story_id"],
             "chapter_id": ctx.state["chapter_id"],
             "existing_node_candidates": existing,
-            "guidelines": ENTITY_EXTRACTION_GUIDELINES,
+            "author_surface_hints": ctx.author_surface_hints,
+            "guidelines": ENTITY_EXTRACTION_GUIDELINES
+            + [
+                "author_surface_hints 為主筆登記的 node_id 與正文中「精確子字串」稱呼；"
+                "抽取時應把對應實體對齊到該 node_id，並可把這些字串納入 aliases。",
+            ],
             "chapter_excerpt": ctx.chapter_text_for_entities,
             "prompt_char_budget": len(ctx.chapter_text_for_entities),
         },

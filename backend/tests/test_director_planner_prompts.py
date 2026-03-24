@@ -1,6 +1,15 @@
+from app.domain.schema import ChapterType
 from app.domain.state import SafePlannerPayload
-from app.services.workflow.nodes.director import _build_director_prompt
+from app.services.workflow.nodes.director import _build_director_prompt, normalize_director_output
 from app.services.workflow.nodes.planner import _build_planner_prompt
+
+
+def test_normalize_director_output_world_building_when_b_story_pool_has_no_ids() -> None:
+    state = {"distance_to_anchor": 3, "active_b_stories": [{"id": "", "desc": "orphan row"}]}
+    raw = {"chapter_type": "PLOT_DRIVEN", "b_story_directive": "", "new_elements_to_introduce": []}
+    out = normalize_director_output(state, raw)
+    assert out["chapter_type"] == ChapterType.WORLD_BUILDING.value
+    assert "探索周遭環境" in (out.get("b_story_directive") or "")
 
 
 def test_director_prompt_includes_story_premise_volume_summary_and_anchor_description() -> None:
@@ -39,7 +48,7 @@ def test_director_prompt_includes_story_premise_volume_summary_and_anchor_descri
     assert "visible_unachieved_anchors" in prompt
     assert "anchor_01" in prompt
     assert "bible_context: 世界規則：皇室血脈涉及禁忌契約。" in prompt
-    assert "請決定本章 POV、Epoch、tone 與 narrative_directive" in prompt
+    assert "請決定 chapter_type（PLOT_DRIVEN / CHARACTER_DRIVEN / WORLD_BUILDING）、POV、Epoch、tone、narrative_directive" in prompt
     assert "narrative_directive 必須明確指出本章要新增的劇情推進" in prompt
     assert "起點、目的地或章末有效位置" in prompt
 

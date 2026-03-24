@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from app.core.config import get_settings
-from app.domain.schema import EventOutline, PlannerOutput
+from app.domain.schema import BStorySeed, EventOutline, NodeType, PlannerOutput, ProposedGraphNode
 from app.domain.state import SafePlannerPayload
 from app.services.llm import MockLLMClient
 from app.services.workflow.chapter_words import clamp_chapter_word_count
@@ -82,7 +82,13 @@ def run_planner(state: dict, context: WorkflowContext) -> tuple[dict, dict, int,
             settings.chapter_word_min,
             settings.chapter_word_max,
         )
+        nodes = list(structured_output.proposed_new_nodes)[:3]
+        seeds = list(structured_output.new_active_b_stories)[:2]
         out = structured_output.model_dump(mode="json")
+        out["proposed_new_nodes"] = [n.model_dump(mode="json") if isinstance(n, ProposedGraphNode) else n for n in nodes]
+        out["new_active_b_stories"] = [
+            s.model_dump(mode="json") if isinstance(s, BStorySeed) else s for s in seeds
+        ]
         out["target_word_count"] = clamped
         return out, payload.model_dump(mode="json"), llm_result.token_usage, llm_result.latency_ms
 
@@ -98,6 +104,20 @@ def run_planner(state: dict, context: WorkflowContext) -> tuple[dict, dict, int,
         settings.chapter_word_min,
         settings.chapter_word_max,
     )
+    mock_nodes: list[ProposedGraphNode] = []
+    for label in (payload.new_elements_to_introduce or [])[:3]:
+        if not (label or "").strip():
+            continue
+        mock_nodes.append(
+            ProposedGraphNode(
+                node_id=f"char_gen_{state['chapter_id']}_{len(mock_nodes) + 1}",
+                node_type=NodeType.CHARACTER,
+                role=str(label)[:80],
+                canonical_name=str(label)[:80],
+                writing_brief="請在正文以可辨識特徵寫出此角色。",
+                mandatory=True,
+            )
+        )
     output = PlannerOutput(
         ground_truth_events=[
             EventOutline(
@@ -148,8 +168,13 @@ def run_planner(state: dict, context: WorkflowContext) -> tuple[dict, dict, int,
             "不要新增與當前章節任務無關的新機關、新謎團或新世界規則。",
         ],
         author_safe_continuity_notes=_mock_author_safe_continuity_notes(payload.continuity_notes),
+        proposed_new_nodes=mock_nodes,
+        new_active_b_stories=[],
     )
-    return output.model_dump(mode="json"), payload.model_dump(mode="json"), llm_result.token_usage, llm_result.latency_ms
+    dumped = output.model_dump(mode="json")
+    dumped["proposed_new_nodes"] = [n.model_dump(mode="json") for n in mock_nodes[:3]]
+    dumped["new_active_b_stories"] = []
+    return dumped, payload.model_dump(mode="json"), llm_result.token_usage, llm_result.latency_ms
 
 
 def _build_planner_prompt(payload: SafePlannerPayload) -> str:
@@ -193,6 +218,17 @@ def _build_planner_prompt(payload: SafePlannerPayload) -> str:
         f"- previous_attempt_narrative_script: {_clip(payload.previous_attempt_narrative_script, PLANNER_PREVIOUS_NARRATIVE_CAP)}\n\n"
         "## 前次規劃回饋\n"
         f"- prior_feedback: {prior_fb}\n\n"
+        "## 導演指令（本章類型與創世）\n"
+        f"- chapter_type: {payload.chapter_type}\n"
+        f"- b_story_directive: {payload.b_story_directive or ''}\n"
+        f"- new_elements_to_introduce: {payload.new_elements_to_introduce}\n"
+        f"- distance_to_anchor: {payload.distance_to_anchor}\n"
+        f"- active_b_stories: {json.dumps(payload.active_b_stories, ensure_ascii=False)[:800]}\n"
+        "- 若有 b_story_directive，必須編入 narrative_script；must_include_beats 至少一條為與主線解謎無關的生活或感官細節。\n"
+        "- 對 new_elements_to_introduce 每一項，在 proposed_new_nodes 輸出對應條目（node_id、node_type、role、canonical_name），"
+        "最多 3 條，並在 ground_truth_events 安排與其互動。\n"
+        "- new_active_b_stories：若本章**新開一條**獨立副線（需穩定 id），最多 2 條，每條含 id 與 desc；"
+        "若無則輸出空陣列。成功定稿後系統會併入 bible；不要與既有 active_b_stories id 重複。\n\n"
         "## 你的輸出要求\n"
         "- 若上方已提供 previous_attempt_ground_truth_events 或 previous_attempt_narrative_script，代表這次是修稿，不是從零重做。\n"
         "- 若上一版只有局部違規，優先保留已經合理的事件鏈與章節方向，只修正被 feedback 指出的段落、事件或位置欄位。\n"

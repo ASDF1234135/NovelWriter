@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from app.domain.schema import DraftSupervisorOutput, LengthAdjustment, SuggestionType, ViolationType
 from app.services.llm import MockLLMClient
 from app.services.workflow.context import WorkflowContext
@@ -7,12 +9,126 @@ from app.services.workflow.masking import build_draft_supervisor_payload
 from app.services.workflow.profiles import get_profile
 from app.services.workflow.utils import normalized_text_length
 
+_DRAFT_VIOLATION_FEEDBACK: list[tuple[ViolationType, str, tuple[str, ...]]] = [
+    (
+        ViolationType.WORD_COUNT_UNMATCH,
+        "（系統補充）字數與本章允許範圍不符，請擴寫或縮寫以落入區間。",
+        ("正規化後字數", "不在允許範圍"),
+    ),
+    (
+        ViolationType.INCONSISTENCY,
+        "（系統補充）草稿與表層劇本、事件鏈或本章硬邊界不一致，請逐項對照 narrative_script 與 ending_boundary_rule 修正。",
+        ("硬邊界", "越界", "表層劇本", "草稿沒有充分貼合"),
+    ),
+    (
+        ViolationType.PHYSICAL_CONFLICT,
+        "（系統補充）與已知世界狀態、事件因果或空間銜接存在硬衝突，請對照 bible／圖譜上下文修正。",
+        ("物理", "因果", "銜接"),
+    ),
+    (
+        ViolationType.ANCHOR_DIVERGENCE,
+        "（系統補充）本章敘事方向可能使目標錨點不可達或明顯偏離規劃，請收斂本章任務。",
+        ("錨點", "偏離"),
+    ),
+    (
+        ViolationType.POV_LEAK,
+        "（系統補充）可能存在 POV 不可能得知的資訊被寫成公開事實，請調整敘述視角或資訊揭露方式。",
+        ("POV", "洩漏", "私下"),
+    ),
+    (
+        ViolationType.MISSING_DIRECTIVE,
+        "（系統補充）未滿足導演或企劃硬性指令（如新元素未具現化），請補齊對應內容。",
+        ("導演", "指令", "具現"),
+    ),
+    (
+        ViolationType.MISSING_MANDATORY_ENTITY_MAPPING,
+        "（系統補充）必選實體在稿中不可辨識或無法對齊規劃 node，請補寫可抽稱呼與 surface hints。",
+        ("必選實體", "surface", "精確子字串"),
+    ),
+]
+
+
+def _ensure_feedback_covers_violations(output: DraftSupervisorOutput) -> DraftSupervisorOutput:
+    """Append deterministic lines when the model flagged violations but gave empty or vague feedback."""
+    if output.is_approved:
+        return output
+    violations = [v for v in output.violation_type if v != ViolationType.NONE]
+    if not violations:
+        return output
+    feedback = output.feedback_to_agent.strip()
+    extras: list[str] = []
+    for vtype, snippet, skip_tokens in _DRAFT_VIOLATION_FEEDBACK:
+        if vtype not in violations:
+            continue
+        if snippet in feedback:
+            continue
+        if any(tok in feedback for tok in skip_tokens):
+            continue
+        extras.append(snippet)
+    if not extras:
+        return output
+    merged = f"{feedback} {' '.join(extras)}".strip()
+    return output.model_copy(update={"feedback_to_agent": merged})
+
+
+def _length_bounds(payload) -> tuple[int, int]:
+    lo = int(payload.normalized_length_min or 0)
+    hi = int(payload.normalized_length_max or 0)
+    if lo <= 0 or hi <= 0:
+        tw = int(payload.target_word_count or 0)
+        lo = int(tw * 0.65)
+        hi = int(tw * 1.35)
+    return lo, hi
+
+
+def _mandatory_hints_violation(state: dict, payload) -> str:
+    """Require each mandatory entity to have non-empty validated surface_forms in author hints."""
+    draft = payload.current_draft or ""
+    mandatory = payload.mandatory_new_entities or []
+    if not mandatory:
+        return ""
+    hints_raw = state.get("author_extraction_surface_hints") or []
+    hints_by_id = {
+        str(h.get("node_id", "")).strip(): h
+        for h in hints_raw
+        if isinstance(h, dict) and str(h.get("node_id", "")).strip()
+    }
+    missing: list[str] = []
+    for ent in mandatory:
+        nid = ent.node_id
+        entry = hints_by_id.get(nid)
+        if not entry:
+            missing.append(nid)
+            continue
+        surfaces = [s for s in (entry.get("surface_forms") or []) if isinstance(s, str) and s and s in draft]
+        if not surfaces:
+            missing.append(nid)
+    if not missing:
+        return ""
+    hints_note = json.dumps(hints_raw, ensure_ascii=False)[:1200]
+    return (
+        "必選實體未定稿可驗證的表面稱呼（精確子字串）："
+        + ", ".join(missing)
+        + "。請在正文中寫入可摘錄稱呼，並確保 Author 抽取提示含出現在正文中的精確子字串。"
+        + f" 當前 author_extraction_surface_hints（摘要）：{hints_note}"
+    )
+
 
 def run_draft_supervisor(state: dict, context: WorkflowContext) -> tuple[dict, dict]:
     payload = build_draft_supervisor_payload(state)
     normalized_count = normalized_text_length(payload.current_draft)
-    lower = int(payload.target_word_count * 0.65)
-    upper = int(payload.target_word_count * 1.35)
+    lower, upper = _length_bounds(payload)
+
+    hint_fail = _mandatory_hints_violation(state, payload)
+    if hint_fail:
+        out = DraftSupervisorOutput(
+            is_approved=False,
+            violation_type=[ViolationType.MISSING_MANDATORY_ENTITY_MAPPING],
+            suggestion_type=SuggestionType.REWRITE,
+            feedback_to_agent=hint_fail,
+            length_adjustment=LengthAdjustment.NONE,
+        )
+        return out.model_dump(mode="json"), payload.model_dump(mode="json")
 
     if not isinstance(context.llm_client, MockLLMClient):
         profile = get_profile("draft_supervisor")
@@ -20,6 +136,7 @@ def run_draft_supervisor(state: dict, context: WorkflowContext) -> tuple[dict, d
         structured_output, _ = context.llm_client.invoke_json(prompt, DraftSupervisorOutput, profile)
         output = _apply_word_count_gate(structured_output, normalized_count, lower, upper)
         output = _apply_boundary_gate(output, payload)
+        output = _ensure_feedback_covers_violations(output)
         return output.model_dump(mode="json"), payload.model_dump(mode="json")
 
     violations: list[ViolationType] = []
@@ -74,12 +191,16 @@ def _apply_word_count_gate(
 
 
 def _build_draft_supervisor_prompt(payload) -> str:
+    lo, hi = _length_bounds(payload)
     return (
         "請只審核當前版本草稿，忽略歷史退稿。\n"
-        "後端會用 deterministic 規則硬性檢查字數，允許範圍是目標字數的 65% 到 135%，你不需要自行估算字數。\n"
+        f"後端會用 deterministic 規則硬性檢查字數，允許範圍為 normalized_length {lo}～{hi}（來自 state，與 Author 一致）。\n"
         "若草稿被判定為字數不足，請把 suggestion_type 維持在 MODIFY，並讓 length_adjustment 表示為 EXPAND；若字數過長則標成 COMPRESS。\n"
         "只有『明確硬衝突』才能使用 PHYSICAL_CONFLICT 或 INCONSISTENCY；"
-        "正常小說化擴寫、感官描寫、氣氛鋪陳、象徵反覆不算違規。\n"
+        "正常小說化擴寫、感官描寫、氣氛鋪陳、象徵反覆不算違規；"
+        "符合 tone 的生活細節、心理活動、微小互動（喝水、天氣等）不得判為矛盾。\n"
+        "必選實體是否出場已由後端依 author_extraction_surface_hints（精確子字串）決定性檢查；"
+        "請勿再為 MISSING_MANDATORY_ENTITY_MAPPING 做判斷。\n"
         "若 partial_convergence_allowed=true，遠期錨點尚未顯性達成不是退稿理由；"
         "只有當前草稿讓未來錨點不可達時，才可使用 ANCHOR_DIVERGENCE。\n"
         "若草稿把秘密行動、私下發現或 POV 不可能知道的資訊寫成公開事實，可使用 POV_LEAK。\n"

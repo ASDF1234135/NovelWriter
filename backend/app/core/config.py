@@ -44,6 +44,15 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_embedding_model: str = "text-embedding-3-small"
     openai_timeout_seconds: float = 120.0
+    # Chat completions: optional SSE streaming (keeps connection busy; may help proxy idle timeouts).
+    openai_stream_chat: bool = False
+    # When True, structured (json_object) calls may use stream; unsupported providers fall back to non-stream on 4xx.
+    openai_stream_structured: bool = False
+    # Request stream_options.include_usage when streaming (OpenAI-compatible; disable if the API returns 400).
+    openai_stream_include_usage: bool = False
+    openai_connect_timeout_seconds: float = 10.0
+    # Max idle time between SSE chunks while streaming.
+    openai_stream_read_timeout_seconds: float = 300.0
     # Chapter word targets (Planner output is clamped; independent of volume budgets).
     chapter_word_min: int = 800
     chapter_word_max: int = 12000
@@ -59,12 +68,9 @@ class Settings(BaseSettings):
     # Relation extractor: chunk canonical_entities into batches (smaller N reduces provider timeouts).
     # 0 = legacy single call with all entities in one prompt.
     extraction_relation_entity_batch_size: int = 12
-    # After reader approves: light prose polish before persist (Traditional Chinese unification, format).
-    prose_polish_enabled: bool = True
-    prose_polish_llm_model: str = ""
-    prose_polish_temperature: float = 0.15
-    prose_polish_max_relative_length_change: float = 0.12
-    prose_polish_min_similarity_ratio: float = 0.82
+    # Second-pass Author call: extraction surface hints (lightweight model recommended).
+    author_hints_llm_model: str = ""
+    author_hints_temperature: float = 0.1
 
     @property
     def sqlite_file(self) -> Path:

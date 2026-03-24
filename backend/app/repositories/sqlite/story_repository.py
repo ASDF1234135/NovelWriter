@@ -175,4 +175,46 @@ class StoryRepository:
                 """,
                 (story_id,),
             ).fetchall()
-        return list(rows)
+            return list(rows)
+
+    def merge_active_b_stories_seed(self, story_id: str, entries: list[dict[str, str]]) -> None:
+        """Append macro-planner (or other) b-story seeds into bible_json.active_b_stories (dedupe by id)."""
+        if not entries:
+            return
+        story = self.get_story(story_id)
+        if not story:
+            raise KeyError(f"Story not found: {story_id}")
+        bible = dict(story.get("bible_json") or {})
+        active: list[dict] = list(bible.get("active_b_stories") or [])
+        seen = {str(x.get("id")) for x in active if isinstance(x, dict) and x.get("id")}
+        for raw in entries:
+            bid = str(raw.get("id") or "").strip()
+            if not bid or bid in seen:
+                continue
+            seen.add(bid)
+            active.append({"id": bid, "desc": str(raw.get("desc") or "")[:800]})
+        bible["active_b_stories"] = active
+        with self.db.connection() as conn:
+            conn.execute(
+                "UPDATE stories SET bible_json = ? WHERE story_id = ?",
+                (self.db.dumps(bible), story_id),
+            )
+
+    def remove_resolved_b_stories_from_bible(self, story_id: str, resolved_ids: list[str]) -> None:
+        """Remove completed b-story ids from bible_json.active_b_stories (same transaction context as caller)."""
+        if not resolved_ids:
+            return
+        story = self.get_story(story_id)
+        if not story:
+            raise KeyError(f"Story not found: {story_id}")
+        rid_set = {str(x).strip() for x in resolved_ids if str(x).strip()}
+        if not rid_set:
+            return
+        bible = dict(story.get("bible_json") or {})
+        active = [x for x in (bible.get("active_b_stories") or []) if str(x.get("id", "")) not in rid_set]
+        bible["active_b_stories"] = active
+        with self.db.connection() as conn:
+            conn.execute(
+                "UPDATE stories SET bible_json = ? WHERE story_id = ?",
+                (self.db.dumps(bible), story_id),
+            )

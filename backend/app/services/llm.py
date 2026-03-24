@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Any, Protocol, TypeVar
+from typing import Any, Iterator, Protocol, TypeVar
 
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -79,12 +79,95 @@ class MockLLMClient:
         raise NotImplementedError("MockLLMClient does not synthesize structured outputs; node fallback should be used.")
 
 
+def _iter_sse_chat_events(response: httpx.Response) -> Iterator[dict[str, Any]]:
+    for raw in response.iter_lines():
+        if not raw:
+            continue
+        line = raw if isinstance(raw, str) else raw.decode("utf-8", errors="replace")
+        if line.startswith(":"):
+            continue
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            break
+        try:
+            yield json.loads(data)
+        except json.JSONDecodeError:
+            logger.warning(
+                "LLM stream skipped non-JSON SSE line",
+                extra={"extra_payload": {"preview": data[:200]}},
+            )
+
+
+def _append_delta_content(parts: list[str], delta: dict[str, Any]) -> None:
+    c = delta.get("content")
+    if c is None:
+        return
+    if isinstance(c, str):
+        parts.append(c)
+        return
+    if isinstance(c, list):
+        for item in c:
+            if isinstance(item, dict) and item.get("type") == "text":
+                parts.append(str(item.get("text") or ""))
+            elif isinstance(item, str):
+                parts.append(item)
+
+
+def _consume_chat_completion_stream(response: httpx.Response) -> dict[str, Any]:
+    parts: list[str] = []
+    finish_reason: str | None = None
+    usage: dict[str, Any] = {}
+    for event in _iter_sse_chat_events(response):
+        if "error" in event:
+            err = event["error"]
+            msg = err.get("message", json.dumps(err, ensure_ascii=False))
+            raise LLMProviderError(
+                f"LLM stream error: {msg}",
+                status_code=502,
+                provider_body=msg,
+            )
+        if event.get("usage"):
+            usage = event["usage"]
+        choices = event.get("choices") or []
+        if not choices:
+            continue
+        ch0 = choices[0]
+        delta = ch0.get("delta") or {}
+        _append_delta_content(parts, delta)
+        if ch0.get("finish_reason"):
+            finish_reason = ch0["finish_reason"]
+    content = "".join(parts)
+    return {
+        "choices": [{"message": {"content": content}, "finish_reason": finish_reason}],
+        "usage": usage,
+    }
+
+
 class OpenAICompatibleLLMClient:
-    def __init__(self, base_url: str, api_key: str, model: str, timeout: float = 60.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        model: str,
+        timeout: float = 60.0,
+        *,
+        stream_chat: bool = False,
+        stream_structured: bool = False,
+        stream_include_usage: bool = False,
+        connect_timeout: float = 10.0,
+        stream_read_timeout: float = 300.0,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
+        self.stream_chat = stream_chat
+        self.stream_structured = stream_structured
+        self.stream_include_usage = stream_include_usage
+        self.connect_timeout = connect_timeout
+        self.stream_read_timeout = stream_read_timeout
 
     def invoke(self, prompt: str) -> LLMResult:
         return self.invoke_text(
@@ -97,7 +180,30 @@ class OpenAICompatibleLLMClient:
             ),
         )
 
-    def _request(
+    def _httpx_timeout_non_stream(self) -> httpx.Timeout:
+        return httpx.Timeout(
+            connect=self.connect_timeout,
+            read=self.timeout,
+            write=self.timeout,
+            pool=self.timeout,
+        )
+
+    def _httpx_timeout_stream(self) -> httpx.Timeout:
+        return httpx.Timeout(
+            connect=self.connect_timeout,
+            read=self.stream_read_timeout,
+            write=self.timeout,
+            pool=self.timeout,
+        )
+
+    def _use_stream(self, response_format: dict[str, Any] | None) -> bool:
+        if not self.stream_chat:
+            return False
+        if response_format is not None and not self.stream_structured:
+            return False
+        return True
+
+    def _request_non_stream(
         self,
         *,
         messages: list[dict[str, str]],
@@ -106,8 +212,8 @@ class OpenAICompatibleLLMClient:
         temperature: float,
         request_kind: str,
         response_format: dict[str, Any] | None = None,
+        started: float,
     ) -> tuple[dict[str, Any], int]:
-        started = perf_counter()
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -119,22 +225,8 @@ class OpenAICompatibleLLMClient:
         }
         if response_format is not None:
             payload["response_format"] = response_format
-        logger.info(
-            "LLM request started",
-            extra={
-                "extra_payload": {
-                    "agent_name": agent_name,
-                    "provider": self.base_url,
-                    "model": model,
-                    "request_kind": request_kind,
-                    "temperature": temperature,
-                    "timeout_seconds": self.timeout,
-                    "prompt_char_count": sum(len(message.get("content", "")) for message in messages),
-                    "has_response_format": response_format is not None,
-                }
-            },
-        )
-        with httpx.Client(timeout=self.timeout) as client:
+        timeout = self._httpx_timeout_non_stream()
+        with httpx.Client(timeout=timeout) as client:
             try:
                 response = client.post(f"{self.base_url}/chat/completions", headers=headers, json=payload)
             except httpx.TimeoutException as exc:
@@ -150,6 +242,7 @@ class OpenAICompatibleLLMClient:
                             "request_kind": request_kind,
                             "timeout_seconds": self.timeout,
                             "latency_ms": latency_ms,
+                            "stream": False,
                         }
                     },
                 )
@@ -171,6 +264,7 @@ class OpenAICompatibleLLMClient:
                             "status_code": response.status_code,
                             "response_text": detail,
                             "latency_ms": latency_ms,
+                            "stream": False,
                         }
                     },
                 )
@@ -181,6 +275,177 @@ class OpenAICompatibleLLMClient:
                 ) from exc
             data = response.json()
         latency_ms = int((perf_counter() - started) * 1000)
+        return data, latency_ms
+
+    def _request_stream(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        agent_name: str,
+        model: str,
+        temperature: float,
+        request_kind: str,
+        response_format: dict[str, Any] | None = None,
+        started: float,
+    ) -> tuple[dict[str, Any], int]:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "stream": True,
+        }
+        if response_format is not None:
+            payload["response_format"] = response_format
+        if self.stream_include_usage:
+            payload["stream_options"] = {"include_usage": True}
+        timeout = self._httpx_timeout_stream()
+        url = f"{self.base_url}/chat/completions"
+        with httpx.Client(timeout=timeout) as client:
+            try:
+                with client.stream("POST", url, headers=headers, json=payload) as response:
+                    try:
+                        response.raise_for_status()
+                    except httpx.HTTPStatusError as exc:
+                        response_text = response.read().decode("utf-8", errors="replace").strip()
+                        detail = _compact_error_text(response_text)
+                        latency_ms = int((perf_counter() - started) * 1000)
+                        logger.error(
+                            "LLM provider stream request failed",
+                            extra={
+                                "extra_payload": {
+                                    "agent_name": agent_name,
+                                    "provider": self.base_url,
+                                    "model": model,
+                                    "request_kind": request_kind,
+                                    "status_code": response.status_code,
+                                    "response_text": detail,
+                                    "latency_ms": latency_ms,
+                                    "stream": True,
+                                }
+                            },
+                        )
+                        raise LLMProviderError(
+                            f"LLM provider request failed ({response.status_code}): {detail}",
+                            status_code=response.status_code,
+                            provider_body=detail,
+                        ) from exc
+                    try:
+                        data = _consume_chat_completion_stream(response)
+                    except httpx.TimeoutException as exc:
+                        detail = (
+                            f"LLM provider stream idle timed out "
+                            f"(no chunk for {self.stream_read_timeout:.0f}s)."
+                        )
+                        latency_ms = int((perf_counter() - started) * 1000)
+                        logger.error(
+                            "LLM provider stream read timed out",
+                            extra={
+                                "extra_payload": {
+                                    "agent_name": agent_name,
+                                    "provider": self.base_url,
+                                    "model": model,
+                                    "request_kind": request_kind,
+                                    "stream_read_timeout_seconds": self.stream_read_timeout,
+                                    "latency_ms": latency_ms,
+                                }
+                            },
+                        )
+                        raise LLMProviderError(detail, status_code=504, provider_body=detail) from exc
+            except httpx.TimeoutException as exc:
+                detail = f"LLM provider stream connection timed out (connect {self.connect_timeout:.0f}s)."
+                latency_ms = int((perf_counter() - started) * 1000)
+                logger.error(
+                    "LLM provider stream timed out",
+                    extra={
+                        "extra_payload": {
+                            "agent_name": agent_name,
+                            "provider": self.base_url,
+                            "model": model,
+                            "request_kind": request_kind,
+                            "latency_ms": latency_ms,
+                            "stream": True,
+                        }
+                    },
+                )
+                raise LLMProviderError(detail, status_code=504, provider_body=detail) from exc
+        latency_ms = int((perf_counter() - started) * 1000)
+        return data, latency_ms
+
+    def _request(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        agent_name: str,
+        model: str,
+        temperature: float,
+        request_kind: str,
+        response_format: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], int]:
+        started = perf_counter()
+        use_stream = self._use_stream(response_format)
+        headers_log = {
+            "agent_name": agent_name,
+            "provider": self.base_url,
+            "model": model,
+            "request_kind": request_kind,
+            "temperature": temperature,
+            "timeout_seconds": self.timeout,
+            "stream_read_timeout_seconds": self.stream_read_timeout,
+            "prompt_char_count": sum(len(message.get("content", "")) for message in messages),
+            "has_response_format": response_format is not None,
+            "stream": use_stream,
+        }
+        logger.info("LLM request started", extra={"extra_payload": headers_log})
+
+        if use_stream:
+            try:
+                data, latency_ms = self._request_stream(
+                    messages=messages,
+                    agent_name=agent_name,
+                    model=model,
+                    temperature=temperature,
+                    request_kind=request_kind,
+                    response_format=response_format,
+                    started=started,
+                )
+            except LLMProviderError as exc:
+                if response_format is not None and exc.status_code in (400, 415, 422, 405):
+                    logger.warning(
+                        "LLM structured stream rejected; falling back to non-stream",
+                        extra={
+                            "extra_payload": {
+                                "agent_name": agent_name,
+                                "status_code": exc.status_code,
+                                "request_kind": request_kind,
+                            }
+                        },
+                    )
+                    data, latency_ms = self._request_non_stream(
+                        messages=messages,
+                        agent_name=agent_name,
+                        model=model,
+                        temperature=temperature,
+                        request_kind=request_kind,
+                        response_format=response_format,
+                        started=started,
+                    )
+                else:
+                    raise
+        else:
+            data, latency_ms = self._request_non_stream(
+                messages=messages,
+                agent_name=agent_name,
+                model=model,
+                temperature=temperature,
+                request_kind=request_kind,
+                response_format=response_format,
+                started=started,
+            )
+
         usage = data.get("usage", {})
         logger.info(
             "LLM request completed",
@@ -190,12 +455,13 @@ class OpenAICompatibleLLMClient:
                     "provider": self.base_url,
                     "model": model,
                     "request_kind": request_kind,
-                    "status_code": response.status_code,
+                    "status_code": 200,
                     "latency_ms": latency_ms,
                     "prompt_tokens": usage.get("prompt_tokens"),
                     "completion_tokens": usage.get("completion_tokens"),
                     "total_tokens": usage.get("total_tokens"),
                     "finish_reason": ((data.get("choices") or [{}])[0].get("finish_reason")),
+                    "stream": use_stream,
                 }
             },
         )

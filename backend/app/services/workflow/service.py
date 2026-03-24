@@ -15,7 +15,7 @@ from app.domain.schema import (
     StoryInput,
     WorkflowStatus,
 )
-from app.domain.state import build_initial_state
+from app.domain.state import apply_length_bounds_to_state, build_initial_state, normalize_workflow_state
 from app.repositories.sqlite.story_repository import StoryRepository
 from app.repositories.sqlite.workflow_repository import WorkflowRepository
 from app.services.anchor_service import AnchorService
@@ -33,7 +33,8 @@ _ALLOWED_HITL_RESUME_NODES = frozenset(
         "author",
         "draft_supervisor",
         "reader",
-        "prose_polish",
+        "extraction_gate",
+        "b_story_resolve",
         "state_updater",
     }
 )
@@ -45,6 +46,18 @@ class HitlNotWaitingError(RuntimeError):
 
 class ChapterAlreadyCompletedError(RuntimeError):
     """Raised when attempting to run the full agent pipeline for a chapter already committed as completed."""
+
+
+def _chapter_distance_to_anchor(chapter_id: int, unachieved_anchors: list[dict]) -> int | None:
+    if not unachieved_anchors:
+        return None
+    ct = unachieved_anchors[0].get("chapter_target")
+    if ct is None:
+        return None
+    try:
+        return int(ct) - int(chapter_id)
+    except (TypeError, ValueError):
+        return None
 
 
 def _ensure_hitl_waiting(state: dict) -> None:
@@ -108,9 +121,10 @@ class WorkflowService:
             plan_retry_limit=int(story.get("plan_retry_limit", 3)),
             draft_loop_retry_limit=int(story.get("draft_loop_retry_limit", 3)),
         )
-        volumes, anchors, cast = self.anchor_service.compile_macro_plan(story_id, story_input, self.llm_client)
+        volumes, anchors, cast, b_seed = self.anchor_service.compile_macro_plan(story_id, story_input, self.llm_client)
         self.story_repository.store_volumes(story_id, volumes)
         self.story_repository.store_anchors(story_id, anchors)
+        self.story_repository.merge_active_b_stories_seed(story_id, b_seed)
         protagonist_id = next((c.node_id for c in cast if c.role == "protagonist"), "")
         self.story_repository.update_story_cast(story_id, cast, protagonist_id)
         self.graph_store.clear_macro_cast_characters(story_id)
@@ -170,12 +184,17 @@ class WorkflowService:
             draft_loop_retry_limit=int(story.get("draft_loop_retry_limit", 3)),
             pov_character_id=pov_character_id,
         )
+        bible = story.get("bible_json") or {}
+        initial_state["active_b_stories"] = list(bible.get("active_b_stories") or [])
+        initial_state["distance_to_anchor"] = _chapter_distance_to_anchor(chapter_id, unachieved_anchors)
+        normalize_workflow_state(initial_state)
+        apply_length_bounds_to_state(initial_state)
         run = self.workflow_repository.create_run(story_id, chapter_id, initial_state)
         return self.get_workflow(run.run_id)
 
     def execute_stored_run(self, run_id: str) -> None:
         """Resume graph from DB state (used after start_run_chapter or HITL)."""
-        state = self.workflow_repository.get_run_state(run_id)
+        state = normalize_workflow_state(self.workflow_repository.get_run_state(run_id))
         try:
             self._execute_workflow(run_id, state)
         except Exception as exc:
@@ -289,6 +308,7 @@ class WorkflowService:
         state["current_draft"] = request.chapter_content
         best_raw = (request.best_draft_content or "").strip()
         state["best_draft_content"] = best_raw if best_raw else request.chapter_content
+        state["author_extraction_surface_hints"] = []
         state["requires_hitl"] = False
         state["hitl_reason"] = ""
         state["hitl_decision_mode"] = "NONE"

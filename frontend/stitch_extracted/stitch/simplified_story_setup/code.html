@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&amp;family=Newsreader:ital,opsz,wght@0,6..72,200..800;1,6..72,200..800&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        "surface-container": "#171f33",
+                        "on-tertiary-fixed": "#301400",
+                        "surface-container-highest": "#2d3449",
+                        "error": "#ffb4ab",
+                        "inverse-primary": "#494bd6",
+                        "on-secondary-fixed-variant": "#574500",
+                        "on-background": "#dae2fd",
+                        "on-primary": "#1000a9",
+                        "on-primary-container": "#0d0096",
+                        "on-primary-fixed": "#07006c",
+                        "on-error-container": "#ffdad6",
+                        "secondary-container": "#af8d11",
+                        "error-container": "#93000a",
+                        "surface-bright": "#31394d",
+                        "secondary-fixed-dim": "#e9c349",
+                        "surface-container-high": "#222a3d",
+                        "surface-tint": "#c0c1ff",
+                        "tertiary-fixed-dim": "#ffb783",
+                        "on-surface": "#dae2fd",
+                        "on-secondary": "#3c2f00",
+                        "on-secondary-container": "#342800",
+                        "surface-variant": "#2d3449",
+                        "surface-container-lowest": "#060e20",
+                        "surface": "#0b1326",
+                        "on-primary-fixed-variant": "#2f2ebe",
+                        "background": "#0b1326",
+                        "on-tertiary-container": "#452000",
+                        "tertiary": "#ffb783",
+                        "surface-container-low": "#131b2e",
+                        "secondary": "#e9c349",
+                        "surface-dim": "#0b1326",
+                        "inverse-surface": "#dae2fd",
+                        "primary-fixed": "#e1e0ff",
+                        "on-surface-variant": "#c7c4d7",
+                        "primary": "#c0c1ff",
+                        "on-tertiary-fixed-variant": "#703700",
+                        "inverse-on-surface": "#283044",
+                        "primary-fixed-dim": "#c0c1ff",
+                        "tertiary-fixed": "#ffdcc5",
+                        "outline-variant": "#464554",
+                        "outline": "#908fa0",
+                        "primary-container": "#8083ff",
+                        "on-secondary-fixed": "#241a00",
+                        "tertiary-container": "#d97721",
+                        "on-tertiary": "#4f2500",
+                        "on-error": "#690005",
+                        "secondary-fixed": "#ffe088"
+                    },
+                    fontFamily: {
+                        "headline": ["Manrope"],
+                        "body": ["Newsreader"],
+                        "label": ["Manrope"]
+                    },
+                    borderRadius: {"DEFAULT": "0.125rem", "lg": "0.25rem", "xl": "0.5rem", "full": "0.75rem"},
+                },
+            },
+        }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+            vertical-align: middle;
+        }
+        .no-scrollbar::-webkit-scrollbar {
+            display: none;
+        }
+        .serif-italic { font-style: italic; font-family: 'Newsreader', serif; }
+    </style>
+</head>
+<body class="bg-background text-on-surface font-body selection:bg-primary/30 min-h-screen">
+<!-- TopAppBar -->
+<header class="bg-background text-primary font-manrope text-sm tracking-wide uppercase w-full border-b border-outline-variant/10 flex justify-between items-center px-6 py-4 fixed top-0 z-50">
+<div class="text-xl font-bold tracking-tighter text-primary">Auteur AI</div>
+<nav class="hidden md:flex items-center gap-8">
+<a class="text-on-surface opacity-70 hover:opacity-100 transition-all" href="#">Drafts</a>
+<a class="text-on-surface opacity-70 hover:opacity-100 transition-all" href="#">Manuscript</a>
+<a class="text-primary font-bold border-b-2 border-primary pb-1" href="#">Universe</a>
+</nav>
+<div class="flex items-center gap-4">
+<button class="material-symbols-outlined p-2 hover:bg-surface-container-high rounded-full transition-all text-on-surface">notifications</button>
+<div class="w-8 h-8 rounded-full bg-surface-container-highest flex items-center justify-center">
+<span class="material-symbols-outlined text-sm">person</span>
+</div>
+</div>
+</header>
+<!-- Main Content -->
+<main class="pt-24 pb-12 px-6 md:px-12 max-w-7xl mx-auto">
+<div class="mb-12">
+<span class="font-label text-secondary text-xs uppercase tracking-[0.3em] font-semibold block mb-2">Project Configuration</span>
+<h1 class="font-headline text-4xl font-black text-on-surface tracking-tighter mb-4">Story Setup</h1>
+<p class="font-body text-lg text-on-surface-variant max-w-2xl italic">Refine your narrative foundations and generate a structured macro outline.</p>
+</div>
+<div class="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+<!-- Left Column: Setup Form -->
+<div class="lg:col-span-5">
+<section class="bg-surface-container-low p-8 rounded-xl flex flex-col gap-6 border border-outline-variant/10 shadow-sm">
+<h2 class="font-headline text-lg font-bold text-primary flex items-center gap-2">
+<span class="material-symbols-outlined">tune</span> Configuration
+                    </h2>
+<div class="flex flex-col gap-1">
+<label class="font-label text-xs font-semibold text-outline tracking-wider uppercase">Story Title</label>
+<input class="bg-surface-container-highest border-none rounded-lg text-on-surface font-headline p-3 focus:ring-1 focus:ring-primary" placeholder="e.g. Echoes of the Void" type="text" value="Echoes of the Void"/>
+</div>
+<div class="grid grid-cols-2 gap-4">
+<div class="flex flex-col gap-1">
+<label class="font-label text-xs font-semibold text-outline tracking-wider uppercase">Word Count</label>
+<input class="bg-surface-container-highest border-none rounded-lg text-on-surface font-headline p-3 focus:ring-1 focus:ring-primary" type="number" value="85000"/>
+</div>
+<div class="flex flex-col gap-1">
+<label class="font-label text-xs font-semibold text-outline tracking-wider uppercase">Category</label>
+<select class="bg-surface-container-highest border-none rounded-lg text-on-surface font-headline p-3 focus:ring-1 focus:ring-primary">
+<option>Speculative Fiction</option>
+<option>Gothic Noir</option>
+<option>Space Opera</option>
+</select>
+</div>
+</div>
+<div class="grid grid-cols-2 gap-4">
+<div class="flex flex-col gap-1">
+<label class="font-label text-xs font-semibold text-outline tracking-wider uppercase">Perspective</label>
+<select class="bg-surface-container-highest border-none rounded-lg text-on-surface font-headline p-3 focus:ring-1 focus:ring-primary">
+<option>First Person</option>
+<option>Third Limited</option>
+<option>Third Omniscient</option>
+</select>
+</div>
+<div class="flex flex-col gap-1">
+<label class="font-label text-xs font-semibold text-outline tracking-wider uppercase">Writing Style</label>
+<select class="bg-surface-container-highest border-none rounded-lg text-on-surface font-headline p-3 focus:ring-1 focus:ring-primary">
+<option>Literary</option>
+<option>Minimalist</option>
+<option>Pulpy</option>
+</select>
+</div>
+</div>
+<div class="grid grid-cols-2 gap-4">
+<div class="flex flex-col gap-1">
+<label class="font-label text-xs font-semibold text-outline tracking-wider uppercase">Tone</label>
+<select class="bg-surface-container-highest border-none rounded-lg text-on-surface font-headline p-3 focus:ring-1 focus:ring-primary">
+<option>Melancholic</option>
+<option>Suspenseful</option>
+<option>Optimistic</option>
+</select>
+</div>
+<div class="flex flex-col gap-1">
+<label class="font-label text-xs font-semibold text-outline tracking-wider uppercase">Worldview</label>
+<select class="bg-surface-container-highest border-none rounded-lg text-on-surface font-headline p-3 focus:ring-1 focus:ring-primary">
+<option>Cynical</option>
+<option>Balanced</option>
+<option>Idealistic</option>
+</select>
+</div>
+</div>
+<button class="mt-4 bg-primary text-on-primary font-bold py-4 rounded-xl flex items-center justify-center gap-3 hover:brightness-110 active:scale-[0.98] transition-all shadow-lg shadow-primary/20">
+<span class="material-symbols-outlined">auto_awesome</span>
+                        MACRO COMPILE
+                    </button>
+</section>
+</div>
+<!-- Right Column: Simplified Outline -->
+<div class="lg:col-span-7 flex flex-col gap-6">
+<div class="flex items-center justify-between mb-2">
+<h2 class="font-headline text-xl font-bold text-on-surface flex items-center gap-2">
+<span class="material-symbols-outlined text-secondary">format_list_bulleted</span>
+                        Narrative Outline
+                    </h2>
+<span class="text-xs font-bold text-outline bg-surface-container px-3 py-1 rounded-full border border-outline-variant/20 uppercase tracking-widest">3 Volumes Generated</span>
+</div>
+<!-- Volume 1 -->
+<div class="bg-surface-container-low p-6 rounded-xl border border-outline-variant/10">
+<div class="flex justify-between items-start mb-4">
+<div>
+<span class="text-[10px] font-black text-secondary uppercase tracking-[0.2em]">Volume I</span>
+<h3 class="font-headline text-2xl font-bold">The Silent Resonance</h3>
+</div>
+<div class="flex gap-2">
+<div class="flex flex-col items-end">
+<span class="text-[10px] text-outline font-bold uppercase">Cast</span>
+<span class="text-sm font-semibold">Elias Thorne, Mira</span>
+</div>
+</div>
+</div>
+<p class="font-body text-on-surface-variant mb-4 leading-relaxed italic">Introduction to Oros. Elias discovers a glitch in a digital vault that shouldn't exist.</p>
+<div class="space-y-2 border-t border-outline-variant/10 pt-4">
+<div class="flex items-center gap-3 text-sm">
+<span class="w-1.5 h-1.5 rounded-full bg-secondary"></span>
+<span>The Discovery of the Glitch-Stone</span>
+</div>
+<div class="flex items-center gap-3 text-sm">
+<span class="w-1.5 h-1.5 rounded-full bg-secondary"></span>
+<span>Meeting the Whispering Syndicate</span>
+</div>
+<div class="flex items-center gap-3 text-sm">
+<span class="w-1.5 h-1.5 rounded-full bg-secondary"></span>
+<span>The First Temporal Slip</span>
+</div>
+</div>
+</div>
+<!-- Volume 2 -->
+<div class="bg-surface-container-low p-6 rounded-xl border border-outline-variant/10">
+<div class="flex justify-between items-start mb-4">
+<div>
+<span class="text-[10px] font-black text-primary uppercase tracking-[0.2em]">Volume II</span>
+<h3 class="font-headline text-2xl font-bold">Fracture Point</h3>
+</div>
+<div class="flex gap-2 text-right">
+<div class="flex flex-col items-end">
+<span class="text-[10px] text-outline font-bold uppercase">Cast</span>
+<span class="text-sm font-semibold">Elias, Unit-7, The Purger</span>
+</div>
+</div>
+</div>
+<p class="font-body text-on-surface-variant mb-4 leading-relaxed italic">The Collective begins the purge. Elias must flee into the Outlands with an unlikely companion.</p>
+<div class="space-y-2 border-t border-outline-variant/10 pt-4">
+<div class="flex items-center gap-3 text-sm">
+<span class="w-1.5 h-1.5 rounded-full bg-primary"></span>
+<span>Escape through the Glass Tunnels</span>
+</div>
+<div class="flex items-center gap-3 text-sm">
+<span class="w-1.5 h-1.5 rounded-full bg-primary"></span>
+<span>The Sanctuary of Lost Data</span>
+</div>
+<div class="flex items-center gap-3 text-sm">
+<span class="w-1.5 h-1.5 rounded-full bg-primary"></span>
+<span>The Decryption Ritual</span>
+</div>
+</div>
+</div>
+<!-- Volume 3 -->
+<div class="bg-surface-container-low p-6 rounded-xl border border-outline-variant/10">
+<div class="flex justify-between items-start mb-4">
+<div>
+<span class="text-[10px] font-black text-tertiary uppercase tracking-[0.2em]">Volume III</span>
+<h3 class="font-headline text-2xl font-bold">The Architect's Requiem</h3>
+</div>
+<div class="flex gap-2 text-right">
+<div class="flex flex-col items-end">
+<span class="text-[10px] text-outline font-bold uppercase">Cast</span>
+<span class="text-sm font-semibold">The Architect, Elias</span>
+</div>
+</div>
+</div>
+<p class="font-body text-on-surface-variant mb-4 leading-relaxed italic">The truth behind the Void is revealed. A final choice between restoration and chaos.</p>
+<div class="space-y-2 border-t border-outline-variant/10 pt-4">
+<div class="flex items-center gap-3 text-sm">
+<span class="w-1.5 h-1.5 rounded-full bg-tertiary"></span>
+<span>The Edge of Reality Convergence</span>
+</div>
+<div class="flex items-center gap-3 text-sm">
+<span class="w-1.5 h-1.5 rounded-full bg-tertiary"></span>
+<span>Writing the Final Manuscript</span>
+</div>
+<div class="flex items-center gap-3 text-sm">
+<span class="w-1.5 h-1.5 rounded-full bg-tertiary"></span>
+<span>The Transcendent Choice</span>
+</div>
+</div>
+</div>
+<button class="w-full py-4 border-2 border-dashed border-outline-variant/20 rounded-xl text-outline font-bold text-xs uppercase tracking-widest hover:bg-surface-container-low hover:border-outline-variant/40 transition-all">
+                    + Add New Volume
+                </button>
+</div>
+</div>
+</main>
+<!-- Footer Simple Navigation -->
+<footer class="mt-12 border-t border-outline-variant/10 py-8 px-6 text-center text-outline text-xs font-label uppercase tracking-widest">
+        Auteur AI © 2024 • Narrative Intelligence Engine
+    </footer>
+</body></html>

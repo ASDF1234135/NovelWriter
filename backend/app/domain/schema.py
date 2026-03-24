@@ -194,6 +194,16 @@ class MacroPlanOutput(BaseModel):
     total_chapters: int = 12
     volumes: list[MacroVolumePlanDraft] = Field(default_factory=list)
     cast: list[MacroCastMember] = Field(default_factory=list)
+    initial_b_stories: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Optional seed subplots as {id, desc} dicts merged into bible_json.active_b_stories at macro compile.",
+    )
+
+
+class ChapterType(str, Enum):
+    PLOT_DRIVEN = "PLOT_DRIVEN"
+    CHARACTER_DRIVEN = "CHARACTER_DRIVEN"
+    WORLD_BUILDING = "WORLD_BUILDING"
 
 
 class DirectorOutput(BaseModel):
@@ -203,12 +213,43 @@ class DirectorOutput(BaseModel):
     narrative_directive: str
     tone_direction: str
     target_anchor_id: Optional[str] = None
+    chapter_type: ChapterType = ChapterType.PLOT_DRIVEN
+    b_story_directive: Optional[str] = None
+    new_elements_to_introduce: list[str] = Field(default_factory=list)
 
 
 class EventOutline(BaseModel):
     event_id: str
     description: str
     caused_by_event_id: Optional[str] = None
+
+
+class ProposedGraphNode(BaseModel):
+    """Planner-invented graph node for genesis; max 3 per chapter (enforced in planner_node)."""
+
+    node_id: str
+    node_type: NodeType
+    role: str = ""
+    canonical_name: str = ""
+    writing_brief: str = ""
+    mandatory: bool = True
+
+
+class MandatoryNewEntity(BaseModel):
+    """Fed to Author / Draft supervisor for required on-screen presence."""
+
+    node_id: str
+    role: str = ""
+    canonical_name: str = ""
+    writing_brief: str = ""
+    search_keywords: list[str] = Field(default_factory=list)
+
+
+class BStorySeed(BaseModel):
+    """New subplot thread to merge into bible active_b_stories on successful chapter commit."""
+
+    id: str = Field(..., min_length=1, max_length=80)
+    desc: str = Field(default="", max_length=800)
 
 
 class PlannerOutput(BaseModel):
@@ -233,6 +274,11 @@ class PlannerOutput(BaseModel):
             "不得直接複製 RAG 未解線索裡尚未被讀者或 POV 角色正當得知的專名與劇情。"
         ),
     )
+    proposed_new_nodes: list[ProposedGraphNode] = Field(default_factory=list)
+    new_active_b_stories: list[BStorySeed] = Field(
+        default_factory=list,
+        description="本章若開啟全新副線（有獨立 id），最多 2 條；成功定稿後併入 bible。",
+    )
 
 
 class ViolationType(str, Enum):
@@ -242,6 +288,8 @@ class ViolationType(str, Enum):
     POV_LEAK = "POV_LEAK"
     INCONSISTENCY = "INCONSISTENCY"
     WORD_COUNT_UNMATCH = "WORD_COUNT_UNMATCH"
+    MISSING_DIRECTIVE = "MISSING_DIRECTIVE"
+    MISSING_MANDATORY_ENTITY_MAPPING = "MISSING_MANDATORY_ENTITY_MAPPING"
 
 
 class SuggestionType(str, Enum):
@@ -262,6 +310,19 @@ class PlanSupervisorOutput(BaseModel):
     suggestion_type: SuggestionType = SuggestionType.NONE
     feedback_to_agent: str = ""
     anchor_achieved: bool = False
+    soft_warnings: list[str] = Field(default_factory=list)
+
+
+class BStoryResolutionOutput(BaseModel):
+    """Post-extraction subplot closure; evidence ids must be substantiated in structured extraction (R2c)."""
+
+    resolution_analysis: str = Field(
+        ...,
+        min_length=20,
+        description="Chain-of-thought: why each listed subplot is fully and irreversibly resolved, or why none are.",
+    )
+    resolution_evidence_event_ids: list[str] = Field(default_factory=list)
+    resolved_b_stories: list[str] = Field(default_factory=list)
 
 
 class DraftSupervisorOutput(BaseModel):
@@ -272,9 +333,21 @@ class DraftSupervisorOutput(BaseModel):
     length_adjustment: LengthAdjustment = LengthAdjustment.NONE
 
 
+class AuthorExtractionSurfaceEntry(BaseModel):
+    """Per-node surface strings that appear verbatim in chapter text (validated server-side)."""
+
+    node_id: str = Field(..., min_length=1)
+    surface_forms: list[str] = Field(default_factory=list)
+
+
+class AuthorExtractionHintsOutput(BaseModel):
+    entries: list[AuthorExtractionSurfaceEntry] = Field(default_factory=list)
+
+
 class AuthorOutput(BaseModel):
     chapter_content: str
     word_count: int
+    extraction_surface_hints: list[AuthorExtractionSurfaceEntry] = Field(default_factory=list)
 
 
 class ReaderOutput(BaseModel):
@@ -282,13 +355,6 @@ class ReaderOutput(BaseModel):
     literary_score: int = Field(..., ge=0, le=100)
     suggestion_type: SuggestionType = SuggestionType.NONE
     critique: str
-
-
-class ProsePolishOutput(BaseModel):
-    """LLM output for post-reader polish (format / language only, no plot changes)."""
-
-    polished_text: str = Field(..., description="Full chapter text after light editing.")
-    change_summary: str = Field(default="", description="Optional short note of edits applied.")
 
 
 class ExtractedEntity(BaseModel):
