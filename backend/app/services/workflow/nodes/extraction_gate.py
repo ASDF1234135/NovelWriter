@@ -11,7 +11,9 @@ from app.domain.schema import (
     ViolationType,
 )
 from app.services.workflow.chapter_pipeline import (
+    apply_manual_entity_remap,
     apply_resolution_to_extraction,
+    build_extraction_remap_hints,
     validate_mandatory_planned_nodes,
 )
 from app.services.workflow.context import WorkflowContext
@@ -119,22 +121,33 @@ def run_extraction_gate(state: dict, context: WorkflowContext) -> dict:
     """
     chapter_content = state.get("best_draft_content") or state.get("current_draft") or ""
     events = [EventOutline.model_validate(event) for event in state.get("ground_truth_events") or []]
+    tier = int(state.get("graph_rag_context_tier", 2) or 2)
     graph_snapshot = context.graph_store.query_context(
         GraphQueryRequest(
             story_id=state["story_id"],
             active_epoch_id=state["active_epoch_id"],
             pov_character_id=state["pov_character_id"],
             narrative_directive=state.get("narrative_directive", ""),
+            context_hop_tier=max(0, min(2, tier)),
         )
     )
     extracted, diag = extract_chapter_artifacts(state, context, graph_snapshot, chapter_content, events)
     planned = list(state.get("planned_graph_nodes") or [])
+    remapped_entities = apply_manual_entity_remap(
+        list(extracted.entities),
+        list(state.get("manual_entity_remap") or []),
+    )
+    extracted = extracted.model_copy(update={"entities": remapped_entities})
     extracted = apply_resolution_to_extraction(extracted, planned, _author_surface_map(state))
-    ok, missing = validate_mandatory_planned_nodes(list(extracted.entities), planned)
+    skips = {str(x).strip() for x in (state.get("mandatory_extraction_skips") or []) if str(x).strip()}
+    ok, missing = validate_mandatory_planned_nodes(
+        list(extracted.entities), planned, skip_mandatory_node_ids=skips
+    )
     if not ok:
         msg, missing_detail = _format_missing_mandatory_feedback(missing, planned)
         prefix = _extraction_fallback_notice(diag if isinstance(diag, dict) else None)
         msg = prefix + msg
+        hints = build_extraction_remap_hints(list(extracted.entities), missing, planned)
         return {
             "post_polish_route": "author",
             "pending_chapter_extraction": {},
@@ -147,6 +160,7 @@ def run_extraction_gate(state: dict, context: WorkflowContext) -> dict:
                 "missing_mandatory_entities": missing_detail,
             },
             "extraction_gate_error": msg,
+            "hitl_extraction_remap_hints": hints,
         }
 
     return {

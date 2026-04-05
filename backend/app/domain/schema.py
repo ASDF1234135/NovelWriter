@@ -3,9 +3,9 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Literal, Optional, Union
 
-MacroCastRole = Literal["protagonist", "supporting"]
+MacroCastRole = Literal["protagonist", "supporting", "antagonist"]
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class NodeType(str, Enum):
@@ -102,13 +102,55 @@ class GraphEdge(BaseModel):
     context_details: str = ""
 
 
+class StoryCastSeedEntry(BaseModel):
+    """User-defined core cast roster hints for macro compile (optional)."""
+
+    canonical_name: str
+    role: MacroCastRole | None = Field(
+        default=None,
+        description="Optional role hint for the macro planner; normalize may still coerce duplicates.",
+    )
+    short_hint: str = Field(default="", description="One-line note for macro prompt context.")
+
+    @field_validator("canonical_name")
+    @classmethod
+    def strip_name(cls, v: str) -> str:
+        s = (v or "").strip()
+        if not s:
+            raise ValueError("canonical_name must be non-empty")
+        return s
+
+
 class StoryInput(BaseModel):
     title: str
     premise: str = Field(..., description="One-line story summary.")
-    bible: dict[str, Any] = Field(default_factory=dict)
+    bible: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Deprecated for human entry; macro compile overwrites with generated bible. Omit or {}.",
+    )
+    macro_author_notes: str = Field(
+        default="",
+        description="Free-form author notes fed into macro compile (truncated server-side).",
+    )
+    cast_seed: list[StoryCastSeedEntry] = Field(
+        default_factory=list,
+        description="Optional structured core cast names for macro compile; empty keeps LLM-only roster.",
+    )
     target_total_words: int = 100_000
     plan_retry_limit: int = Field(default=3, ge=0, le=20)
     draft_loop_retry_limit: int = Field(default=3, ge=0, le=20)
+
+
+class StoryPatch(BaseModel):
+    """Partial update allowed only before any workflow run (enforced in API/service)."""
+
+    title: str | None = None
+    premise: str | None = None
+    target_total_words: int | None = Field(default=None, ge=1)
+    plan_retry_limit: int | None = Field(default=None, ge=0, le=20)
+    draft_loop_retry_limit: int | None = Field(default=None, ge=0, le=20)
+    macro_author_notes: str | None = None
+    cast_seed: list[StoryCastSeedEntry] | None = None
 
 
 class VolumePlan(BaseModel):
@@ -136,6 +178,8 @@ class MacroNestedAnchorDraft(BaseModel):
     target_state: dict[str, Any] = Field(default_factory=dict)
     chapter_target: int
     priority: int = 1
+    # Selected keypoint IDs (e.g. ["KP1"]) referencing `macro_author_notes` for enforcement.
+    notes_links: list[str] = Field(default_factory=list)
 
 
 class MacroVolumePlanDraft(BaseModel):
@@ -156,6 +200,21 @@ class MacroCastMember(BaseModel):
     role: MacroCastRole = "supporting"
     short_bio: str = ""
     aliases: list[str] = Field(default_factory=list)
+    age: str = Field(
+        default="",
+        description="Age or rough life-stage (e.g. 28 or 約三十).",
+    )
+    motivation: str = Field(default="", description="Core goals and drives (legacy; prefer core_motivation).")
+    core_motivation: str = Field(default="", description="Primary drive across the series.")
+    speech_style: str = Field(
+        default="",
+        description="Speech flavor; use sparingly in prose—not every line.",
+    )
+    fatal_flaw: str = Field(default="", description="Fatal flaw or main weakness.")
+    quirks_and_habits: str = Field(default="", description="Observable habits or tics (use sparingly).")
+    core_value: str = Field(default="", description="Core value / guiding principle (optional).")
+    # Selected keypoint IDs (e.g. ["KP1"]) referencing `macro_author_notes` for enforcement.
+    notes_links: list[str] = Field(default_factory=list)
 
 
 class StoryCastMemberStored(BaseModel):
@@ -166,6 +225,13 @@ class StoryCastMemberStored(BaseModel):
     role: MacroCastRole
     short_bio: str = ""
     aliases: list[str] = Field(default_factory=list)
+    age: str = ""
+    motivation: str = ""
+    core_motivation: str = ""
+    speech_style: str = ""
+    fatal_flaw: str = ""
+    quirks_and_habits: str = ""
+    core_value: str = ""
 
 
 class StateAnchor(BaseModel):
@@ -190,20 +256,103 @@ class MacroAnchorDraft(BaseModel):
     priority: int = 1
 
 
-class MacroPlanOutput(BaseModel):
-    total_chapters: int = 12
-    volumes: list[MacroVolumePlanDraft] = Field(default_factory=list)
-    cast: list[MacroCastMember] = Field(default_factory=list)
-    initial_b_stories: list[dict[str, Any]] = Field(
-        default_factory=list,
-        description="Optional seed subplots as {id, desc} dicts merged into bible_json.active_b_stories at macro compile.",
-    )
-
-
 class ChapterType(str, Enum):
     PLOT_DRIVEN = "PLOT_DRIVEN"
     CHARACTER_DRIVEN = "CHARACTER_DRIVEN"
     WORLD_BUILDING = "WORLD_BUILDING"
+
+
+class ConflictType(str, Enum):
+    MYSTERY = "MYSTERY"
+    POLITICAL = "POLITICAL"
+    SOCIAL = "SOCIAL"
+    ROMANCE = "ROMANCE"
+    SURVIVAL = "SURVIVAL"
+    INVESTIGATION = "INVESTIGATION"
+    HEIST = "HEIST"
+    ESCAPE = "ESCAPE"
+    PURSUIT = "PURSUIT"
+    INTERNAL = "INTERNAL"
+    MORAL_DILEMMA = "MORAL_DILEMMA"
+    OTHER = "OTHER"
+
+
+class ResolutionMethod(str, Enum):
+    DISCOVERY = "DISCOVERY"
+    NEGOTIATION = "NEGOTIATION"
+    SACRIFICE = "SACRIFICE"
+    DECEPTION = "DECEPTION"
+    VIOLENCE = "VIOLENCE"
+    ESCAPE = "ESCAPE"
+    ALLIANCE = "ALLIANCE"
+    TRADEOFF = "TRADEOFF"
+    REVELATION = "REVELATION"
+    FAILURE = "FAILURE"
+    OTHER = "OTHER"
+
+
+class EndingVibe(str, Enum):
+    ACTION_CLIFFHANGER = "ACTION_CLIFFHANGER"
+    SAFE_ROOM_EXPOSITION = "SAFE_ROOM_EXPOSITION"
+    ON_THE_MOVE = "ON_THE_MOVE"
+    DEVASTATING_LOSS = "DEVASTATING_LOSS"
+
+
+class BStoryType(str, Enum):
+    FETCH_QUEST = "FETCH_QUEST"
+    RELATIONSHIP_DRAMA = "RELATIONSHIP_DRAMA"
+    ENVIRONMENTAL_HAZARD = "ENVIRONMENTAL_HAZARD"
+    LORE_DISCOVERY = "LORE_DISCOVERY"
+    INTERNAL_CONFLICT = "INTERNAL_CONFLICT"
+    UNKNOWN = "UNKNOWN"
+
+
+class MacroInitialBStory(BaseModel):
+    """Long-horizon subplot seeds at macro compile (merged into bible_json.active_b_stories)."""
+
+    id: str = Field(..., min_length=1, max_length=80)
+    desc: str = Field(default="", max_length=800)
+    type: BStoryType = BStoryType.UNKNOWN
+    resolution_condition: str = Field(
+        default="",
+        max_length=800,
+        description="Objective completion criteria for downstream resolution checks.",
+    )
+
+
+class MacroPlanOutput(BaseModel):
+    total_chapters: int = 12
+    bible: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Generated story bible (genre, tone, world_rules, factions, etc.).",
+    )
+    volumes: list[MacroVolumePlanDraft] = Field(default_factory=list)
+    cast: list[MacroCastMember] = Field(default_factory=list)
+    initial_b_stories: list[MacroInitialBStory] = Field(
+        default_factory=list,
+        description="Long-horizon b-story seeds merged into bible_json.active_b_stories at macro compile.",
+    )
+
+
+class DirectorNewElement(BaseModel):
+    """Structured 'what to introduce this chapter' with rationale."""
+
+    need: str = Field(default="", max_length=800)
+    reason: str = Field(default="", max_length=1200)
+
+    @field_validator("need", "reason", mode="before")
+    @classmethod
+    def _strip(cls, v: object) -> object:
+        if isinstance(v, str):
+            return v.strip()
+        return v
+
+
+class DirectorNewBStoryRequest(BaseModel):
+    """Director asks planner to open a new subplot with this typology."""
+
+    type: BStoryType
+    purpose: str = Field(default="", max_length=1200)
 
 
 class DirectorOutput(BaseModel):
@@ -215,13 +364,59 @@ class DirectorOutput(BaseModel):
     target_anchor_id: Optional[str] = None
     chapter_type: ChapterType = ChapterType.PLOT_DRIVEN
     b_story_directive: Optional[str] = None
-    new_elements_to_introduce: list[str] = Field(default_factory=list)
+    b_story_type: Optional[BStoryType] = None
+    new_elements_to_introduce: list[DirectorNewElement] = Field(default_factory=list)
+    request_new_b_story: Optional[DirectorNewBStoryRequest] = None
+
+    @field_validator("new_elements_to_introduce", mode="before")
+    @classmethod
+    def _coerce_new_elements(cls, v: object) -> object:
+        if v is None:
+            return []
+        if not isinstance(v, list):
+            return v
+        out: list[dict[str, str]] = []
+        for item in v:
+            if isinstance(item, str):
+                t = item.strip()
+                if t:
+                    out.append({"need": t, "reason": ""})
+            elif isinstance(item, dict):
+                need = str(item.get("need") or item.get("label") or "").strip()
+                reason = str(item.get("reason") or "").strip()
+                if need or reason:
+                    out.append({"need": need, "reason": reason})
+        return out
+
+
+class ChapterSummaryOutput(BaseModel):
+    plot_summary: str = Field(..., min_length=30, max_length=520)
+    conflict_type: ConflictType
+    resolution_method: ResolutionMethod
+    ending_vibe: EndingVibe = EndingVibe.ON_THE_MOVE
+
+
+class MilestoneSummaryOutput(BaseModel):
+    # Allow short fallback summaries (e.g. MockLLM / partial failures).
+    milestone_summary: str = Field(..., min_length=20, max_length=900)
 
 
 class EventOutline(BaseModel):
     event_id: str
     description: str
     caused_by_event_id: Optional[str] = None
+
+
+class ProposedCharacterProfile(BaseModel):
+    """High-level character sheet for planned CHARACTER nodes (aligns with macro cast fields)."""
+
+    core_motivation: str = Field(default="", max_length=600)
+    fatal_flaw: str = Field(default="", max_length=400)
+    speech_style: str = Field(default="", max_length=240)
+    quirks_and_habits: str = Field(default="", max_length=400)
+    short_bio: str = Field(default="", max_length=500)
+    age: str = Field(default="", max_length=48)
+    core_value: str = Field(default="", max_length=600)
 
 
 class ProposedGraphNode(BaseModel):
@@ -233,6 +428,7 @@ class ProposedGraphNode(BaseModel):
     canonical_name: str = ""
     writing_brief: str = ""
     mandatory: bool = True
+    character_profile: Optional[ProposedCharacterProfile] = None
 
 
 class MandatoryNewEntity(BaseModel):
@@ -250,6 +446,12 @@ class BStorySeed(BaseModel):
 
     id: str = Field(..., min_length=1, max_length=80)
     desc: str = Field(default="", max_length=800)
+    type: BStoryType = BStoryType.UNKNOWN
+    resolution_condition: str = Field(
+        default="",
+        max_length=800,
+        description="Objective criteria for when this subplot is considered complete.",
+    )
 
 
 class PlannerOutput(BaseModel):
@@ -382,6 +584,7 @@ class ChapterMemory(BaseModel):
     unresolved_threads: list[str] = Field(default_factory=list)
     notable_entities: list[str] = Field(default_factory=list)
     latest_location: str = ""
+    ending_vibe: EndingVibe = EndingVibe.ON_THE_MOVE
 
 
 class ChapterExtractionOutput(BaseModel):
@@ -410,6 +613,7 @@ class ChapterMemoryExtractionOutput(BaseModel):
     unresolved_threads: list[str] = Field(default_factory=list)
     notable_entities: list[str] = Field(default_factory=list)
     latest_location: str = ""
+    ending_vibe: EndingVibe = EndingVibe.ON_THE_MOVE
 
 
 class RelationExtractionOutput(BaseModel):
@@ -515,6 +719,25 @@ class GraphQueryRequest(BaseModel):
     pov_character_id: str
     narrative_directive: str
     max_tokens: int = 6000
+    context_hop_tier: int = Field(
+        default=2,
+        ge=0,
+        le=2,
+        description="0=minimal graph context, 2=full budget for query_context.",
+    )
+
+
+class HitlReason:
+    """Stable string ids for workflow state hitl_reason (avoid magic strings scattered in code)."""
+
+    PLAN_LOOP_EXCEEDED = "Plan_Loop_Exceeded"
+    DRAFT_LOOP_EXCEEDED = "Draft_Loop_Exceeded"
+    EXTRACTION_GATE_FAILED = "Extraction_Gate_Failed"
+    B_STORY_RESOLUTION_FAILED = "B_Story_Resolution_Failed"
+    B_STORY_COOLDOWN_VIOLATION = "B_Story_Cooldown_Violation"
+    RESOLUTION_TACTIC_COOLDOWN_VIOLATION = "Resolution_Tactic_Cooldown_Violation"
+    ENDING_VIBE_COOLDOWN_VIOLATION = "Ending_Vibe_Cooldown_Violation"
+    CONTEXT_LENGTH_EXCEEDED = "Context_Length_Exceeded"
 
 
 class HitlDecisionRequest(BaseModel):
@@ -539,4 +762,94 @@ class HitlDraftEditRequest(BaseModel):
     chapter_content: str
     best_draft_content: str = ""
     resume_from: str = "reader"
+    reason: str = ""
+    merge_extraction_hints: bool = Field(
+        default=False,
+        description="If true, keep existing author_extraction_surface_hints instead of clearing them.",
+    )
+
+
+class HitlDirectorPatchRequest(BaseModel):
+    """Human edits director-facing fields while paused (typically Plan_Loop_Exceeded)."""
+
+    chapter_type: Optional[str] = None
+    b_story_directive: Optional[str] = None
+    b_story_type: Optional[str] = None
+    new_elements_to_introduce: Optional[list[DirectorNewElement]] = None
+    request_new_b_story: Optional[DirectorNewBStoryRequest] = None
+    narrative_directive: Optional[str] = None
+    reason: str = ""
+
+    @field_validator("new_elements_to_introduce", mode="before")
+    @classmethod
+    def _coerce_hitl_new_elements(cls, v: object) -> object:
+        if v is None:
+            return v
+        if not isinstance(v, list):
+            return v
+        out: list[dict[str, str]] = []
+        for item in v:
+            if isinstance(item, str):
+                t = item.strip()
+                if t:
+                    out.append({"need": t, "reason": ""})
+            elif isinstance(item, dict):
+                need = str(item.get("need") or "").strip()
+                reason = str(item.get("reason") or "").strip()
+                if need or reason:
+                    out.append({"need": need, "reason": reason})
+        return out
+
+
+class AuthorExtractionSurfaceHintEntry(BaseModel):
+    node_id: str
+    surface_forms: list[str] = Field(default_factory=list)
+
+
+class HitlExtractionHintsRequest(BaseModel):
+    """Merge surface hints for mandatory/planned entity alignment without rewriting the full draft."""
+
+    entries: list[AuthorExtractionSurfaceHintEntry]
+    resume_from: str = "draft_supervisor"
+    waive_mandatory_node_ids: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
+class HitlEntityRemapEntry(BaseModel):
+    """Map an extracted ghost node_id to a planned graph node_id."""
+
+    from_node_id: str
+    to_node_id: str
+
+
+class HitlExtractionRemapRequest(BaseModel):
+    entity_remaps: list[HitlEntityRemapEntry] = Field(default_factory=list)
+    waive_mandatory_node_ids: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
+class HitlBStoryJudgementRequest(BaseModel):
+    action: Literal["force_resolve", "reject"]
+    resolved_b_stories: list[str] = Field(default_factory=list)
+    resolution_evidence_event_ids: list[str] = Field(default_factory=list)
+    resolution_analysis: str = ""
+    reject_resume_from: str = "extraction_gate"
+    reason: str = ""
+
+
+class HitlAnchorDelayRequest(BaseModel):
+    anchor_id: str
+    new_chapter_target: int = Field(..., ge=1)
+    reason: str = ""
+
+
+class HitlContextPruneRequest(BaseModel):
+    """Overwrite assembled context slices after human trimming."""
+
+    bible_context: Optional[str] = None
+    graph_context: Optional[str] = None
+    vector_context: Optional[str] = None
+    recent_chapter_context: Optional[str] = None
+    previous_chapter_summary: Optional[str] = None
+    graph_rag_context_tier: Optional[int] = Field(default=None, ge=0, le=2)
     reason: str = ""

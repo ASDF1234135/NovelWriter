@@ -4,7 +4,7 @@ from typing import Any, NotRequired, TypedDict
 
 from pydantic import BaseModel, Field
 
-from app.domain.schema import EventOutline, HitlDecisionMode, LengthAdjustment, MandatoryNewEntity
+from app.domain.schema import EndingVibe, EventOutline, HitlDecisionMode, LengthAdjustment, MandatoryNewEntity
 
 
 class AgentWorkflowState(TypedDict):
@@ -21,6 +21,7 @@ class AgentWorkflowState(TypedDict):
     graph_context: str
     vector_context: str
     previous_chapter_summary: str
+    previous_chapter_tail_excerpt: NotRequired[str]
     recent_chapter_context: str
     continuity_notes: list[str]
     author_safe_continuity_notes: list[str]
@@ -71,8 +72,11 @@ class AgentWorkflowState(TypedDict):
     author_extraction_surface_hints: NotRequired[list[dict[str, Any]]]
     chapter_type: NotRequired[str]
     b_story_directive: NotRequired[str | None]
-    new_elements_to_introduce: NotRequired[list[str]]
+    b_story_type: NotRequired[str | None]
+    new_elements_to_introduce: NotRequired[list[dict[str, Any]]]
+    request_new_b_story: NotRequired[dict[str, Any] | None]
     active_b_stories: NotRequired[list[dict[str, Any]]]
+    recent_b_story_types: NotRequired[list[str]]
     distance_to_anchor: NotRequired[int | None]
     planned_graph_nodes: NotRequired[list[dict[str, Any]]]
     normalized_length_min: NotRequired[int]
@@ -82,6 +86,24 @@ class AgentWorkflowState(TypedDict):
     b_story_resolution: NotRequired[dict[str, Any]]
     post_polish_route: NotRequired[str]
     pending_b_story_additions: NotRequired[list[dict[str, Any]]]
+    extraction_gate_failure_streak: NotRequired[int]
+    extraction_hitl_limit: NotRequired[int]
+    manual_entity_remap: NotRequired[list[dict[str, Any]]]
+    mandatory_extraction_skips: NotRequired[list[str]]
+    manual_plan_force_approve: NotRequired[bool]
+    graph_rag_context_tier: NotRequired[int]
+    hitl_extraction_remap_hints: NotRequired[list[dict[str, Any]]]
+    b_story_resolution_hitl_candidate: NotRequired[dict[str, Any]]
+    b_story_route: NotRequired[str]
+    context_overflow_char_estimate: NotRequired[int]
+    all_milestone_summaries: NotRequired[list[dict[str, Any]]]
+    recent_chapter_summaries: NotRequired[list[dict[str, Any]]]
+    global_conflict_type_top3: NotRequired[list[dict[str, Any]]]
+    global_resolution_method_top3: NotRequired[list[dict[str, Any]]]
+    lore_mysteries_progression: NotRequired[list[dict[str, Any]]]
+    resolution_cooldown_constraint: NotRequired[dict[str, Any]]
+    ending_vibe_cooldown_constraint: NotRequired[dict[str, Any]]
+    writing_note: NotRequired[list[str]]
 
 
 class SafeAuthorPayload(BaseModel):
@@ -101,6 +123,7 @@ class SafeAuthorPayload(BaseModel):
     normalized_length_min: int = 0
     normalized_length_max: int = 0
     previous_chapter_summary: str = ""
+    previous_chapter_tail_excerpt: str = ""
     previous_attempt_draft: str = ""
     last_known_location: str = ""
     author_safe_continuity_notes: list[str] = Field(default_factory=list)
@@ -109,6 +132,7 @@ class SafeAuthorPayload(BaseModel):
     reader_feedback: list[dict[str, Any]] = Field(default_factory=list)
     length_adjustment: LengthAdjustment = LengthAdjustment.NONE
     mandatory_new_entities: list[MandatoryNewEntity] = Field(default_factory=list)
+    writing_note: list[str] = Field(default_factory=list)
 
 
 class SafePlannerPayload(BaseModel):
@@ -126,6 +150,7 @@ class SafePlannerPayload(BaseModel):
     vector_context: str
     bible_context: str
     previous_chapter_summary: str = ""
+    previous_chapter_tail_excerpt: str = ""
     recent_chapter_context: str = ""
     last_known_location: str = ""
     previous_attempt_ground_truth_events: list[EventOutline] = Field(default_factory=list)
@@ -141,9 +166,13 @@ class SafePlannerPayload(BaseModel):
     chapter_word_max: int = 12000
     chapter_type: str = "PLOT_DRIVEN"
     b_story_directive: str | None = None
-    new_elements_to_introduce: list[str] = Field(default_factory=list)
+    new_elements_to_introduce: list[dict[str, Any]] = Field(default_factory=list)
+    request_new_b_story: dict[str, Any] | None = None
     distance_to_anchor: int | None = None
     active_b_stories: list[dict[str, Any]] = Field(default_factory=list)
+    lore_mysteries_progression: list[dict[str, Any]] = Field(default_factory=list)
+    ending_vibe_cooldown_constraint: dict[str, Any] = Field(default_factory=dict)
+    writing_note: list[str] = Field(default_factory=list)
 
 
 class SafeSupervisorPayload(BaseModel):
@@ -160,6 +189,7 @@ class SafeSupervisorPayload(BaseModel):
     words_per_beat_floor: int = 200
     normalized_current_draft_length: int = 0
     previous_chapter_summary: str = ""
+    previous_chapter_tail_excerpt: str = ""
     recent_chapter_context: str = ""
     last_known_location: str = ""
     ground_truth_events: list[EventOutline] = Field(default_factory=list)
@@ -176,11 +206,16 @@ class SafeSupervisorPayload(BaseModel):
     chapter_type: str = "PLOT_DRIVEN"
     distance_to_anchor: int | None = None
     b_story_directive: str | None = None
-    new_elements_to_introduce: list[str] = Field(default_factory=list)
+    new_elements_to_introduce: list[dict[str, Any]] = Field(default_factory=list)
     proposed_new_nodes: list[dict[str, Any]] = Field(default_factory=list)
+    new_active_b_stories: list[dict[str, Any]] = Field(default_factory=list)
+    request_new_b_story: dict[str, Any] | None = None
     normalized_length_min: int = 0
     normalized_length_max: int = 0
     mandatory_new_entities: list[MandatoryNewEntity] = Field(default_factory=list)
+    lore_mysteries_progression: list[dict[str, Any]] = Field(default_factory=list)
+    resolution_cooldown_constraint: dict[str, Any] = Field(default_factory=dict)
+    ending_vibe_cooldown_constraint: dict[str, Any] = Field(default_factory=dict)
 
 
 class WorkflowBootstrapState(BaseModel):
@@ -214,6 +249,7 @@ def build_initial_state(
         graph_context="",
         vector_context="",
         previous_chapter_summary="",
+        previous_chapter_tail_excerpt="",
         recent_chapter_context="",
         continuity_notes=[],
         author_safe_continuity_notes=[],
@@ -260,8 +296,11 @@ def build_initial_state(
         resume_from="director",
         chapter_type="PLOT_DRIVEN",
         b_story_directive=None,
+        b_story_type=None,
         new_elements_to_introduce=[],
+        request_new_b_story=None,
         active_b_stories=[],
+        recent_b_story_types=[],
         distance_to_anchor=None,
         planned_graph_nodes=[],
         normalized_length_min=0,
@@ -269,6 +308,23 @@ def build_initial_state(
         plan_warnings=[],
         post_polish_route="resolve_subplots",
         author_extraction_surface_hints=[],
+        extraction_gate_failure_streak=0,
+        extraction_hitl_limit=4,
+        manual_entity_remap=[],
+        mandatory_extraction_skips=[],
+        manual_plan_force_approve=False,
+        graph_rag_context_tier=2,
+        hitl_extraction_remap_hints=[],
+        b_story_route="state_updater",
+        context_overflow_char_estimate=0,
+        all_milestone_summaries=[],
+        recent_chapter_summaries=[],
+        global_conflict_type_top3=[],
+        global_resolution_method_top3=[],
+        lore_mysteries_progression=[],
+        resolution_cooldown_constraint={},
+        ending_vibe_cooldown_constraint={},
+        writing_note=[],
     )
 
 
@@ -277,8 +333,11 @@ def normalize_workflow_state(state: dict[str, Any]) -> dict[str, Any]:
     defaults: dict[str, Any] = {
         "chapter_type": "WORLD_BUILDING",
         "b_story_directive": None,
+        "b_story_type": None,
         "new_elements_to_introduce": [],
+        "request_new_b_story": None,
         "active_b_stories": [],
+        "recent_b_story_types": [],
         "distance_to_anchor": None,
         "planned_graph_nodes": [],
         "normalized_length_min": 0,
@@ -286,11 +345,34 @@ def normalize_workflow_state(state: dict[str, Any]) -> dict[str, Any]:
         "plan_warnings": [],
         "post_polish_route": "resolve_subplots",
         "pending_b_story_additions": [],
+        "previous_chapter_tail_excerpt": "",
         "author_extraction_surface_hints": [],
+        "extraction_gate_failure_streak": 0,
+        "extraction_hitl_limit": 4,
+        "manual_entity_remap": [],
+        "mandatory_extraction_skips": [],
+        "manual_plan_force_approve": False,
+        "graph_rag_context_tier": 2,
+        "hitl_extraction_remap_hints": [],
+        "b_story_route": "state_updater",
+        "context_overflow_char_estimate": 0,
+        "all_milestone_summaries": [],
+        "recent_chapter_summaries": [],
+        "global_conflict_type_top3": [],
+        "global_resolution_method_top3": [],
+        "lore_mysteries_progression": [],
+        "resolution_cooldown_constraint": {},
+        "ending_vibe_cooldown_constraint": {},
+        "writing_note": [],
     }
     for key, val in defaults.items():
         if key not in state:
             state[key] = val
+    neo = state.get("new_elements_to_introduce")
+    if neo and isinstance(neo, list) and neo and isinstance(neo[0], str):
+        state["new_elements_to_introduce"] = [
+            {"need": str(s).strip(), "reason": ""} for s in neo if str(s).strip()
+        ]
     if state.get("resume_from") == "prose_polish":
         state["resume_from"] = "extraction_gate"
     return state

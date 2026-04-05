@@ -92,6 +92,14 @@ def resolve_pov_character_id(pov_character_id: str, graph_snapshot: GraphSnapsho
     return best_node_id if best_score >= 0.6 else pov_character_id
 
 
+def chapter_content_tail_snippet(content: str, max_chars: int = 320) -> str:
+    """Last up to max_chars of normalized text; aligns vector summary fallback with chapter-end continuity."""
+    text = _normalize_text(content or "")
+    if len(text) <= max_chars:
+        return text
+    return text[-max_chars:]
+
+
 def _build_chapter_summary(
     chapter: dict,
     vector_hits: list[VectorDocument],
@@ -103,12 +111,16 @@ def _build_chapter_summary(
         metadata = hit.metadata
         if metadata.get("chapter_id") != chapter_id:
             continue
+        mem_type = str(metadata.get("memory_type") or "").strip()
+        # Excerpts and unresolved-thread docs are not 「上一章摘要」; their text_chunk is often chapter opening.
+        if mem_type in {"chapter_excerpt", "unresolved_threads"}:
+            continue
         summary = _normalize_text(str(metadata.get("chapter_summary", "")).strip())
         if summary:
             return summary[:max_chars]
-        text = _normalize_text(hit.text_chunk)
-        if text:
-            return text[:max_chars]
+        # chapter_summary vector rows with empty metadata used to fall back to text_chunk (often 正文開頭).
+        if mem_type == "chapter_summary":
+            continue
     return _summarize_chapter_record(chapter, max_chars=max_chars)
 
 

@@ -41,16 +41,16 @@
 節點順序（主路徑）：
 
 1. `director` — 章節類型、副線指令、POV、epoch、基調、敘事方向等  
-2. `graph_rag` — bible / graph / vector / 近章正文組上下文  
+2. `graph_rag` — bible / graph / vector / 近章正文組上下文；依 **`graph_rag_context_tier`** 自動縮減 Neo4j hop 與 JSON 截斷；若組裝後字元仍超過預算 → **`WAITING_HITL`**（`Context_Length_Exceeded`）  
 3. `planner` — 底層事件 + 表層劇本 + **`proposed_new_nodes`（≤3）** + **`new_active_b_stories`（≤2，可選）** + `target_word_count`（並寫入字數 SSOT）  
 4. `plan_supervisor` — 大綱審核（**Hard / Soft** 分野；創世／B 線核心缺漏為 **Hard**）  
 5. `author` — 依安全任務卡寫正文；定稿後第二段 LLM 產出 **`author_extraction_surface_hints`**（`node_id` + 正文精確子字串）  
 6. `draft_supervisor` — 字數 SSOT；**必選實體**改由 **`author_extraction_surface_hints`**（正文精確子字串）決定性檢查  
 7. `reader` — 文學可讀性  
-8. **`extraction_gate`** — **抽取 + `remap_planned_entities`（R1/R5）+ `validate_mandatory_planned_nodes`（R6）**（併用 Author 登記的 surface hints）  
-   - 失敗 → 退回 **`author`**（`MISSING_MANDATORY_ENTITY_MAPPING` 類回饋）  
-   - 成功 → 寫入 **`pending_chapter_extraction`**，前往副線核銷  
-9. **`b_story_resolve`** — LLM 輸出 `resolution_analysis`、`resolution_evidence_event_ids`、`resolved_b_stories`；證據 event id 須在 **抽取結果中可佐證**（R2c）  
+8. **`extraction_gate`** — **抽取 + `apply_manual_entity_remap`（HITL）+ `remap_planned_entities`（R1/R5）+ `validate_mandatory_planned_nodes`（R6，支援 `mandatory_extraction_skips`）**（併用 Author 登記的 surface hints）  
+   - 失敗 → 退回 **`author`**，並累積 **`extraction_gate_failure_streak`**；超過 **`extraction_hitl_limit`** → **`WAITING_HITL`**（`Extraction_Gate_Failed`），附 **`hitl_extraction_remap_hints`**  
+   - 成功 → 寫入 **`pending_chapter_extraction`**，**streak 歸零**，前往副線核銷  
+9. **`b_story_resolve`** — LLM 輸出 `resolution_analysis`、`resolution_evidence_event_ids`、`resolved_b_stories`；證據 event id 須在 **抽取結果中可佐證**（R2c）。若模型意圖核銷但證據不成立 → **`WAITING_HITL`**（`B_Story_Resolution_Failed`），保留 **`b_story_resolution_hitl_candidate`**  
 10. **`state_updater`** — 以 `pending_chapter_extraction` 為主做 mutations + vector；SQLite 章節寫入後更新 bible：**剔除核銷副線**、**merge 本章新增副線種子**
 
 `plan_supervisor`、`draft_supervisor`、`reader` 可將流程打回前一層；重試過多進入 HITL。`extraction_gate` 退回 author 亦會累積 `draft_feedback`。
@@ -119,8 +119,19 @@
 
 ## HITL
 
-與先前相同：**Plan_Loop_Exceeded**、**Draft_Loop_Exceeded**、大綱編輯、正文修訂、狀態注入。  
-`resume_from` 可包含 **`extraction_gate`**、**`b_story_resolve`**（見 `WorkflowService` 允許集合），以便從定稿後路徑恢復。
+暫停原因（`hitl_reason`）與主要 API（FastAPI `/api/workflows/{run_id}/hitl/...`）：
+
+| 原因 | 情境 | 主要端點 |
+|------|------|----------|
+| **Plan_Loop_Exceeded** | 企劃卡關 | `decision`（含 **force_approve_plan**、重寫大綱等）、`outline`、`director-patch`、`anchor-delay`（寫入 SQLite **`anchors.chapter_target`** 並刷新 **`unachieved_anchors`**） |
+| **Draft_Loop_Exceeded** | 草稿卡關 | `decision`、`draft-edit`（可 **`merge_extraction_hints`**）、`extraction-hints`（合併 surface hints／**waive_mandatory_node_ids**） |
+| **Extraction_Gate_Failed** | 抽取對齊卡關 | `decision`（**extraction_return_author**）、`extraction-remap`（**manual_entity_remap** 累加）、`extraction-hints` |
+| **B_Story_Resolution_Failed** | 副線證據斷鏈 | `b-story-judgement`（**force_resolve**／**reject** + `reject_resume_from`） |
+| **Context_Length_Exceeded** | 上下文過長 | `context-prune`（覆寫各 context 字串與可選 **`graph_rag_context_tier`**） |
+
+共用：**state-injection**。`resume_from` 允許集合含 **`graph_rag`**、**`extraction_gate`**、**`b_story_resolve`**、**`state_updater`** 等（見 `WorkflowService`）。
+
+**Reader**：超過 `draft_loop_retry_limit` 時改走 **`extraction_gate`** 並採用 **`best_draft_content`**（自動妥協，無需 HITL）。
 
 ## 每章最終產物
 

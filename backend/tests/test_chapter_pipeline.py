@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from app.domain.schema import ExtractedEntity, NodeType, ProposedGraphNode
 from app.services.workflow.chapter_pipeline import (
+    apply_manual_entity_remap,
     extraction_substantiated_event_ids,
     remap_planned_entities,
     validate_b_story_resolution,
@@ -61,6 +62,44 @@ def test_remap_uses_author_surfaces_when_canonical_differs() -> None:
     remapped, warns = remap_planned_entities(entities, planned, author_surfaces=author_surfaces)
     assert remapped[0].node_id == "char_slot"
     assert any(w.get("to_id") == "char_slot" for w in warns)
+
+
+def test_r6_skips_waived_mandatory_ids() -> None:
+    planned = [
+        ProposedGraphNode(
+            node_id="char_slot",
+            node_type=NodeType.CHARACTER,
+            role="商人",
+            canonical_name="黑市商人",
+            mandatory=True,
+        ).model_dump(mode="json")
+    ]
+    entities = [
+        ExtractedEntity(
+            node_id="char_other",
+            node_type=NodeType.CHARACTER,
+            canonical_name="路人",
+            aliases=[],
+        )
+    ]
+    ok, missing = validate_mandatory_planned_nodes(
+        entities, planned, skip_mandatory_node_ids={"char_slot"}
+    )
+    assert ok is True
+    assert missing == []
+
+
+def test_apply_manual_entity_remap_rewrites_node_id() -> None:
+    entities = [
+        ExtractedEntity(
+            node_id="ghost",
+            node_type=NodeType.CHARACTER,
+            canonical_name="x",
+            aliases=[],
+        )
+    ]
+    out = apply_manual_entity_remap(entities, [{"from_node_id": "ghost", "to_node_id": "planned_1"}])
+    assert out[0].node_id == "planned_1"
 
 
 def test_r6_passes_when_mandatory_id_present() -> None:

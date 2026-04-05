@@ -20,6 +20,10 @@ class VectorStore(Protocol):
     def add_documents(self, story_id: str, documents: list[VectorDocument]) -> None:
         ...
 
+    def remove_story(self, story_id: str) -> None:
+        """Remove all vector chunks indexed for this story."""
+        ...
+
     def search(self, story_id: str, query: str, limit: int = 5) -> list[VectorDocument]:
         ...
 
@@ -62,6 +66,10 @@ class InMemoryVectorStore:
         vectors = self.embedding_client.embed_texts([document.text_chunk for document in documents])
         self.story_documents[story_id].extend(documents)
         self.story_vectors[story_id].extend(vectors)
+
+    def remove_story(self, story_id: str) -> None:
+        self.story_documents.pop(story_id, None)
+        self.story_vectors.pop(story_id, None)
 
     def search(self, story_id: str, query: str, limit: int = 5) -> list[VectorDocument]:
         documents = self.story_documents.get(story_id, [])
@@ -218,3 +226,16 @@ class QdrantVectorStore:
             payload.pop("story_id", None)
             documents.append(VectorDocument(text_chunk=text_chunk, metadata=payload))
         return documents
+
+    def remove_story(self, story_id: str) -> None:
+        query_filter = models.Filter(
+            must=[models.FieldCondition(key="story_id", match=models.MatchValue(value=story_id))]
+        )
+        try:
+            self.client.delete(
+                collection_name=self.collection_name,
+                points_selector=models.FilterSelector(filter=query_filter),
+            )
+        except (UnexpectedResponse, ValueError, TypeError):
+            # Best-effort: schema/version differences; ignore if delete-by-filter unsupported
+            pass

@@ -3,6 +3,17 @@ from __future__ import annotations
 import json
 from typing import Any
 
+
+def coerce_new_elements_items(items: list[Any] | None) -> list[dict[str, Any]]:
+    """Normalize legacy string lists to {need, reason} dicts for planner/supervisor payloads."""
+    out: list[dict[str, Any]] = []
+    for x in items or []:
+        if isinstance(x, dict):
+            out.append(dict(x))
+        elif isinstance(x, str) and x.strip():
+            out.append({"need": x.strip(), "reason": ""})
+    return out
+
 from app.core.config import get_settings
 from app.domain.schema import EventOutline
 from app.domain.state import (
@@ -62,6 +73,7 @@ def build_planner_payload(state: dict, story: dict | None = None, volumes: list[
         vector_context=state["vector_context"],
         bible_context=state["bible_context"],
         previous_chapter_summary=state.get("previous_chapter_summary", ""),
+        previous_chapter_tail_excerpt=state.get("previous_chapter_tail_excerpt", ""),
         recent_chapter_context=state.get("recent_chapter_context", ""),
         last_known_location=state.get("last_known_location", ""),
         previous_attempt_ground_truth_events=[
@@ -76,9 +88,13 @@ def build_planner_payload(state: dict, story: dict | None = None, volumes: list[
         chapter_word_max=settings.chapter_word_max,
         chapter_type=str(state.get("chapter_type") or "PLOT_DRIVEN"),
         b_story_directive=state.get("b_story_directive"),
-        new_elements_to_introduce=list(state.get("new_elements_to_introduce") or []),
+        new_elements_to_introduce=coerce_new_elements_items(state.get("new_elements_to_introduce")),
+        request_new_b_story=state.get("request_new_b_story"),
         distance_to_anchor=state.get("distance_to_anchor"),
         active_b_stories=list(state.get("active_b_stories") or []),
+        lore_mysteries_progression=list(state.get("lore_mysteries_progression") or []),
+        ending_vibe_cooldown_constraint=dict(state.get("ending_vibe_cooldown_constraint") or {}),
+        writing_note=list(state.get("writing_note") or []),
     )
 
 
@@ -107,6 +123,7 @@ def build_author_payload(state: dict) -> SafeAuthorPayload:
         normalized_length_min=nmin,
         normalized_length_max=nmax,
         previous_chapter_summary=state.get("previous_chapter_summary", ""),
+        previous_chapter_tail_excerpt=state.get("previous_chapter_tail_excerpt", ""),
         previous_attempt_draft=state.get("current_draft", ""),
         last_known_location=state.get("last_known_location", ""),
         author_safe_continuity_notes=list(state.get("author_safe_continuity_notes") or []),
@@ -115,6 +132,7 @@ def build_author_payload(state: dict) -> SafeAuthorPayload:
         reader_feedback=state["reader_feedback"],
         length_adjustment=state.get("length_adjustment", "NONE"),
         mandatory_new_entities=mandatory,
+        writing_note=list(state.get("writing_note") or []),
     )
 
 
@@ -155,8 +173,11 @@ def build_plan_supervisor_payload(state: dict) -> SafeSupervisorPayload:
         chapter_type=str(state.get("chapter_type") or "PLOT_DRIVEN"),
         distance_to_anchor=state.get("distance_to_anchor"),
         b_story_directive=state.get("b_story_directive"),
-        new_elements_to_introduce=list(state.get("new_elements_to_introduce") or []),
+        new_elements_to_introduce=coerce_new_elements_items(state.get("new_elements_to_introduce")),
         proposed_new_nodes=list(state.get("planned_graph_nodes") or []),
+        new_active_b_stories=list(state.get("new_active_b_stories") or []),
+        request_new_b_story=state.get("request_new_b_story"),
+        previous_chapter_tail_excerpt=state.get("previous_chapter_tail_excerpt", ""),
     )
 
 
@@ -199,11 +220,17 @@ def build_draft_supervisor_payload(state: dict) -> SafeSupervisorPayload:
         chapter_type=str(state.get("chapter_type") or "PLOT_DRIVEN"),
         distance_to_anchor=state.get("distance_to_anchor"),
         b_story_directive=state.get("b_story_directive"),
-        new_elements_to_introduce=list(state.get("new_elements_to_introduce") or []),
+        new_elements_to_introduce=coerce_new_elements_items(state.get("new_elements_to_introduce")),
         proposed_new_nodes=list(state.get("planned_graph_nodes") or []),
+        new_active_b_stories=list(state.get("new_active_b_stories") or []),
+        request_new_b_story=state.get("request_new_b_story"),
         normalized_length_min=int(state.get("normalized_length_min") or 0),
         normalized_length_max=int(state.get("normalized_length_max") or 0),
         mandatory_new_entities=planned_nodes_to_mandatory_entities(list(state.get("planned_graph_nodes") or [])),
+        previous_chapter_tail_excerpt=state.get("previous_chapter_tail_excerpt", ""),
+        lore_mysteries_progression=list(state.get("lore_mysteries_progression") or []),
+        resolution_cooldown_constraint=dict(state.get("resolution_cooldown_constraint") or {}),
+        ending_vibe_cooldown_constraint=dict(state.get("ending_vibe_cooldown_constraint") or {}),
     )
 
 
@@ -253,6 +280,8 @@ def compact_plan_supervisor_payload_for_prompt(payload: SafeSupervisorPayload) -
         "b_story_directive": (payload.b_story_directive or "")[:240],
         "new_elements_to_introduce": (payload.new_elements_to_introduce or [])[:8],
         "proposed_new_nodes": (payload.proposed_new_nodes or [])[:3],
+        "new_active_b_stories": (getattr(payload, "new_active_b_stories", None) or [])[:2],
+        "request_new_b_story": getattr(payload, "request_new_b_story", None),
     }
     return json.dumps(compact, ensure_ascii=False, indent=2)
 

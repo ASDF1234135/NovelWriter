@@ -68,6 +68,7 @@ MEMORY_EXTRACTION_GUIDELINES: list[str] = [
     "chapter_memory.summary 必須是安全的表層摘要，不可寫入底層真相或 planner 的 private_facts。",
     "latest_location 用讀者可理解的地點描述，不需輸出 node_id。",
     "若章節有多場景，標出主要角色章末停留的有效位置；不明確則 latest_location 可留空。",
+    "ending_vibe 必須在 ACTION_CLIFFHANGER / SAFE_ROOM_EXPOSITION / ON_THE_MOVE / DEVASTATING_LOSS 中擇一。",
 ]
 
 
@@ -390,6 +391,7 @@ def _align_chapter_memory(
         unresolved_threads=[t[:500] for t in (mem.unresolved_threads or [])][:12],
         notable_entities=_dedupe(notable)[:20],
         latest_location=latest[:500],
+        ending_vibe=mem.ending_vibe,
     )
 
 
@@ -533,6 +535,7 @@ def _validation_gate(
             unresolved_threads=mem.unresolved_threads,
             notable_entities=mem.notable_entities,
             latest_location=latest,
+            ending_vibe=mem.ending_vibe,
         ),
     )
 

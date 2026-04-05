@@ -191,6 +191,75 @@ def test_author_prompt_includes_previous_attempt_draft_for_revision() -> None:
     assert "不得推翻既定事件鏈" in prompt
 
 
+def test_author_prompt_includes_previous_chapter_tail_excerpt() -> None:
+    prompt = _build_author_prompt(
+        SafeAuthorPayload(
+            narrative_script="主角在雨夜尋找線索，仍不確定是否安全。",
+            chapter_start_location="城南巷口。",
+            author_goal="讓主角找到下一步行動的落點。",
+            must_include_beats=["確認巷口是否有人監視"],
+            reader_visible_facts=["巷口有行人路過"],
+            reader_unresolved_questions=["監視者是否在附近"],
+            chapter_end_location_hint="城南巷尾陰影處。",
+            ending_state_shift="主角確認監視仍未撤離。",
+            ending_boundary_rule="本章最遠只能停在城南巷尾陰影處，不可進入下一據點。",
+            forbidden_next_scene_actions=["不可直接進入下一據點"],
+            forbidden_reveals=["不要揭露監視者的真名"],
+            tone_direction="懸疑",
+            target_word_count=1800,
+            normalized_length_min=1170,
+            normalized_length_max=2430,
+            previous_chapter_summary="上一章主角被迫躲進暗巷。",
+            previous_chapter_tail_excerpt="上一章結尾：他屏住呼吸，手指還停在門縫邊。",
+            previous_attempt_draft="第1章\n\n上一版草稿內容。",
+            last_known_location="暗巷內側。",
+            author_safe_continuity_notes=["他還不知道誰在追查他。"],
+            recent_entity_names=["灰鴉"],
+            draft_feedback=[],
+            reader_feedback=[],
+            length_adjustment="NONE",
+        )
+    )
+    assert "上一章尾端節錄" in prompt
+    assert "禁止逐字抄進本章正文" in prompt
+    assert "與上一章正文銜接" in prompt
+    assert "屏住呼吸，手指還停在門縫邊" in prompt
+
+
+def test_author_prompt_includes_writing_note_block() -> None:
+    prompt = _build_author_prompt(
+        SafeAuthorPayload(
+            narrative_script="主角在雨夜中保持移動，避免停留。",
+            chapter_start_location="城南巷口。",
+            author_goal="讓主角維持壓力下的行動節奏。",
+            must_include_beats=["持續移動"],
+            reader_visible_facts=["主角仍在逃離中"],
+            reader_unresolved_questions=["追兵是否已包抄"],
+            chapter_end_location_hint="轉運站外側。",
+            ending_state_shift="主角把被動防守改為主動突圍。",
+            ending_boundary_rule="本章最遠停在轉運站外側，不可進入站內。",
+            forbidden_next_scene_actions=["不可進入站內"],
+            forbidden_reveals=["不要揭露最終追兵身份"],
+            tone_direction="懸疑",
+            target_word_count=1800,
+            normalized_length_min=1170,
+            normalized_length_max=2430,
+            previous_chapter_summary="上一章主角甩開了第一波追兵。",
+            previous_attempt_draft="第1章\n\n上一版草稿內容。",
+            last_known_location="城南巷口。",
+            author_safe_continuity_notes=[],
+            recent_entity_names=[],
+            draft_feedback=[],
+            reader_feedback=[],
+            writing_note=["短句優先", "避免過度抒情"],
+            length_adjustment="NONE",
+        )
+    )
+    assert "作者寫作規定（writing_note）" in prompt
+    assert "短句優先" in prompt
+    assert "避免過度抒情" in prompt
+
+
 def test_author_compresses_when_draft_is_too_long() -> None:
     state = {
         "chapter_id": 1,

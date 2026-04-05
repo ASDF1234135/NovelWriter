@@ -1,10 +1,30 @@
+/** Optional structured core cast for macro compile; empty keeps LLM-only roster. */
+export type StoryCastSeedEntry = {
+  canonical_name: string;
+  role?: "protagonist" | "supporting" | "antagonist" | null;
+  short_hint?: string;
+};
+
 export type StoryInput = {
   title: string;
   premise: string;
+  /** Filled after macro compile; creation sends `{}`. */
   bible: Record<string, unknown>;
+  macro_author_notes?: string;
+  cast_seed?: StoryCastSeedEntry[];
   target_total_words: number;
   plan_retry_limit: number;
   draft_loop_retry_limit: number;
+};
+
+export type StoryPatch = {
+  title?: string;
+  premise?: string;
+  target_total_words?: number;
+  plan_retry_limit?: number;
+  draft_loop_retry_limit?: number;
+  macro_author_notes?: string;
+  cast_seed?: StoryCastSeedEntry[];
 };
 
 export type VolumePlan = {
@@ -33,14 +53,49 @@ export type CastMember = {
   role: string;
   short_bio?: string;
   aliases?: string[];
+  age?: string;
+  motivation?: string;
+  core_value?: string;
+  speech_style?: string;
+  fatal_flaw?: string;
 };
 
 export type MacroCompileData = {
   story_id: string;
+  bible?: Record<string, unknown>;
+  macro_author_notes?: string;
+  cast_seed?: StoryCastSeedEntry[];
   volumes: VolumePlan[];
   anchors: Anchor[];
   cast?: CastMember[];
   protagonist_character_id?: string;
+};
+
+/** Row from GET /api/stories (lightweight list). */
+export type StoryListItem = {
+  story_id: string;
+  title: string;
+  premise: string;
+  target_total_words: number;
+  created_at: string;
+};
+
+/** GET /api/stories/:id/macro-snapshot — same as macro compile payload plus compiled flag. */
+export type MacroSnapshotResponse = MacroCompileData & {
+  compiled: boolean;
+  macro_compile_status?: string;
+  macro_compile_updated_at?: string;
+  macro_compile_error?: string;
+};
+
+/** GET /api/stories/:id — full story row fields for Configuration + lock flag. */
+export type StoryDetailResponse = StoryInput & {
+  story_id: string;
+  configuration_locked: boolean;
+  macro_author_notes: string;
+  macro_compile_status?: string;
+  macro_compile_updated_at?: string;
+  macro_compile_error?: string;
 };
 
 export type WorkflowRun = {

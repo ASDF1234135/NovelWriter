@@ -53,6 +53,91 @@ def test_director_prompt_includes_story_premise_volume_summary_and_anchor_descri
     assert "起點、目的地或章末有效位置" in prompt
 
 
+def test_director_prompt_includes_previous_chapter_tail_excerpt() -> None:
+    prompt = _build_director_prompt(
+        state={
+            "chapter_id": 1,
+            "graph_context": "{}",
+            "previous_chapter_tail_excerpt": "上一章最後一段：主角仍停在轉角喘息。",
+        },
+        story={"title": "王都疑雲", "premise": "一名被流放的年輕騎士回到王都。"},
+        volumes=[
+            {
+                "title": "卷一：命運啟動",
+                "summary": "建立世界與主角困境，鋪設核心衝突。",
+                "chapter_start": 1,
+                "chapter_end": 6,
+                "target_volume_words": 18000,
+            }
+        ],
+        next_anchor={"anchor_id": "anchor_01", "title": "主角被迫踏上旅程", "description": "主角離開原本安穩場域，正式捲入主線。"},
+        visible_unachieved_anchors=[
+            {"anchor_id": "anchor_01", "title": "主角被迫踏上旅程", "chapter_target": 6},
+        ],
+        bible_context="世界規則：皇室血脈涉及禁忌契約。",
+    )
+    assert "previous_chapter_tail_excerpt" in prompt
+    assert "上一章最後一段：主角仍停在轉角喘息。" in prompt
+
+
+def test_director_prompt_includes_milestones_recent3_and_global_top3() -> None:
+    prompt = _build_director_prompt(
+        state={
+            "chapter_id": 10,
+            "graph_context": "{}",
+            "all_milestone_summaries": [{"chapter_start": 6, "chapter_end": 10, "milestone_summary": "MS(6-10)"}],
+            "recent_chapter_summaries": [
+                {
+                    "chapter_id": 9,
+                    "plot_summary": "第9章事件推進",
+                    "conflict_type": "MYSTERY",
+                    "resolution_method": "DISCOVERY",
+                }
+            ],
+            "global_conflict_type_top3": [{"conflict_type": "MYSTERY", "cnt": 4}],
+            "global_resolution_method_top3": [{"resolution_method": "DISCOVERY", "cnt": 3}],
+            "resolution_cooldown_constraint": {"active": True, "ban_text": "禁止重複精神對決"},
+            "ending_vibe_cooldown_constraint": {"active": True, "interrupt_text": "結尾必須 ACTION_CLIFFHANGER"},
+            "lore_mysteries_progression": [
+                {
+                    "mystery_id": "noah_memory_001",
+                    "description": "諾亞失去的關鍵記憶",
+                    "pending_stages": [{"stage": 3, "content": "揭露追殺者真面目"}],
+                }
+            ],
+            "writing_note": ["短句優先", "避免過度抒情"],
+        },
+        story={"title": "王都疑雲", "premise": "一名被流放的年輕騎士回到王都。"},
+        volumes=[
+            {
+                "title": "卷一：命運啟動",
+                "summary": "建立世界與主角困境，鋪設核心衝突。",
+                "chapter_start": 1,
+                "chapter_end": 12,
+                "target_volume_words": 18000,
+            }
+        ],
+        next_anchor={"anchor_id": "anchor_01", "title": "主角被迫踏上旅程", "description": "主角離開原本安穩場域，正式捲入主線。"},
+        visible_unachieved_anchors=[
+            {"anchor_id": "anchor_01", "title": "主角被迫踏上旅程", "chapter_target": 12},
+        ],
+        bible_context="世界規則：皇室血脈涉及禁忌契約。",
+    )
+
+    assert "宏觀節奏記憶（至今所有 milestone）" in prompt
+    assert "MS(6-10)" in prompt
+    assert "最近 3 章結構化摘要" in prompt
+    assert "第9章事件推進" in prompt
+    assert "全局套路統計（Top-3）" in prompt
+    assert "MYSTERY: 4" in prompt
+    assert "系統強制約束" in prompt
+    assert "禁止重複精神對決" in prompt
+    assert "ACTION_CLIFFHANGER" in prompt
+    assert "Lore 謎團進度樹" in prompt
+    assert "Writing Notes（全域寫作規定）" in prompt
+    assert "短句優先" in prompt
+
+
 def test_planner_prompt_includes_story_premise_volume_summary_and_anchor_description() -> None:
     prompt = _build_planner_prompt(
         SafePlannerPayload(
@@ -84,6 +169,9 @@ def test_planner_prompt_includes_story_premise_volume_summary_and_anchor_descrip
             default_chapter_words=2500,
             chapter_word_min=800,
             chapter_word_max=12000,
+            lore_mysteries_progression=[{"mystery_id": "noah_memory_001", "pending_stages": [{"stage": 3, "content": "看清追殺者的臉"}]}],
+            ending_vibe_cooldown_constraint={"active": True, "required_vibe": "ACTION_CLIFFHANGER"},
+            writing_note=["短句優先", "避免過度抒情"],
         )
     )
 
@@ -120,7 +208,47 @@ def test_planner_prompt_includes_story_premise_volume_summary_and_anchor_descrip
     assert "chapter_start_location" in prompt
     assert "chapter_end_location_hint" in prompt
     assert "ending_boundary_rule" in prompt
+    assert "空間與邊界邏輯一致性" in prompt
+    assert "mandatory: true" in prompt
+    assert "嚴禁要求 Author 寫出超出邊界之外" in prompt
     assert "forbidden_next_scene_actions" in prompt
     assert "forbidden_reveals" in prompt
     assert "author_safe_continuity_notes" in prompt
     assert "不可原句貼給 author" in prompt
+    assert "lore_mysteries_progression" in prompt
+    assert "ending_vibe_cooldown_constraint" in prompt
+    assert "writing_note_rules" in prompt
+
+
+def test_planner_prompt_includes_previous_chapter_tail_excerpt() -> None:
+    prompt = _build_planner_prompt(
+        SafePlannerPayload(
+            active_epoch_id="epoch_present",
+            pov_character_id="char_public_observer",
+            narrative_directive="推進劇情",
+            target_anchor_id="anchor_01",
+            story_premise="一名被流放的年輕騎士回到王都，追查命案。",
+            current_volume_title="卷一：命運啟動",
+            current_volume_summary="建立世界與主角困境，鋪設核心衝突。",
+            current_anchor_title="主角被迫踏上旅程",
+            current_anchor_description="主角離開原本安穩場域，正式捲入主線。",
+            upcoming_unachieved_anchors=[{"anchor_id": "anchor_01", "title": "主角被迫踏上旅程", "chapter_target": 6}],
+            graph_context="{}",
+            vector_context="{}",
+            bible_context="{}",
+            previous_chapter_summary="上一章主角收到密信。",
+            previous_chapter_tail_excerpt="上一章最後一段：呼吸仍未平穩，腳步卻已往前。",
+            recent_chapter_context="第1章：主角收到密信。",
+            last_known_location="王都南門。",
+            previous_attempt_ground_truth_events=[],
+            previous_attempt_narrative_script="",
+            continuity_notes=[],
+            recent_entity_names=[],
+            prior_feedback=[],
+            default_chapter_words=2500,
+            chapter_word_min=800,
+            chapter_word_max=12000,
+        )
+    )
+    assert "previous_chapter_tail_excerpt" in prompt
+    assert "呼吸仍未平穩" in prompt

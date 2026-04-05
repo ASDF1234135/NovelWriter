@@ -40,6 +40,34 @@ class WorkflowRecorder:
             )
         )
 
+    def record_and_update_run(
+        self,
+        agent_name: str,
+        input_payload: dict,
+        output_payload: dict,
+        merged_state_for_db: dict,
+        masked_payload: dict | None = None,
+        token_usage: int = 0,
+        latency_ms: int = 0,
+        route_decision: str = "",
+        status: str = "completed",
+    ) -> None:
+        self.step_index += 1
+        log = WorkflowStepLog(
+            step_id=str(uuid4()),
+            run_id=self.context.run_id,
+            agent_name=agent_name,
+            step_index=self.step_index,
+            status=status,
+            input_payload=input_payload,
+            output_payload=output_payload,
+            masked_payload=masked_payload or {},
+            token_usage=token_usage,
+            latency_ms=latency_ms,
+            route_decision=route_decision,
+        )
+        self.context.workflow_repository.append_step_and_update_run(log, merged_state_for_db)
+
 
 def timed() -> float:
     return perf_counter()

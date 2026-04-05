@@ -6,20 +6,33 @@ from urllib.parse import quote
 from typing import AsyncIterator
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 from app.dependencies import get_graph_store, get_story_repository, get_workflow_service, get_workflow_repository
 from app.domain.schema import (
     GraphQueryRequest,
+    HitlAnchorDelayRequest,
+    HitlBStoryJudgementRequest,
+    HitlContextPruneRequest,
     HitlDecisionRequest,
+    HitlDirectorPatchRequest,
     HitlDraftEditRequest,
+    HitlExtractionHintsRequest,
+    HitlExtractionRemapRequest,
     HitlOutlineEditRequest,
     HitlStateInjectionRequest,
     StoryInput,
+    StoryPatch,
 )
 from app.services.graph_store import GraphStore
 from app.services.llm import LLMProviderError
-from app.services.workflow.service import ChapterAlreadyCompletedError, WorkflowService
+from app.services.workflow.service import (
+    ChapterAlreadyCompletedError,
+    HitlNotWaitingError,
+    MacroCompileAlreadyRunningError,
+    StoryConfigurationLockedError,
+    WorkflowService,
+)
 from app.repositories.sqlite.story_repository import StoryRepository
 from app.repositories.sqlite.workflow_repository import WorkflowRepository
 
@@ -34,15 +47,109 @@ def create_story(
     return workflow_service.create_story(story_input)
 
 
-@router.post("/stories/{story_id}/macro-compile")
-def macro_compile(
+@router.get("/stories")
+def list_stories(story_repository: StoryRepository = Depends(get_story_repository)) -> list[dict]:
+    return story_repository.list_stories()
+
+
+@router.get("/stories/{story_id}")
+def get_story_detail(
+    story_id: str,
+    story_repository: StoryRepository = Depends(get_story_repository),
+    workflow_repository: WorkflowRepository = Depends(get_workflow_repository),
+) -> dict:
+    row = story_repository.get_story(story_id)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Story not found: {story_id}")
+    locked = workflow_repository.count_workflow_runs_for_story(story_id) > 0
+    return {
+        "story_id": row["story_id"],
+        "title": row["title"],
+        "premise": row["premise"],
+        "bible": row["bible_json"],
+        "target_total_words": row["target_total_words"],
+        "plan_retry_limit": row["plan_retry_limit"],
+        "draft_loop_retry_limit": row["draft_loop_retry_limit"],
+        "macro_author_notes": str(row.get("macro_author_notes") or ""),
+        "cast_seed": [s.model_dump(mode="json") for s in (row.get("cast_seed") or [])],
+        "macro_compile_status": str(row.get("macro_compile_status") or "IDLE"),
+        "macro_compile_updated_at": str(row.get("macro_compile_updated_at") or ""),
+        "macro_compile_error": str(row.get("macro_compile_error") or ""),
+        "configuration_locked": locked,
+    }
+
+
+@router.patch("/stories/{story_id}")
+def patch_story(
+    story_id: str,
+    patch: StoryPatch,
+    workflow_service: WorkflowService = Depends(get_workflow_service),
+    workflow_repository: WorkflowRepository = Depends(get_workflow_repository),
+) -> dict:
+    try:
+        row = workflow_service.patch_story(story_id, patch)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except StoryConfigurationLockedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    locked = workflow_repository.count_workflow_runs_for_story(story_id) > 0
+    return {
+        "story_id": row["story_id"],
+        "title": row["title"],
+        "premise": row["premise"],
+        "bible": row["bible_json"],
+        "target_total_words": row["target_total_words"],
+        "plan_retry_limit": row["plan_retry_limit"],
+        "draft_loop_retry_limit": row["draft_loop_retry_limit"],
+        "macro_author_notes": str(row.get("macro_author_notes") or ""),
+        "cast_seed": [s.model_dump(mode="json") for s in (row.get("cast_seed") or [])],
+        "macro_compile_status": str(row.get("macro_compile_status") or "IDLE"),
+        "macro_compile_updated_at": str(row.get("macro_compile_updated_at") or ""),
+        "macro_compile_error": str(row.get("macro_compile_error") or ""),
+        "configuration_locked": locked,
+    }
+
+
+@router.delete("/stories/{story_id}")
+def delete_story(
     story_id: str,
     workflow_service: WorkflowService = Depends(get_workflow_service),
 ) -> dict:
     try:
-        return workflow_service.macro_compile(story_id)
+        workflow_service.delete_story(story_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"ok": True, "story_id": story_id}
+
+
+@router.get("/stories/{story_id}/macro-snapshot")
+def macro_snapshot(
+    story_id: str,
+    workflow_service: WorkflowService = Depends(get_workflow_service),
+) -> dict:
+    try:
+        return workflow_service.get_macro_snapshot(story_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/stories/{story_id}/macro-compile")
+def macro_compile(
+    story_id: str,
+    background_tasks: BackgroundTasks,
+    workflow_service: WorkflowService = Depends(get_workflow_service),
+) -> JSONResponse:
+    try:
+        workflow_service.begin_macro_compile_async(story_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except MacroCompileAlreadyRunningError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    background_tasks.add_task(workflow_service.execute_macro_compile_background, story_id)
+    return JSONResponse(
+        status_code=202,
+        content={"accepted": True, "story_id": story_id},
+    )
 
 
 @router.post("/stories/{story_id}/chapters/{chapter_id}/run")
@@ -51,12 +158,12 @@ def run_chapter(
     chapter_id: int,
     background_tasks: BackgroundTasks,
     workflow_service: WorkflowService = Depends(get_workflow_service),
-) -> dict:
+) -> JSONResponse:
     try:
         payload = workflow_service.start_run_chapter(story_id, chapter_id)
         run_id = payload["run"]["run_id"]
         background_tasks.add_task(workflow_service.execute_stored_run, run_id)
-        return payload
+        return JSONResponse(status_code=202, content=payload)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ChapterAlreadyCompletedError as exc:
@@ -151,56 +258,154 @@ def workflow_events(
 def hitl_decision(
     run_id: str,
     request: HitlDecisionRequest,
+    background_tasks: BackgroundTasks,
     workflow_service: WorkflowService = Depends(get_workflow_service),
 ) -> dict:
     try:
-        return workflow_service.handle_hitl_decision(run_id, request)
+        workflow_service.apply_hitl_decision(run_id, request)
+        background_tasks.add_task(workflow_service.execute_stored_run, run_id)
+        return workflow_service.get_workflow(run_id)
     except HitlNotWaitingError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except LLMProviderError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.post("/workflows/{run_id}/hitl/outline")
 def hitl_outline(
     run_id: str,
     request: HitlOutlineEditRequest,
+    background_tasks: BackgroundTasks,
     workflow_service: WorkflowService = Depends(get_workflow_service),
 ) -> dict:
     try:
-        return workflow_service.handle_hitl_outline_edit(run_id, request)
+        workflow_service.apply_hitl_outline_edit(run_id, request)
+        background_tasks.add_task(workflow_service.execute_stored_run, run_id)
+        return workflow_service.get_workflow(run_id)
     except HitlNotWaitingError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except LLMProviderError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.post("/workflows/{run_id}/hitl/state-injection")
 def hitl_state_injection(
     run_id: str,
     request: HitlStateInjectionRequest,
+    background_tasks: BackgroundTasks,
     workflow_service: WorkflowService = Depends(get_workflow_service),
 ) -> dict:
     try:
-        return workflow_service.handle_hitl_state_injection(run_id, request)
+        workflow_service.apply_hitl_state_injection(run_id, request)
+        background_tasks.add_task(workflow_service.execute_stored_run, run_id)
+        return workflow_service.get_workflow(run_id)
     except HitlNotWaitingError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except LLMProviderError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.post("/workflows/{run_id}/hitl/draft-edit")
 def hitl_draft_edit(
     run_id: str,
     request: HitlDraftEditRequest,
+    background_tasks: BackgroundTasks,
     workflow_service: WorkflowService = Depends(get_workflow_service),
 ) -> dict:
     try:
-        return workflow_service.handle_hitl_draft_edit(run_id, request)
+        workflow_service.apply_hitl_draft_edit(run_id, request)
+        background_tasks.add_task(workflow_service.execute_stored_run, run_id)
+        return workflow_service.get_workflow(run_id)
     except HitlNotWaitingError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except LLMProviderError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/workflows/{run_id}/hitl/director-patch")
+def hitl_director_patch(
+    run_id: str,
+    request: HitlDirectorPatchRequest,
+    background_tasks: BackgroundTasks,
+    workflow_service: WorkflowService = Depends(get_workflow_service),
+) -> dict:
+    try:
+        workflow_service.apply_hitl_director_patch(run_id, request)
+        background_tasks.add_task(workflow_service.execute_stored_run, run_id)
+        return workflow_service.get_workflow(run_id)
+    except HitlNotWaitingError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/workflows/{run_id}/hitl/extraction-hints")
+def hitl_extraction_hints(
+    run_id: str,
+    request: HitlExtractionHintsRequest,
+    background_tasks: BackgroundTasks,
+    workflow_service: WorkflowService = Depends(get_workflow_service),
+) -> dict:
+    try:
+        workflow_service.apply_hitl_extraction_hints(run_id, request)
+        background_tasks.add_task(workflow_service.execute_stored_run, run_id)
+        return workflow_service.get_workflow(run_id)
+    except HitlNotWaitingError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/workflows/{run_id}/hitl/extraction-remap")
+def hitl_extraction_remap(
+    run_id: str,
+    request: HitlExtractionRemapRequest,
+    background_tasks: BackgroundTasks,
+    workflow_service: WorkflowService = Depends(get_workflow_service),
+) -> dict:
+    try:
+        workflow_service.apply_hitl_extraction_remap(run_id, request)
+        background_tasks.add_task(workflow_service.execute_stored_run, run_id)
+        return workflow_service.get_workflow(run_id)
+    except HitlNotWaitingError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/workflows/{run_id}/hitl/b-story-judgement")
+def hitl_b_story_judgement(
+    run_id: str,
+    request: HitlBStoryJudgementRequest,
+    background_tasks: BackgroundTasks,
+    workflow_service: WorkflowService = Depends(get_workflow_service),
+) -> dict:
+    try:
+        workflow_service.apply_hitl_b_story_judgement(run_id, request)
+        background_tasks.add_task(workflow_service.execute_stored_run, run_id)
+        return workflow_service.get_workflow(run_id)
+    except HitlNotWaitingError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/workflows/{run_id}/hitl/anchor-delay")
+def hitl_anchor_delay(
+    run_id: str,
+    request: HitlAnchorDelayRequest,
+    background_tasks: BackgroundTasks,
+    workflow_service: WorkflowService = Depends(get_workflow_service),
+) -> dict:
+    try:
+        workflow_service.apply_hitl_anchor_delay(run_id, request)
+        background_tasks.add_task(workflow_service.execute_stored_run, run_id)
+        return workflow_service.get_workflow(run_id)
+    except HitlNotWaitingError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/workflows/{run_id}/hitl/context-prune")
+def hitl_context_prune(
+    run_id: str,
+    request: HitlContextPruneRequest,
+    background_tasks: BackgroundTasks,
+    workflow_service: WorkflowService = Depends(get_workflow_service),
+) -> dict:
+    try:
+        workflow_service.apply_hitl_context_prune(run_id, request)
+        background_tasks.add_task(workflow_service.execute_stored_run, run_id)
+        return workflow_service.get_workflow(run_id)
+    except HitlNotWaitingError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/stories/{story_id}/graph")

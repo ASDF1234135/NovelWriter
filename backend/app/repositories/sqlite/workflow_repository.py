@@ -125,6 +125,57 @@ class WorkflowRepository:
                 ),
             )
 
+    def append_step_and_update_run(self, log: WorkflowStepLog, state: dict) -> None:
+        """Single transaction: step log + workflow run snapshot (reduces SQLite lock contention)."""
+        now = datetime.now(UTC).isoformat()
+        status = state.get("workflow_status", WorkflowStatus.RUNNING.value)
+        current_agent = state.get("last_agent", "unknown")
+        requires_hitl = bool(state.get("requires_hitl", False))
+        hitl_reason = state.get("hitl_reason", "")
+        hitl_decision_mode = state.get("hitl_decision_mode", "NONE")
+        with self.db.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO workflow_steps (
+                    step_id, run_id, step_index, agent_name, status, input_payload_json,
+                    output_payload_json, masked_payload_json, token_usage, latency_ms,
+                    route_decision, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    log.step_id,
+                    log.run_id,
+                    log.step_index,
+                    log.agent_name,
+                    log.status,
+                    self.db.dumps(log.input_payload),
+                    self.db.dumps(log.output_payload),
+                    self.db.dumps(log.masked_payload),
+                    log.token_usage,
+                    log.latency_ms,
+                    log.route_decision,
+                    now,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE workflow_runs
+                SET status = ?, current_agent = ?, requires_hitl = ?, hitl_reason = ?,
+                    hitl_decision_mode = ?, current_state_json = ?, updated_at = ?
+                WHERE run_id = ?
+                """,
+                (
+                    status,
+                    current_agent,
+                    int(requires_hitl),
+                    hitl_reason,
+                    hitl_decision_mode,
+                    self.db.dumps(state),
+                    now,
+                    log.run_id,
+                ),
+            )
+
     def list_steps(self, run_id: str) -> list[dict]:
         with self.db.connection() as conn:
             rows = conn.execute(
@@ -243,3 +294,22 @@ class WorkflowRepository:
             payload=self.db.loads(row["payload_json"]),
             error_text=row["error_text"],
         )
+
+    def count_workflow_runs_for_story(self, story_id: str) -> int:
+        with self.db.connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM workflow_runs WHERE story_id = ?",
+                (story_id,),
+            ).fetchone()
+        return int(row["n"]) if row else 0
+
+    def delete_all_for_story(self, story_id: str) -> None:
+        """Delete workflow runs and dependent rows for a story (SQLite has no FK CASCADE)."""
+        with self.db.connection() as conn:
+            rows = conn.execute("SELECT run_id FROM workflow_runs WHERE story_id = ?", (story_id,)).fetchall()
+            for row in rows:
+                run_id = row["run_id"]
+                conn.execute("DELETE FROM workflow_steps WHERE run_id = ?", (run_id,))
+                conn.execute("DELETE FROM hitl_actions WHERE run_id = ?", (run_id,))
+                conn.execute("DELETE FROM state_transactions WHERE run_id = ?", (run_id,))
+            conn.execute("DELETE FROM workflow_runs WHERE story_id = ?", (story_id,))

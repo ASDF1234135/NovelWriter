@@ -3,7 +3,15 @@ from __future__ import annotations
 import json
 
 from app.core.config import get_settings
-from app.domain.schema import BStorySeed, EventOutline, NodeType, PlannerOutput, ProposedGraphNode
+from app.domain.schema import (
+    BStorySeed,
+    BStoryType,
+    EventOutline,
+    NodeType,
+    PlannerOutput,
+    ProposedCharacterProfile,
+    ProposedGraphNode,
+)
 from app.domain.state import SafePlannerPayload
 from app.services.llm import MockLLMClient
 from app.services.workflow.chapter_words import clamp_chapter_word_count
@@ -105,17 +113,47 @@ def run_planner(state: dict, context: WorkflowContext) -> tuple[dict, dict, int,
         settings.chapter_word_max,
     )
     mock_nodes: list[ProposedGraphNode] = []
-    for label in (payload.new_elements_to_introduce or [])[:3]:
-        if not (label or "").strip():
+    for raw in (payload.new_elements_to_introduce or [])[:3]:
+        need, reason, label = "", "", ""
+        if isinstance(raw, dict):
+            need = str(raw.get("need") or "").strip()
+            reason = str(raw.get("reason") or "").strip()
+            label = need or reason
+        else:
+            label = str(raw or "").strip()
+        if not label:
             continue
         mock_nodes.append(
             ProposedGraphNode(
                 node_id=f"char_gen_{state['chapter_id']}_{len(mock_nodes) + 1}",
                 node_type=NodeType.CHARACTER,
-                role=str(label)[:80],
-                canonical_name=str(label)[:80],
-                writing_brief="請在正文以可辨識特徵寫出此角色。",
+                role=(need or label)[:80],
+                canonical_name=(need or label)[:80],
+                writing_brief=reason or "請在正文以可辨識特徵寫出此角色。",
                 mandatory=True,
+                character_profile=ProposedCharacterProfile(
+                    core_motivation="在當前處境中自保並推進自身目標。",
+                    fatal_flaw="在壓力下容易過度反應或說錯話。",
+                    core_value="以自身信念作為行動準則。",
+                    speech_style="簡短、口語、少形容。",
+                    quirks_and_habits="緊張時會迴避眼神或放慢語速。",
+                    short_bio=(need or label)[:500],
+                ),
+            )
+        )
+    mock_b_stories: list[BStorySeed] = []
+    req = payload.request_new_b_story
+    if isinstance(req, dict) and str(req.get("type") or "").strip():
+        raw_t = str(req.get("type")).strip().upper().replace("BSTORYTYPE.", "")
+        bt = BStoryType.UNKNOWN
+        if raw_t in BStoryType.__members__:
+            bt = BStoryType[raw_t]
+        mock_b_stories.append(
+            BStorySeed(
+                id=f"b_req_{state['chapter_id']}_01",
+                desc=str(req.get("purpose") or "依導演需求開啟的新副線。")[:800],
+                type=bt,
+                resolution_condition="出現可驗證的推進或不可逆後果，並在章末留下可追蹤的下一步掛鉤。",
             )
         )
     output = PlannerOutput(
@@ -169,11 +207,11 @@ def run_planner(state: dict, context: WorkflowContext) -> tuple[dict, dict, int,
         ],
         author_safe_continuity_notes=_mock_author_safe_continuity_notes(payload.continuity_notes),
         proposed_new_nodes=mock_nodes,
-        new_active_b_stories=[],
+        new_active_b_stories=mock_b_stories,
     )
     dumped = output.model_dump(mode="json")
     dumped["proposed_new_nodes"] = [n.model_dump(mode="json") for n in mock_nodes[:3]]
-    dumped["new_active_b_stories"] = []
+    dumped["new_active_b_stories"] = [s.model_dump(mode="json") for s in mock_b_stories[:2]]
     return dumped, payload.model_dump(mode="json"), llm_result.token_usage, llm_result.latency_ms
 
 
@@ -182,6 +220,11 @@ def _build_planner_prompt(payload: SafePlannerPayload) -> str:
     upcoming_json = _clip(upcoming_json, PLANNER_UPCOMING_ANCHORS_JSON_CAP)
     prior_fb = (payload.prior_feedback or [])[-PLANNER_PRIOR_FEEDBACK_MAX_ITEMS:]
     prev_events = [event.model_dump(mode="json") for event in payload.previous_attempt_ground_truth_events]
+    tail_line = (
+        f"- previous_chapter_tail_excerpt: {_clip(payload.previous_chapter_tail_excerpt, PLANNER_PREVIOUS_CHAPTER_SUMMARY_CAP)}\n"
+        if payload.previous_chapter_tail_excerpt
+        else ""
+    )
     return (
         "請依照以下安全載荷產出底層真實大綱與表層敘事劇本。\n\n"
         "## 字數與本章內容（必做）\n"
@@ -192,6 +235,7 @@ def _build_planner_prompt(payload: SafePlannerPayload) -> str:
         "- 若大綱極簡卻字數極大、或節點極多卻字數極小，後續審核會退件，請自行避免。\n\n"
         "## 前情提要\n"
         f"- previous_chapter_summary: {_clip(payload.previous_chapter_summary, PLANNER_PREVIOUS_CHAPTER_SUMMARY_CAP)}\n"
+        f"{tail_line}"
         f"- recent_chapter_context: {_clip(payload.recent_chapter_context, PLANNER_RECENT_CHAPTER_CONTEXT_CAP)}\n"
         f"- last_known_location: {payload.last_known_location}\n"
         f"- continuity_notes: {_clip_note_lines(list(payload.continuity_notes))}\n"
@@ -222,12 +266,23 @@ def _build_planner_prompt(payload: SafePlannerPayload) -> str:
         f"- chapter_type: {payload.chapter_type}\n"
         f"- b_story_directive: {payload.b_story_directive or ''}\n"
         f"- new_elements_to_introduce: {payload.new_elements_to_introduce}\n"
+        f"- request_new_b_story: {payload.request_new_b_story}\n"
         f"- distance_to_anchor: {payload.distance_to_anchor}\n"
         f"- active_b_stories: {json.dumps(payload.active_b_stories, ensure_ascii=False)[:800]}\n"
+        f"- lore_mysteries_progression: {json.dumps(payload.lore_mysteries_progression, ensure_ascii=False)[:1000]}\n"
+        f"- ending_vibe_cooldown_constraint: {json.dumps(payload.ending_vibe_cooldown_constraint, ensure_ascii=False)}\n"
+        f"- writing_note_rules: {json.dumps(payload.writing_note, ensure_ascii=False)[:800]}\n"
         "- 若有 b_story_directive，必須編入 narrative_script；must_include_beats 至少一條為與主線解謎無關的生活或感官細節。\n"
-        "- 對 new_elements_to_introduce 每一項，在 proposed_new_nodes 輸出對應條目（node_id、node_type、role、canonical_name），"
-        "最多 3 條，並在 ground_truth_events 安排與其互動。\n"
-        "- new_active_b_stories：若本章**新開一條**獨立副線（需穩定 id），最多 2 條，每條含 id 與 desc；"
+        "- writing_note_rules 為本專案固定寫作建議與規定；規劃時必須遵守，不得與其衝突。\n"
+        "- 若本章設計包含『記憶獲取／記憶閃回』，必須從 lore_mysteries_progression 的 pending_stages 取下一階段，"
+        "並把該內容寫入 new_elements_to_introduce 對應的 proposed_new_nodes / must_include_beats，禁止重播舊片段。\n"
+        "- 若 ending_vibe_cooldown_constraint.active=true，章末規劃必須遵守 required_vibe，不得落入 forbidden_vibes。\n"
+        "- 對 new_elements_to_introduce 每一項，在 proposed_new_nodes 輸出對應條目（node_id、node_type、role、canonical_name、writing_brief）；"
+        "若 node_type 為 CHARACTER，必須同時輸出 character_profile（core_motivation、core_value、fatal_flaw、speech_style、quirks_and_habits、short_bio、age），"
+        "欄位語意需與宏觀編譯 cast 一致。最多 3 條，並在 ground_truth_events 安排與其互動。\n"
+        "- 若 request_new_b_story 非空：你必須以 new_active_b_stories 具體化該需求（type 對齊、desc 具體），或解釋為何改以既有 active_b_stories 承接。\n"
+        "- new_active_b_stories：若本章**新開一條**獨立副線（需穩定 id），最多 2 條，每條含 id、desc、type、**resolution_condition**（客觀核銷標準）；"
+        "type 為 BStoryType：FETCH_QUEST / RELATIONSHIP_DRAMA / ENVIRONMENTAL_HAZARD / LORE_DISCOVERY / INTERNAL_CONFLICT。"
         "若無則輸出空陣列。成功定稿後系統會併入 bible；不要與既有 active_b_stories id 重複。\n\n"
         "## 你的輸出要求\n"
         "- 若上方已提供 previous_attempt_ground_truth_events 或 previous_attempt_narrative_script，代表這次是修稿，不是從零重做。\n"
@@ -250,6 +305,11 @@ def _build_planner_prompt(payload: SafePlannerPayload) -> str:
         "- chapter_end_location_hint: 用 1 句指出章末 POV 或主要角色有效停留的位置；若本章沒有明確移動，也要說明仍停留在哪裡。\n"
         "- ending_boundary_rule: 用 1-2 句寫出本章最遠只能停在哪個邊界，哪些後續行動必須保留到下一章。\n"
         "- forbidden_next_scene_actions: 列出 2-4 條本章不可跨過的後續動作，例如進屋、會面、切到下一地點、提前揭曉等。\n"
+        "- ⚠️ 空間與邊界邏輯一致性（硬性）：你在 proposed_new_nodes 中標為 mandatory: true 的角色、物品、地點等必選節點，"
+        "以及 Director 的 new_elements_to_introduce 所對應、本章必須出場的創世節點，在物理與時間邏輯上必須能合理地出現在 "
+        "ending_boundary_rule 所定義的章末結束點『之前』；narrative_script、ground_truth_events、must_include_beats 必須支撐在該邊界內完成其可觀察出場或互動。"
+        "嚴禁要求 Author 寫出超出邊界之外才該發生的實體接觸或場景（例如已被 forbidden_next_scene_actions 或 ending_boundary_rule 禁止的進屋、會面、抵達下一地等）。"
+        "若某實體只能合理出現在邊界之後，請勿列為本章必選，應延到下一章規劃，或在合理範圍內放寬／後移 ending_boundary_rule 使兩者一致。\n"
         "- forbidden_reveals: 列出 2-4 條 author 不可提前揭露、也不可擅自新增的內容；不可包含真相答案本身，只能描述邊界。\n"
         "- 這份 author 任務卡只能包含表層可寫資訊，不能直接暴露 ground_truth_events 中尚未被角色或讀者觀察到的真相。\n"
         "- 若本章存在移動，must_include_beats、reader_visible_facts、chapter_start_location、chapter_end_location_hint 與 ending_boundary_rule 之間必須彼此一致。\n"

@@ -31,6 +31,7 @@ def test_author_payload_masks_sensitive_state() -> None:
         "ground_truth_events": [{"event_id": "secret", "description": "真相"}],
         "graph_context": "forbidden",
         "plan_feedback": [{"message": "future leak"}],
+        "writing_note": ["短句優先", "避免過度抒情"],
     }
 
     payload = build_author_payload(state)
@@ -54,6 +55,7 @@ def test_author_payload_masks_sensitive_state() -> None:
     assert dumped["normalized_length_max"] == 2700
     assert dumped["length_adjustment"] == "NONE"
     assert dumped["author_safe_continuity_notes"] == ["灰鴉的密信尚未解讀。"]
+    assert dumped["writing_note"] == ["短句優先", "避免過度抒情"]
     assert "ground_truth_events" not in dumped
     assert "graph_context" not in dumped
     assert "plan_feedback" not in dumped
@@ -126,6 +128,7 @@ def test_planner_payload_includes_story_premise_volume_and_anchor_context() -> N
         "continuity_notes": ["灰鴉要求主角回城。"],
         "recent_entity_names": ["Kaelen", "灰鴉"],
         "plan_feedback": [],
+        "writing_note": ["短句優先", "避免過度抒情"],
     }
 
     story = {
@@ -157,6 +160,7 @@ def test_planner_payload_includes_story_premise_volume_and_anchor_context() -> N
     assert planner_payload.previous_attempt_narrative_script == "主角收到密信後準備返城。"
     assert planner_payload.continuity_notes == ["灰鴉要求主角回城。"]
     assert planner_payload.recent_entity_names == ["Kaelen", "灰鴉"]
+    assert planner_payload.writing_note == ["短句優先", "避免過度抒情"]
 
 
 def test_draft_supervisor_payload_includes_normalized_length() -> None:

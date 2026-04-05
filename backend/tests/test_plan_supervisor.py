@@ -6,8 +6,10 @@ from app.services.bible_service import BibleService
 from app.services.graph_store import InMemoryGraphStore
 from app.services.llm import MockLLMClient
 from app.services.vector_store import InMemoryVectorStore
+from app.domain.state import SafeSupervisorPayload
 from app.services.workflow.context import WorkflowContext
-from app.services.workflow.nodes.plan_supervisor import run_plan_supervisor
+from app.services.workflow.nodes.plan_supervisor import _build_plan_supervisor_prompt, run_plan_supervisor
+from app.services.workflow.profiles import get_profile
 
 
 def build_context(db_path: str) -> WorkflowContext:
@@ -102,7 +104,7 @@ def test_plan_supervisor_requires_anchor_completion_on_target_chapter(tmp_path) 
     assert "ANCHOR_DIVERGENCE" in output["violation_type"]
 
 
-def test_plan_supervisor_blocks_timeline_rollback(tmp_path) -> None:
+def test_plan_supervisor_timeline_rollback_heuristic_is_soft_warning_only(tmp_path) -> None:
     context = build_context(str(tmp_path / "plan_supervisor_rollback.sqlite3"))
     state = {
         "chapter_id": 2,
@@ -131,9 +133,9 @@ def test_plan_supervisor_blocks_timeline_rollback(tmp_path) -> None:
 
     output, _ = run_plan_supervisor(state, context)
 
-    assert output["is_approved"] is False
-    assert "INCONSISTENCY" in output["violation_type"]
-    assert "重演上一章" in output["feedback_to_agent"]
+    assert output["is_approved"] is True
+    assert "INCONSISTENCY" not in output["violation_type"]
+    assert any("時序重演" in w for w in (output.get("soft_warnings") or []))
 
 
 def test_plan_supervisor_rejects_word_count_below_beat_floor(tmp_path) -> None:
@@ -163,6 +165,54 @@ def test_plan_supervisor_rejects_word_count_below_beat_floor(tmp_path) -> None:
 
     assert output["is_approved"] is False
     assert "WORD_COUNT_UNMATCH" in output["violation_type"]
+
+
+def _base_state_for_genesis() -> dict:
+    return {
+        "chapter_id": 1,
+        "active_epoch_id": "epoch_present",
+        "target_anchor_id": "anchor_06",
+        "unachieved_anchors": [{"anchor_id": "anchor_06", "chapter_target": 6}],
+        "ground_truth_events": [
+            {
+                "event_id": "e001",
+                "description": "主角與情報掮客接觸，取得地下線索。",
+                "caused_by_event_id": None,
+            }
+        ],
+        "narrative_script": "雨中，一聲微弱的喵叫吸引了他的注意，那是一隻後腿流血的黑貓，他為牠包紮。",
+        "chapter_start_location": "巷弄",
+        "chapter_end_location_hint": "巷弄",
+        "must_include_beats": ["救助黑貓"],
+        "previous_chapter_summary": "主角在市集閒逛。",
+        "recent_chapter_context": "第0章：主角在市集閒逛。",
+        "last_known_location": "巷弄",
+        "graph_context": "{}",
+        "vector_context": "{}",
+        "bible_context": "{}",
+        "target_word_count": 2500,
+        "b_story_directive": "請描寫主角在路上遇到一隻受傷的黑貓並幫牠包紮。",
+        "new_elements_to_introduce": ["一個專門提供地下情報的記憶掮客或組織"],
+        "planned_graph_nodes": [{"role": "情報掮客", "canonical_name": ""}],
+    }
+
+
+def test_plan_supervisor_genesis_allows_semantic_mismatch_no_substring_match(tmp_path) -> None:
+    """Long Director phrase + short Planner role: no Python substring gate; structural rule satisfied."""
+    context = build_context(str(tmp_path / "plan_supervisor_genesis_semantic.sqlite3"))
+    state = _base_state_for_genesis()
+    output, _ = run_plan_supervisor(state, context)
+    assert output["is_approved"] is True
+    assert "MISSING_DIRECTIVE" not in output["violation_type"]
+
+
+def test_plan_supervisor_genesis_requires_non_empty_proposed_nodes(tmp_path) -> None:
+    context = build_context(str(tmp_path / "plan_supervisor_genesis_empty.sqlite3"))
+    state = _base_state_for_genesis()
+    state["planned_graph_nodes"] = []
+    output, _ = run_plan_supervisor(state, context)
+    assert output["is_approved"] is False
+    assert "MISSING_DIRECTIVE" in output["violation_type"]
 
 
 def test_plan_supervisor_teleportation_is_llm_only_mock_does_not_block(tmp_path) -> None:
@@ -197,3 +247,18 @@ def test_plan_supervisor_teleportation_is_llm_only_mock_does_not_block(tmp_path)
 
     assert output["is_approved"] is True
     assert "PHYSICAL_CONFLICT" not in output["violation_type"]
+
+
+def test_plan_supervisor_prompt_includes_boundary_entity_conflict_rule() -> None:
+    payload = SafeSupervisorPayload(chapter_id=1, current_chapter_id=1, active_epoch_id="epoch_present")
+    prompt = _build_plan_supervisor_prompt(payload)
+    assert "13." in prompt
+    assert "邊界與實體衝突檢查" in prompt
+    assert "ending_boundary_rule" in prompt
+    assert "proposed_new_nodes" in prompt
+
+
+def test_plan_supervisor_profile_mentions_boundary_and_mandatory_entities() -> None:
+    text = get_profile("plan_supervisor").system_prompt
+    assert "章末邊界" in text
+    assert "必選圖節點" in text

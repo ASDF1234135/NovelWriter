@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     env: str = "development"
     api_prefix: str = "/api"
     sqlite_path: str = "./data/novelbuilder.sqlite3"
+    # SQLite concurrency: lock wait on connect (seconds) and busy_handler (milliseconds).
+    sqlite_connect_timeout_seconds: float = 30.0
+    sqlite_busy_timeout_ms: int = 30000
     use_in_memory_stores: bool = True
     use_mock_llm: bool = True
     neo4j_uri: str = "bolt://localhost:7687"
@@ -50,7 +53,7 @@ class Settings(BaseSettings):
     openai_stream_structured: bool = False
     # Request stream_options.include_usage when streaming (OpenAI-compatible; disable if the API returns 400).
     openai_stream_include_usage: bool = False
-    openai_connect_timeout_seconds: float = 10.0
+    openai_connect_timeout_seconds: float = 30.0
     # Max idle time between SSE chunks while streaming.
     openai_stream_read_timeout_seconds: float = 300.0
     # Chapter word targets (Planner output is clamped; independent of volume budgets).

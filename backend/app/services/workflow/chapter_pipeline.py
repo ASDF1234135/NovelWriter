@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from difflib import SequenceMatcher
 from typing import Any
 
 from app.domain.schema import ChapterExtractionOutput, ExtractedEntity, ProposedGraphNode
@@ -138,20 +139,111 @@ def remap_planned_entities(
 def validate_mandatory_planned_nodes(
     entities: list[ExtractedEntity],
     planned: list[dict[str, Any]],
+    *,
+    skip_mandatory_node_ids: set[str] | None = None,
 ) -> tuple[bool, list[str]]:
     """
     R6: every mandatory planned graph node must appear as an entity node_id after remap.
     Returns (ok, missing_node_ids).
     """
+    skip = skip_mandatory_node_ids or set()
     missing: list[str] = []
     entity_ids = {e.node_id for e in entities}
     for row in planned:
         p = _planned_row(row)
         if not p.mandatory:
             continue
+        if p.node_id in skip:
+            continue
         if p.node_id not in entity_ids:
             missing.append(p.node_id)
     return (not missing, missing)
+
+
+def apply_manual_entity_remap(
+    entities: list[ExtractedEntity],
+    remaps: list[dict[str, Any]],
+) -> list[ExtractedEntity]:
+    """Apply human mappings from_node_id -> to_node_id on extracted entities."""
+    if not remaps:
+        return entities
+    m: dict[str, str] = {}
+    for row in remaps:
+        if not isinstance(row, dict):
+            continue
+        a = str(row.get("from_node_id") or row.get("from_id") or "").strip()
+        b = str(row.get("to_node_id") or row.get("to_id") or "").strip()
+        if a and b:
+            m[a] = b
+    if not m:
+        return entities
+    out: list[ExtractedEntity] = []
+    for ent in entities:
+        e = ent.model_copy(deep=True)
+        if e.node_id in m:
+            e.node_id = m[e.node_id]
+        out.append(e)
+    return out
+
+
+def _fuzzy_score(a: str, b: str) -> int:
+    a, b = _norm(a), _norm(b)
+    if not a or not b:
+        return 0
+    if a == b:
+        return 100
+    if a in b or b in a:
+        return 85
+    return int(100 * SequenceMatcher(None, a, b).ratio())
+
+
+def build_extraction_remap_hints(
+    entities: list[ExtractedEntity],
+    missing_planned_ids: list[str],
+    planned: list[dict[str, Any]],
+    limit_per_missing: int = 5,
+) -> list[dict[str, Any]]:
+    """
+    For HITL UI: each missing mandatory planned id with top extracted entity candidates by name similarity.
+    """
+    if not missing_planned_ids or not entities:
+        return []
+    planned_by_id = {_planned_row(p).node_id: _planned_row(p) for p in planned}
+    hints: list[dict[str, Any]] = []
+    for mid in missing_planned_ids:
+        prow = planned_by_id.get(mid)
+        pname = _norm(prow.canonical_name) if prow else ""
+        prole = _norm(prow.role) if prow else ""
+        scored: list[tuple[int, ExtractedEntity]] = []
+        for ent in entities:
+            if ent.node_id == mid:
+                continue
+            s1 = _fuzzy_score(pname, ent.canonical_name) if pname else 0
+            s2 = _fuzzy_score(prole, ent.canonical_name) if prole else 0
+            s3 = (
+                max((_fuzzy_score(pname, al) for al in ent.aliases), default=0) if pname and ent.aliases else 0
+            )
+            score = max(s1, s2, s3)
+            if score > 0:
+                scored.append((score, ent))
+        scored.sort(key=lambda x: -x[0])
+        top = scored[:limit_per_missing]
+        hints.append(
+            {
+                "missing_planned_node_id": mid,
+                "planned_canonical_name": prow.canonical_name if prow else "",
+                "planned_role": prow.role if prow else "",
+                "candidate_extracted": [
+                    {
+                        "node_id": e.node_id,
+                        "canonical_name": e.canonical_name,
+                        "score": sc,
+                    }
+                    for sc, e in top
+                ],
+            }
+        )
+    return hints
 
 
 def validate_b_story_resolution(

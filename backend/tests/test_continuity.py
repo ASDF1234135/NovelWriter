@@ -1,5 +1,5 @@
 from app.domain.schema import CharacterNode, EdgeType, GraphEdge, GraphSnapshot, LocationNode, VectorDocument
-from app.services.workflow.continuity import build_continuity_packet, resolve_pov_character_id
+from app.services.workflow.continuity import build_continuity_packet, chapter_content_tail_snippet, resolve_pov_character_id
 
 
 def test_resolve_pov_character_id_maps_to_existing_character_node() -> None:
@@ -117,3 +117,67 @@ def test_build_continuity_packet_filters_location_by_epoch_and_recency() -> None
     )
 
     assert packet["last_known_location"] == "斷刃酒館後巷"
+
+
+def test_build_continuity_packet_uses_chapter_record_tail_when_vector_summary_metadata_empty() -> None:
+    """Empty chapter_summary metadata must not fall back to vector text_chunk (often chapter opening)."""
+    filler = "敘" * 400
+    closing = "ZZZZ_CLOSING_MARKER_結尾收束"
+    long_body = f"AAAA_OPENING_MARKER_獨特開頭 {filler} {closing}"
+    chapters = [{"chapter_id": 2, "title": "第2章", "content": long_body}]
+    vector_hits = [
+        VectorDocument(
+            text_chunk="第2章摘要：AAAA_OPENING_MARKER_獨特開頭 向量假摘要絕不可進入上一章摘要欄位",
+            metadata={
+                "chapter_id": 2,
+                "epoch_id": "epoch_present",
+                "memory_type": "chapter_summary",
+            },
+        ),
+    ]
+
+    packet = build_continuity_packet(
+        chapters,
+        GraphSnapshot(nodes=[], edges=[]),
+        vector_hits,
+        pov_character_id="",
+        active_epoch_id="epoch_present",
+    )
+
+    assert "AAAA_OPENING_MARKER" not in packet["previous_chapter_summary"]
+    assert "ZZZZ_CLOSING_MARKER" in packet["previous_chapter_summary"]
+
+
+def test_build_continuity_packet_skips_chapter_excerpt_for_previous_summary() -> None:
+    """chapter_excerpt hits must not supply previous_chapter_summary via text_chunk."""
+    long_body = "BBBB_EXCERPT_BAIT_OPEN " + "節" * 400 + " YYYY_RECORD_TAIL_END"
+    chapters = [{"chapter_id": 1, "title": "第1章", "content": long_body}]
+    vector_hits = [
+        VectorDocument(
+            text_chunk="第1章片段：BBBB_EXCERPT_BAIT_OPEN 這是開頭摘錄",
+            metadata={
+                "chapter_id": 1,
+                "epoch_id": "epoch_present",
+                "memory_type": "chapter_excerpt",
+                "chapter_summary": "",
+            },
+        ),
+    ]
+
+    packet = build_continuity_packet(
+        chapters,
+        GraphSnapshot(nodes=[], edges=[]),
+        vector_hits,
+        pov_character_id="",
+        active_epoch_id="epoch_present",
+    )
+
+    assert "BBBB_EXCERPT_BAIT" not in packet["previous_chapter_summary"]
+    assert "YYYY_RECORD_TAIL_END" in packet["previous_chapter_summary"]
+
+
+def test_chapter_content_tail_snippet_prefers_end() -> None:
+    text = "開頭X" + "中" * 500 + "結尾Y"
+    tail = chapter_content_tail_snippet(text, 320)
+    assert "開頭X" not in tail
+    assert "結尾Y" in tail

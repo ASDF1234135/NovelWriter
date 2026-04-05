@@ -17,6 +17,7 @@ from app.domain.schema import (
     VectorDocument,
 )
 from app.services.workflow.extraction import extract_chapter_artifacts, stable_entity_id
+from app.services.workflow.continuity import chapter_content_tail_snippet
 from app.services.workflow.context import WorkflowContext
 
 
@@ -360,7 +361,7 @@ def _build_vector_documents(
         "entity_names": notable_entities[:8],
         "chapter_summary": memory.summary,
     }
-    summary_chunk = memory.summary or chapter_content[:320]
+    summary_chunk = memory.summary or chapter_content_tail_snippet(chapter_content, 320)
     excerpt_chunk = chapter_content[:1200]
     unresolved_chunk = "；".join(memory.unresolved_threads)
     documents = [

@@ -35,7 +35,8 @@ services:
   frontend:
     build:
       context: ./frontend
-    command: npm run dev -- --host 0.0.0.0 --port 5173
+    # Named volume hides image node_modules; sync deps on start so lockfile/package changes apply.
+    command: sh -c "npm ci && npm run dev -- --host 0.0.0.0 --port 5173"
     ports:
       - "5173:5173"
     volumes:

@@ -32,7 +32,11 @@ def run_b_story_resolve(state: dict, context: WorkflowContext) -> dict:
             resolution_evidence_event_ids=[],
             resolved_b_stories=[],
         )
-        return {"b_story_resolution": out.model_dump(mode="json")}
+        return {
+            "b_story_resolution": out.model_dump(mode="json"),
+            "b_story_hitl_required": False,
+            "b_story_resolution_hitl_candidate": {},
+        }
 
     if isinstance(context.llm_client, MockLLMClient):
         out = BStoryResolutionOutput(
@@ -40,7 +44,11 @@ def run_b_story_resolve(state: dict, context: WorkflowContext) -> dict:
             resolution_evidence_event_ids=[],
             resolved_b_stories=[],
         )
-        return {"b_story_resolution": out.model_dump(mode="json")}
+        return {
+            "b_story_resolution": out.model_dump(mode="json"),
+            "b_story_hitl_required": False,
+            "b_story_resolution_hitl_candidate": {},
+        }
 
     profile = get_profile("b_story_resolver")
     payload = _compact_extraction_for_resolve(state)
@@ -55,8 +63,10 @@ def run_b_story_resolve(state: dict, context: WorkflowContext) -> dict:
         f"結構化摘要: {payload}\n"
     )
     structured, _ = context.llm_client.invoke_json(prompt, BStoryResolutionOutput, profile)
-    data = structured.model_dump(mode="json")
-    ok, err = validate_b_story_resolution(data, valid_ids)
+    data_raw = structured.model_dump(mode="json")
+    ok, err = validate_b_story_resolution(data_raw, valid_ids)
+    had_intent = bool(data_raw.get("resolved_b_stories")) or bool(data_raw.get("resolution_evidence_event_ids"))
+    hitl_needed = (not ok) and had_intent
     if not ok:
         structured = BStoryResolutionOutput(
             resolution_analysis=(structured.resolution_analysis or "") + f" [後端拒絕: {err}]",
@@ -64,4 +74,10 @@ def run_b_story_resolve(state: dict, context: WorkflowContext) -> dict:
             resolved_b_stories=[],
         )
         data = structured.model_dump(mode="json")
-    return {"b_story_resolution": data}
+    else:
+        data = data_raw
+    return {
+        "b_story_resolution": data,
+        "b_story_hitl_required": hitl_needed,
+        "b_story_resolution_hitl_candidate": data_raw if hitl_needed else {},
+    }

@@ -1,4 +1,15 @@
-import type { ChapterContent, ChapterSummary, GraphSnapshot, MacroCompileData, StoryInput, WorkflowPayload } from "./types";
+import type {
+  ChapterContent,
+  ChapterSummary,
+  GraphSnapshot,
+  MacroCompileData,
+  MacroSnapshotResponse,
+  StoryDetailResponse,
+  StoryInput,
+  StoryListItem,
+  StoryPatch,
+  WorkflowPayload,
+} from "./types";
 
 const API_BASE = "http://localhost:8000/api";
 
@@ -35,11 +46,71 @@ export async function createStory(payload: StoryInput): Promise<Record<string, u
   return parseJson(response);
 }
 
+export async function fetchStories(): Promise<StoryListItem[]> {
+  const response = await fetch(`${API_BASE}/stories`);
+  return parseJson(response);
+}
+
+export async function fetchStoryDetail(storyId: string): Promise<StoryDetailResponse> {
+  const response = await fetch(`${API_BASE}/stories/${encodeURIComponent(storyId)}`);
+  return parseJson(response);
+}
+
+export async function patchStory(storyId: string, patch: StoryPatch): Promise<StoryDetailResponse> {
+  const response = await fetch(`${API_BASE}/stories/${encodeURIComponent(storyId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  return parseJson(response);
+}
+
+export async function deleteStory(storyId: string): Promise<{ ok: boolean; story_id: string }> {
+  const response = await fetch(`${API_BASE}/stories/${encodeURIComponent(storyId)}`, {
+    method: "DELETE",
+  });
+  return parseJson(response);
+}
+
+export async function fetchMacroSnapshot(storyId: string): Promise<MacroSnapshotResponse> {
+  const response = await fetch(`${API_BASE}/stories/${storyId}/macro-snapshot`);
+  return parseJson(response);
+}
+
+const MACRO_POLL_MS = 800;
+const MACRO_TIMEOUT_MS = 30 * 60 * 1000;
+
+/** POST returns 202; polls macro-snapshot until terminal status, then returns compile-shaped data. */
 export async function macroCompile(storyId: string): Promise<MacroCompileData> {
   const response = await fetch(`${API_BASE}/stories/${storyId}/macro-compile`, {
     method: "POST",
   });
-  return parseJson(response);
+  const ack = await parseJson<{ accepted: boolean; story_id: string }>(response);
+  if (!ack.accepted) {
+    throw new Error("Macro compile was not accepted");
+  }
+  const deadline = Date.now() + MACRO_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const snap = await fetchMacroSnapshot(storyId);
+    const st = snap.macro_compile_status ?? "IDLE";
+    if (st === "SUCCEEDED") {
+      return {
+        story_id: snap.story_id,
+        bible: snap.bible,
+        macro_author_notes: snap.macro_author_notes,
+        cast_seed: snap.cast_seed,
+        volumes: snap.volumes,
+        anchors: snap.anchors,
+        cast: snap.cast,
+        protagonist_character_id: snap.protagonist_character_id,
+      };
+    }
+    if (st === "FAILED") {
+      throw new Error(snap.macro_compile_error?.trim() || "Macro compile failed");
+    }
+    await new Promise((r) => setTimeout(r, MACRO_POLL_MS));
+  }
+  throw new Error("Macro compile timed out waiting for completion");
 }
 
 export async function runChapter(storyId: string, chapterId: number): Promise<WorkflowPayload> {
@@ -89,9 +160,118 @@ export async function sendStateInjection(
 
 export async function sendDraftEdit(
   runId: string,
-  payload: { chapter_content: string; best_draft_content?: string; resume_from?: string; reason?: string },
+  payload: {
+    chapter_content: string;
+    best_draft_content?: string;
+    resume_from?: string;
+    reason?: string;
+    merge_extraction_hints?: boolean;
+  },
 ): Promise<WorkflowPayload> {
   const response = await fetch(`${API_BASE}/workflows/${runId}/hitl/draft-edit`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseJson(response);
+}
+
+export async function sendDirectorPatch(
+  runId: string,
+  payload: {
+    chapter_type?: string;
+    b_story_directive?: string | null;
+    b_story_type?: string | null;
+    new_elements_to_introduce?: string[];
+    narrative_directive?: string;
+    reason?: string;
+  },
+): Promise<WorkflowPayload> {
+  const response = await fetch(`${API_BASE}/workflows/${runId}/hitl/director-patch`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseJson(response);
+}
+
+export async function sendExtractionHints(
+  runId: string,
+  payload: {
+    entries: Array<{ node_id: string; surface_forms: string[] }>;
+    resume_from?: string;
+    waive_mandatory_node_ids?: string[];
+    reason?: string;
+  },
+): Promise<WorkflowPayload> {
+  const response = await fetch(`${API_BASE}/workflows/${runId}/hitl/extraction-hints`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseJson(response);
+}
+
+export async function sendExtractionRemap(
+  runId: string,
+  payload: {
+    entity_remaps: Array<{ from_node_id: string; to_node_id: string }>;
+    waive_mandatory_node_ids?: string[];
+    reason?: string;
+  },
+): Promise<WorkflowPayload> {
+  const response = await fetch(`${API_BASE}/workflows/${runId}/hitl/extraction-remap`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseJson(response);
+}
+
+export async function sendBStoryJudgement(
+  runId: string,
+  payload: {
+    action: "force_resolve" | "reject";
+    resolved_b_stories?: string[];
+    resolution_evidence_event_ids?: string[];
+    resolution_analysis?: string;
+    reject_resume_from?: string;
+    reason?: string;
+  },
+): Promise<WorkflowPayload> {
+  const response = await fetch(`${API_BASE}/workflows/${runId}/hitl/b-story-judgement`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseJson(response);
+}
+
+export async function sendAnchorDelay(
+  runId: string,
+  payload: { anchor_id: string; new_chapter_target: number; reason?: string },
+): Promise<WorkflowPayload> {
+  const response = await fetch(`${API_BASE}/workflows/${runId}/hitl/anchor-delay`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseJson(response);
+}
+
+export async function sendContextPrune(
+  runId: string,
+  payload: {
+    bible_context?: string;
+    graph_context?: string;
+    vector_context?: string;
+    recent_chapter_context?: string;
+    previous_chapter_summary?: string;
+    graph_rag_context_tier?: number;
+    reason?: string;
+  },
+): Promise<WorkflowPayload> {
+  const response = await fetch(`${API_BASE}/workflows/${runId}/hitl/context-prune`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -150,7 +330,7 @@ export function subscribeWorkflowEvents(
 
   es.onerror = () => {
     if (finished || es.readyState === EventSource.CLOSED) return;
-    handlers.onError?.(new Error("Workflow 事件流中斷"));
+    handlers.onError?.(new Error("與伺服器的即時連線中斷，請重新整理或再試一次"));
     finish();
   };
 

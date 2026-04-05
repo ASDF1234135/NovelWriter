@@ -31,6 +31,10 @@ class GraphStore(Protocol):
     def seed_story(self, story_id: str) -> None:
         ...
 
+    def remove_story(self, story_id: str) -> None:
+        """Remove all graph data for this story (in-memory, Neo4j, etc.)."""
+        ...
+
     def query_context(self, request: GraphQueryRequest) -> GraphSnapshot:
         ...
 
@@ -93,6 +97,10 @@ class InMemoryGraphStore:
             edge = edges[eid]
             if edge.source_id.startswith(prefix) or edge.target_id.startswith(prefix):
                 del edges[eid]
+
+    def remove_story(self, story_id: str) -> None:
+        self.story_nodes.pop(story_id, None)
+        self.story_edges.pop(story_id, None)
 
     def apply_mutations(self, story_id: str, mutations: Iterable[NodeMutation | EdgeMutation]) -> None:
         self.seed_story(story_id)
@@ -184,6 +192,8 @@ class Neo4jGraphStore:
         query_terms = _extract_query_terms(request.narrative_directive)
         hop_count = _determine_hop_count(query_terms)
         path_hops = max(1, min(3, hop_count))
+        tier_cap = {0: 1, 1: 2, 2: 3}.get(int(request.context_hop_tier), 3)
+        path_hops = min(path_hops, tier_cap)
         def operation() -> None:
             nonlocal result
             with self.driver.session(database=self.database) as session:
@@ -293,6 +303,16 @@ class Neo4jGraphStore:
 
         self._run_with_retry(operation)
         return result or GraphSnapshot(nodes=[], edges=[])
+
+    def remove_story(self, story_id: str) -> None:
+        def operation() -> None:
+            with self.driver.session(database=self.database) as session:
+                session.run(
+                    "MATCH (n:StoryNode {story_id: $story_id}) DETACH DELETE n",
+                    story_id=story_id,
+                )
+
+        self._run_with_retry(operation)
 
     def apply_mutations(self, story_id: str, mutations: Iterable[NodeMutation | EdgeMutation]) -> None:
         self.seed_story(story_id)

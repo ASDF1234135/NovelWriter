@@ -1,6 +1,13 @@
 import pytest
 
-from app.domain.schema import EventOutline, HitlDecisionRequest, HitlOutlineEditRequest, StoryInput
+from app.domain.schema import (
+    EventOutline,
+    HitlAnchorDelayRequest,
+    HitlDecisionRequest,
+    HitlOutlineEditRequest,
+    HitlReason,
+    StoryInput,
+)
 from app.domain.state import build_initial_state
 from app.repositories.sqlite.database import SQLiteDatabase
 from app.repositories.sqlite.story_repository import StoryRepository
@@ -237,6 +244,55 @@ def test_reader_pass_does_not_append_feedback_or_return_author(tmp_path, monkeyp
     assert final_state["reader_feedback"] == []
 
 
+def test_resume_from_reader_does_not_crash_keyerror(tmp_path, monkeypatch) -> None:
+    """
+    Regression test for LangGraph crash:
+    KeyError('reader') when START conditional edges ends mapping is missing 'reader'.
+    """
+    service = build_service(str(tmp_path / "workflow_resume_reader.sqlite3"))
+    story = service.create_story(
+        StoryInput(
+            title="測試故事",
+            premise="主角回到王都追查命案。",
+            bible={"rules": ["秘密不能無代價揭露"]},
+            target_total_words=30000,
+        )
+    )
+
+    initial_state = build_initial_state(story["story_id"], 1, [], "trace-resume-reader")
+    initial_state["resume_from"] = "reader"
+
+    run = service.workflow_repository.create_run(story["story_id"], 1, initial_state)
+
+    def fake_run_reader(state, context):
+        # Ensure reader is approved so graph proceeds to extraction_gate.
+        return {
+            "is_approved": True,
+            "literary_score": 80,
+            "suggestion_type": "NONE",
+            "critique": "",
+        }
+
+    def fake_run_extraction_gate(state, context):
+        # Skip heavy extraction; drive the graph into b_story_resolve and then state_updater.
+        return {
+            "post_polish_route": "resolve_subplots",
+            "pending_chapter_extraction": {"entities": [], "relations": []},
+            "extraction_gate_error": "",
+        }
+
+    def fake_run_state_updater(state, context):
+        return {"mutations": [], "vector_documents": []}
+
+    monkeypatch.setattr("app.services.workflow.graph.run_reader", fake_run_reader)
+    monkeypatch.setattr("app.services.workflow.graph.run_extraction_gate", fake_run_extraction_gate)
+    monkeypatch.setattr("app.services.workflow.graph.run_state_updater", fake_run_state_updater)
+
+    final_state = build_chapter_graph(service._build_context(run.run_id)).invoke(initial_state)
+
+    assert final_state["workflow_status"] == "COMPLETED"
+
+
 def test_hitl_outline_edit_auto_resumes(tmp_path) -> None:
     service = build_service(str(tmp_path / "workflow_hitl.sqlite3"))
     story = service.create_story(
@@ -356,6 +412,76 @@ def test_hitl_outline_sets_resume_from_by_reason(monkeypatch, tmp_path) -> None:
         assert st["resume_from"] == expected
 
 
+def test_hitl_force_approve_plan_sets_resume_author(monkeypatch, tmp_path) -> None:
+    service = build_service(str(tmp_path / "workflow_hitl_force_approve.sqlite3"))
+    story = service.create_story(
+        StoryInput(
+            title="測試故事",
+            premise="主角回到王都追查命案。",
+            bible={"rules": ["秘密不能無代價揭露"]},
+            target_total_words=30000,
+        )
+    )
+    service.macro_compile(story["story_id"])
+    anchors = service.story_repository.list_anchors(story["story_id"])
+    story_row = service.story_repository.get_story(story["story_id"])
+    state = build_initial_state(
+        story["story_id"],
+        1,
+        anchors,
+        "trace-fa",
+        pov_character_id=story_row.get("protagonist_character_id") or "char_public_observer",
+    )
+    state["requires_hitl"] = True
+    state["workflow_status"] = "WAITING_HITL"
+    state["hitl_reason"] = HitlReason.PLAN_LOOP_EXCEEDED
+    state["resume_from"] = "planner"
+    run = service.workflow_repository.create_run(story["story_id"], 1, state)
+    monkeypatch.setattr(service, "_execute_workflow", lambda _rid, _s: None)
+
+    service.handle_hitl_decision(run.run_id, HitlDecisionRequest(option_id="force_approve_plan"))
+    st = service.workflow_repository.get_run_state(run.run_id)
+    assert st["resume_from"] == "author"
+    assert st["manual_plan_force_approve"] is True
+
+
+def test_hitl_anchor_delay_updates_anchor_row(monkeypatch, tmp_path) -> None:
+    service = build_service(str(tmp_path / "workflow_hitl_anchor.sqlite3"))
+    story = service.create_story(
+        StoryInput(
+            title="測試故事",
+            premise="主角回到王都追查命案。",
+            bible={"rules": ["秘密不能無代價揭露"]},
+            target_total_words=30000,
+        )
+    )
+    service.macro_compile(story["story_id"])
+    anchors = service.story_repository.list_anchors(story["story_id"])
+    story_row = service.story_repository.get_story(story["story_id"])
+    aid = str(anchors[0]["anchor_id"])
+    old_ct = int(anchors[0]["chapter_target"])
+    state = build_initial_state(
+        story["story_id"],
+        1,
+        anchors,
+        "trace-ad",
+        pov_character_id=story_row.get("protagonist_character_id") or "char_public_observer",
+    )
+    state["requires_hitl"] = True
+    state["workflow_status"] = "WAITING_HITL"
+    state["hitl_reason"] = HitlReason.PLAN_LOOP_EXCEEDED
+    run = service.workflow_repository.create_run(story["story_id"], 1, state)
+    monkeypatch.setattr(service, "_execute_workflow", lambda _rid, _s: None)
+
+    service.handle_hitl_anchor_delay(
+        run.run_id,
+        HitlAnchorDelayRequest(anchor_id=aid, new_chapter_target=old_ct + 4),
+    )
+    rows = service.story_repository.list_anchors(story["story_id"])
+    match = next(r for r in rows if str(r["anchor_id"]) == aid)
+    assert int(match["chapter_target"]) == old_ct + 4
+
+
 def test_hitl_decision_raises_when_not_paused(tmp_path) -> None:
     service = build_service(str(tmp_path / "workflow_hitl_guard.sqlite3"))
     story = service.create_story(
@@ -472,3 +598,51 @@ def test_chapter_two_receives_safe_continuity_packet(tmp_path) -> None:
     assert author_step["input_payload_json"]["previous_chapter_summary"]
     assert "normalized_length_min" in author_step["input_payload_json"]
     assert "ground_truth_events" not in author_step["input_payload_json"]
+
+
+def test_start_run_bootstraps_lore_and_cooldown_constraints(tmp_path) -> None:
+    service = build_service(str(tmp_path / "workflow_lore_cooldown.sqlite3"))
+    story = service.create_story(
+        StoryInput(
+            title="測試故事",
+            premise="主角回到王都追查命案。",
+            bible={
+                "lore_mysteries_progression": [
+                    {
+                        "mystery_id": "noah_memory_001",
+                        "description": "諾亞失去的關鍵記憶",
+                        "pending_stages": [{"stage": 3, "content": "揭露追殺者真面目"}],
+                    }
+                ]
+            },
+            target_total_words=30000,
+        )
+    )
+    service.story_repository.upsert_chapter_summary(
+        story["story_id"], 1, plot_summary="P1", conflict_type="MYSTERY", resolution_method="DISCOVERY"
+    )
+    service.story_repository.upsert_chapter_summary(
+        story["story_id"], 2, plot_summary="P2", conflict_type="MYSTERY", resolution_method="DISCOVERY"
+    )
+    service.story_repository.upsert_chapter_summary(
+        story["story_id"], 3, plot_summary="P3", conflict_type="MYSTERY", resolution_method="DISCOVERY"
+    )
+    wf = service.start_run_chapter(story["story_id"], 4)
+    st = wf["state"]
+    assert st["lore_mysteries_progression"]
+    assert st["resolution_cooldown_constraint"].get("active") is True
+
+
+def test_start_run_bootstraps_writing_note_from_bible(tmp_path) -> None:
+    service = build_service(str(tmp_path / "workflow_writing_note.sqlite3"))
+    story = service.create_story(
+        StoryInput(
+            title="測試故事",
+            premise="主角回到王都追查命案。",
+            bible={"writing_note": ["短句優先", "避免過度抒情", ""]},
+            target_total_words=30000,
+        )
+    )
+    wf = service.start_run_chapter(story["story_id"], 1)
+    st = wf["state"]
+    assert st["writing_note"] == ["短句優先", "避免過度抒情"]

@@ -140,6 +140,9 @@ def run_author(state: dict, context: WorkflowContext) -> tuple[dict, dict, int, 
     llm_result = context.llm_client.invoke(prompt)
     base_paragraphs = [
         f"他清楚記得上一章留下的局勢：{payload.previous_chapter_summary}" if payload.previous_chapter_summary else "",
+        f"上一章結尾的尾端節錄（保留姿勢/情緒/氛圍）：{payload.previous_chapter_tail_excerpt}"
+        if payload.previous_chapter_tail_excerpt
+        else "",
         f"上一章結束時，他最後確定的位置是：{payload.last_known_location}" if payload.last_known_location else "",
         f"這一章開場時，他人就在：{payload.chapter_start_location}" if payload.chapter_start_location else "",
         f"這一章的主筆任務是：{payload.author_goal}" if payload.author_goal else "",
@@ -188,10 +191,22 @@ def _format_mandatory_new_entities(payload) -> str:
     return "\n".join(lines)
 
 
+def _format_writing_note(payload) -> str:
+    rows = [str(x).strip() for x in (getattr(payload, "writing_note", None) or []) if str(x).strip()]
+    if not rows:
+        return "無"
+    return "\n".join(f"- {x}" for x in rows[:12])
+
+
 def _build_author_prompt(payload) -> str:
     draft_feedback_text = _format_feedback_entries(payload.draft_feedback, "draft")
     reader_feedback_text = _format_feedback_entries(payload.reader_feedback, "reader")
     previous_attempt_draft = _truncate_previous_attempt_draft(payload.previous_attempt_draft)
+    tail_excerpt_block = (
+        f"上一章尾端節錄（僅供時刻／情緒／位置銜接；禁止逐字抄進本章正文）：\n{payload.previous_chapter_tail_excerpt}\n\n"
+        if payload.previous_chapter_tail_excerpt
+        else ""
+    )
     return f"""
 你是本章主筆作者。請只根據以下表層劇本寫作，不得猜測額外真相。
 請直接輸出小說正文，不要輸出 JSON、標題解釋、欄位名稱或額外註解。
@@ -208,13 +223,25 @@ def _build_author_prompt(payload) -> str:
 當 `length_adjustment=COMPRESS` 時，代表上一版太長，請保留核心事件與節點，但刪去重複等待、重複心理描寫與無效環境鋪陳。
 當 `length_adjustment=NONE` 時，照正常章節寫作，但仍須落在允許範圍內。
 
+## 作者寫作規定（writing_note）
+{_format_writing_note(payload)}
+上述規定為本章硬性寫作約束；若與一般風格建議衝突，優先遵守 writing_note。
+
 主筆任務：
 {payload.author_goal}
 
 ## 前情提要
+
+### 與上一章正文銜接（硬性）
+1. 本章是**續寫**：開頭必須從同一敘事時刻**往後**推進（新動作、新對話、新觀察），不得停滯在重述上一章結尾。
+2. 「上一章摘要」與「上一章尾端節錄」只用於掌握因果、位置與情緒，**禁止**將其中整段、整句，或僅替換少數詞語後，當作本章開頭正文貼上。
+3. 禁止把「尾端節錄」當第一段再寫一次；若需銜接，最多一句極短轉場即可，其餘須是**未出現於上述材料**的新句子。
+4. 若必須呼應前章收束，須**改寫**句型與具體細節，避免與摘要／尾錄出現連續十個字以上相同（不計標點與空白）。
+
 上一章摘要：
 {payload.previous_chapter_summary}
 
+{tail_excerpt_block}
 上一章已知位置：
 {payload.last_known_location}
 
@@ -297,6 +324,7 @@ def _build_author_prompt(payload) -> str:
 14. 只要碰到「本章禁止提前發生」中的任一動作，就代表你已經寫到下一章，必須停下並改寫結尾。
 15. 若 feedback 指的是局部問題，例如結尾越界、位置不一致、缺少某個 beat，請只修正相關段落，不要把整章前半全部推翻重寫。
 16. 若 `length_adjustment=COMPRESS` 或內容偏長，優先刪除重複檢查、重複等待、連續空轉心理描寫與重複氛圍句，但不得刪掉 `must_include_beats`、`ending_state_shift` 與章末位置。
+17. 嚴格遵守「前情提要」內「與上一章正文銜接」四條：不得逐字或近抄「上一章摘要」「上一章尾端節錄」；本章開頭必須是新的推進句，不是前章結尾的複製。
 """.strip()
 
 

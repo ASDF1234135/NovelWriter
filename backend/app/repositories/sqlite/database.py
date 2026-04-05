@@ -17,13 +17,16 @@ class SQLiteDatabase:
     def __init__(self, db_path: str | None = None) -> None:
         settings = get_settings()
         self.db_path = Path(db_path or settings.sqlite_file)
+        self._connect_timeout = float(settings.sqlite_connect_timeout_seconds)
+        self._busy_timeout_ms = int(settings.sqlite_busy_timeout_ms)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.initialize()
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(str(self.db_path), timeout=self._connect_timeout)
         conn.row_factory = _dict_factory
+        conn.execute(f"PRAGMA busy_timeout = {int(self._busy_timeout_ms)}")
         try:
             yield conn
             conn.commit()
@@ -126,13 +129,46 @@ class SQLiteDatabase:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                -- Structured chapter/milestone summaries (for director anti-repetition + macro pacing)
+                CREATE TABLE IF NOT EXISTS chapter_summaries (
+                    story_id TEXT NOT NULL,
+                    chapter_id INTEGER NOT NULL,
+                    plot_summary TEXT NOT NULL,
+                    conflict_type TEXT NOT NULL,
+                    resolution_method TEXT NOT NULL,
+                    ending_vibe TEXT NOT NULL DEFAULT 'ON_THE_MOVE',
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (story_id, chapter_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS milestone_summaries (
+                    story_id TEXT NOT NULL,
+                    chapter_start INTEGER NOT NULL,
+                    chapter_end INTEGER NOT NULL,
+                    milestone_summary TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (story_id, chapter_start, chapter_end)
+                );
                 """
             )
             self._ensure_column(conn, "stories", "plan_retry_limit", "INTEGER NOT NULL DEFAULT 3")
             self._ensure_column(conn, "stories", "draft_loop_retry_limit", "INTEGER NOT NULL DEFAULT 3")
             self._ensure_column(conn, "stories", "cast_json", "TEXT NOT NULL DEFAULT '[]'")
             self._ensure_column(conn, "stories", "protagonist_character_id", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "stories", "macro_author_notes", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "stories", "macro_compile_status", "TEXT NOT NULL DEFAULT 'IDLE'")
+            self._ensure_column(conn, "stories", "macro_compile_updated_at", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "stories", "macro_compile_error", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "stories", "cast_seed_json", "TEXT NOT NULL DEFAULT '[]'")
             self._ensure_column(conn, "volumes", "target_volume_words", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(
+                conn,
+                "chapter_summaries",
+                "ending_vibe",
+                "TEXT NOT NULL DEFAULT 'ON_THE_MOVE'",
+            )
+            conn.execute("PRAGMA journal_mode=WAL")
 
     @staticmethod
     def dumps(payload: object) -> str:
