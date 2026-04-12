@@ -10,6 +10,7 @@ export const NODE_TYPE_STYLES: Record<string, NodeTypeStyle> = {
   ITEM: { fill: "#f472b6", stroke: "#fbcfe8" },
   EVENT: { fill: "#f87171", stroke: "#fecaca" },
   CONCEPT: { fill: "#94a3b8", stroke: "#e2e8f0" },
+  RULE: { fill: "#ea580c", stroke: "#f97316" },
 };
 
 const DEFAULT_STYLE: NodeTypeStyle = { fill: "#64748b", stroke: "#cbd5e1" };
@@ -28,4 +29,5 @@ export const LEGEND_NODE_TYPES = [
   "ITEM",
   "EVENT",
   "CONCEPT",
+  "RULE",
 ] as const;

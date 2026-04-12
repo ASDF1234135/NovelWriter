@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
@@ -13,6 +14,7 @@ from app.domain.schema import (
     StoryCastMemberStored,
     WorkflowStatus,
 )
+from app.core.config import get_settings
 from app.domain.state import AgentWorkflowState, apply_length_bounds_to_state
 from app.repositories.sqlite.workflow_repository import WorkflowRepository
 from app.services.workflow.context import WorkflowContext
@@ -22,7 +24,9 @@ from app.services.workflow.nodes.director import run_director
 from app.services.workflow.nodes.draft_supervisor import run_draft_supervisor
 from app.services.workflow.nodes.extraction_gate import run_extraction_gate
 from app.services.workflow.nodes.chapter_summarizer import run_chapter_summarizer
+from app.services.workflow.nodes.copyeditor import run_copyeditor
 from app.services.workflow.nodes.graph_rag import run_graph_rag
+from app.services.workflow.nodes.logic_alignment import run_logic_alignment
 from app.services.workflow.nodes.plan_supervisor import run_plan_supervisor
 from app.services.workflow.nodes.planner import run_planner
 from app.services.workflow.nodes.reader import run_reader
@@ -66,6 +70,39 @@ def _has_forbidden_resolution_keywords(text: str) -> bool:
     lowered = (text or "").lower()
     keys = ("精神連結", "神經駭入", "腦機", "mind link", "neural hack", "mental duel")
     return any(k in lowered for k in keys)
+
+
+def _slug(raw: str) -> str:
+    s = re.sub(r"[^a-z0-9]+", "_", (raw or "").strip().lower())
+    s = re.sub(r"_+", "_", s).strip("_")
+    return s[:36]
+
+
+def _canonicalize_planner_events(events_raw: list[dict[str, Any]], chapter_id: int) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    old_to_new: dict[str, str] = {}
+    for idx, ev in enumerate(events_raw, start=1):
+        if not isinstance(ev, dict):
+            continue
+        desc = str(ev.get("description") or "").strip()
+        old_id = str(ev.get("event_id") or "").strip()
+        new_id = f"event_ch{chapter_id}_{idx:02d}"
+        slug = _slug(desc)
+        if slug:
+            new_id = f"event_{slug}_{idx:02d}"
+        old_to_new[old_id] = new_id
+        out.append(
+            {
+                "event_id": new_id,
+                "description": desc,
+                "caused_by_event_id": str(ev.get("caused_by_event_id") or "").strip() or None,
+            }
+        )
+    for ev in out:
+        cause = ev.get("caused_by_event_id")
+        if cause:
+            ev["caused_by_event_id"] = old_to_new.get(cause, cause)
+    return out
 
 
 def build_chapter_graph(context: WorkflowContext):
@@ -148,6 +185,10 @@ def build_chapter_graph(context: WorkflowContext):
     def planner_node(state: AgentWorkflowState) -> dict:
         start = timed()
         output, masked, tokens, latency = run_planner(state, context)
+        output["ground_truth_events"] = _canonicalize_planner_events(
+            list(output.get("ground_truth_events") or []),
+            int(state["chapter_id"]),
+        )
         output = {**output, "manual_plan_force_approve": False}
         planned_nodes = list(output.get("proposed_new_nodes") or [])
         merged_planner = {**output, "planned_graph_nodes": planned_nodes}
@@ -210,7 +251,85 @@ def build_chapter_graph(context: WorkflowContext):
             token_usage=tokens,
             latency_ms=latency or elapsed_ms(start),
         )
-        return merged_planner | {"last_agent": "planner", "resume_from": "planner"}
+        return merged_planner | {
+            "last_agent": "planner",
+            "resume_from": "planner",
+            # Traceability: preserve pre-alignment draft for debugging/HITL UI.
+            "original_draft_narrative_script": str(merged_planner.get("narrative_script") or ""),
+            "original_draft_must_include_beats": list(merged_planner.get("must_include_beats") or []),
+            "original_draft_ground_truth_events": list(merged_planner.get("ground_truth_events") or []),
+        }
+
+    def logic_alignment_node(state: AgentWorkflowState) -> dict:
+        start = timed()
+        output, masked, tokens, latency = run_logic_alignment(state, context)
+        max_hitl_retry = 1
+
+        # State hygiene: always overwrite HITL flags from this node's fresh decision.
+        updates: dict[str, Any] = {
+            "safe_chapter_rules": str(output.get("safe_chapter_rules") or ""),
+            "alignment_log": str(output.get("alignment_log") or ""),
+            "requires_hitl": False,
+            "hitl_reason": "",
+            "hitl_decision_mode": "NONE",
+            "pending_hitl_options": [],
+            "workflow_status": WorkflowStatus.RUNNING.value,
+        }
+        wants_hitl = bool(output.get("requires_hitl"))
+        if wants_hitl:
+            retry_count = int(state.get("alignment_hitl_retry_count") or 0) + 1
+            updates["alignment_hitl_retry_count"] = retry_count
+            reason_detail = str(output.get("hitl_reason") or "").strip()
+            if retry_count > max_hitl_retry:
+                warn = (
+                    "Alignment HITL exceeded retry limit; force-pass without hard rules. "
+                    "Please review chapter_hard_rules quality."
+                )
+                plan_warnings = list(state.get("plan_warnings") or [])
+                if warn not in plan_warnings:
+                    plan_warnings.append(warn)
+                updates["plan_warnings"] = plan_warnings
+                updates["alignment_log"] = f"{updates['alignment_log']}\n[WARN] {warn}".strip()
+            else:
+                if reason_detail:
+                    updates["alignment_log"] = f"{updates['alignment_log']}\n[HITL_REQUEST] {reason_detail}".strip()
+                updates.update(
+                    {
+                        "requires_hitl": True,
+                        "hitl_reason": HitlReason.ALIGNMENT_RULES_REQUIRED,
+                        "hitl_decision_mode": "MANUAL_EDIT",
+                        "workflow_status": WorkflowStatus.WAITING_HITL.value,
+                        "pending_hitl_options": [],
+                        "resume_from": "logic_alignment",
+                    }
+                )
+        else:
+            updates["alignment_hitl_retry_count"] = 0
+
+        if (
+            not updates.get("requires_hitl")
+            and ("final_narrative_script" in output or "final_must_include_beats" in output or "final_ground_truth_events" in output)
+        ):
+            # Overwrite draft fields with aligned final fields.
+            updates.update(
+                {
+                    "ground_truth_events": list(output.get("final_ground_truth_events") or []),
+                    "narrative_script": str(output.get("final_narrative_script") or ""),
+                    "must_include_beats": list(output.get("final_must_include_beats") or []),
+                }
+            )
+
+        merged = {**updates, "last_agent": "logic_alignment", "resume_from": "logic_alignment"}
+        recorder.record_and_update_run(
+            "logic_alignment",
+            dict(state),
+            merged,
+            {**state, **merged},
+            masked_payload=masked,
+            token_usage=tokens,
+            latency_ms=latency or elapsed_ms(start),
+        )
+        return merged
 
     def plan_supervisor_node(state: AgentWorkflowState) -> dict:
         start = timed()
@@ -479,11 +598,14 @@ def build_chapter_graph(context: WorkflowContext):
                     "resume_from": "author",
                 }
         else:
+            next_resume = (
+                "copyeditor" if get_settings().copyeditor_enabled else "chapter_summarizer"
+            )
             merged = {
                 **gate_out,
                 "extraction_gate_failure_streak": 0,
                 "last_agent": "extraction_gate",
-                "resume_from": "chapter_summarizer",
+                "resume_from": next_resume,
             }
         recorder.record_and_update_run(
             "extraction_gate",
@@ -492,6 +614,24 @@ def build_chapter_graph(context: WorkflowContext):
             {**state, **merged},
             latency_ms=elapsed_ms(start),
             route_decision=route,
+        )
+        return merged
+
+    def copyeditor_node(state: AgentWorkflowState) -> dict:
+        start = timed()
+        out = run_copyeditor(dict(state), context)
+        merged = {
+            **out,
+            "last_agent": "copyeditor",
+            "resume_from": "chapter_summarizer",
+        }
+        recorder.record_and_update_run(
+            "copyeditor",
+            dict(state),
+            merged,
+            {**state, **merged},
+            latency_ms=elapsed_ms(start),
+            route_decision="chapter_summarizer",
         )
         return merged
 
@@ -682,7 +822,11 @@ def build_chapter_graph(context: WorkflowContext):
         r = state.get("post_polish_route") or "resolve_subplots"
         if r == "hitl":
             return "hitl"
-        return r
+        if r == "author":
+            return "author"
+        if get_settings().copyeditor_enabled:
+            return "copyeditor"
+        return "chapter_summarizer"
 
     def route_graph_rag(state: AgentWorkflowState) -> str:
         return state.get("graph_rag_route", "planner")
@@ -693,6 +837,9 @@ def build_chapter_graph(context: WorkflowContext):
     def route_b_story(state: AgentWorkflowState) -> str:
         return state.get("b_story_route", "state_updater")
 
+    def route_logic_alignment(state: AgentWorkflowState) -> str:
+        return "hitl" if state.get("requires_hitl") else "author"
+
     def route_start(state: AgentWorkflowState) -> str:
         return state.get("resume_from", "director")
 
@@ -701,10 +848,12 @@ def build_chapter_graph(context: WorkflowContext):
     graph.add_node("graph_rag", graph_rag_node)
     graph.add_node("planner", planner_node)
     graph.add_node("plan_supervisor", plan_supervisor_node)
+    graph.add_node("logic_alignment", logic_alignment_node)
     graph.add_node("author", author_node)
     graph.add_node("draft_supervisor", draft_supervisor_node)
     graph.add_node("reader", reader_node)
     graph.add_node("extraction_gate", extraction_gate_node)
+    graph.add_node("copyeditor", copyeditor_node)
     graph.add_node("chapter_summarizer", chapter_summarizer_node)
     graph.add_node("b_story_resolve", b_story_resolve_node)
     graph.add_node("state_updater", state_updater_node)
@@ -716,12 +865,14 @@ def build_chapter_graph(context: WorkflowContext):
         {
             "director": "director",
             "planner": "planner",
+            "logic_alignment": "logic_alignment",
             "author": "author",
             "graph_rag": "graph_rag",
             "draft_supervisor": "draft_supervisor",
             "reader": "reader",
             "state_updater": "state_updater",
             "extraction_gate": "extraction_gate",
+            "copyeditor": "copyeditor",
             "chapter_summarizer": "chapter_summarizer",
             "b_story_resolve": "b_story_resolve",
         },
@@ -736,7 +887,12 @@ def build_chapter_graph(context: WorkflowContext):
     graph.add_conditional_edges(
         "plan_supervisor",
         route_plan_supervisor,
-        {"planner": "planner", "author": "author", "hitl": "hitl"},
+        {"planner": "planner", "author": "logic_alignment", "hitl": "hitl"},
+    )
+    graph.add_conditional_edges(
+        "logic_alignment",
+        route_logic_alignment,
+        {"hitl": "hitl", "author": "author"},
     )
     graph.add_edge("author", "draft_supervisor")
     graph.add_conditional_edges(
@@ -752,8 +908,14 @@ def build_chapter_graph(context: WorkflowContext):
     graph.add_conditional_edges(
         "extraction_gate",
         route_post_polish,
-        {"author": "author", "resolve_subplots": "chapter_summarizer", "hitl": "hitl"},
+        {
+            "author": "author",
+            "copyeditor": "copyeditor",
+            "chapter_summarizer": "chapter_summarizer",
+            "hitl": "hitl",
+        },
     )
+    graph.add_edge("copyeditor", "chapter_summarizer")
     graph.add_edge("chapter_summarizer", "b_story_resolve")
     graph.add_conditional_edges(
         "b_story_resolve",

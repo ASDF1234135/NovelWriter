@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from app.domain.schema import GraphQueryRequest
-from app.services.workflow.continuity import build_continuity_packet, resolve_pov_character_id
+from app.services.workflow.continuity import (
+    build_continuity_packet,
+    format_local_enforced_rules_block,
+    resolve_pov_character_id,
+    resolve_pov_location_node_id,
+)
 from app.services.workflow.context import WorkflowContext
 from app.services.workflow.utils import truncate_json_payload
 
@@ -56,6 +61,22 @@ def run_graph_rag(state: dict, context: WorkflowContext) -> dict:
             pov_character_id=resolved_pov_character_id,
             active_epoch_id=state["active_epoch_id"],
         )
+        location_id = resolve_pov_location_node_id(
+            graph_snapshot,
+            resolved_pov_character_id,
+            state["active_epoch_id"],
+        )
+        node_names = {n.node_id: n.canonical_name for n in graph_snapshot.nodes}
+        location_display = (continuity.get("last_known_location") or "").strip()
+        if not location_display and location_id:
+            location_display = (node_names.get(location_id) or location_id).strip()
+        enforced = context.graph_store.list_enforced_rules_for_context(
+            state["story_id"],
+            location_id,
+            state["active_epoch_id"],
+            resolved_pov_character_id,
+        )
+        local_enforced_rules_context = format_local_enforced_rules_block(enforced, location_display)
         bible_context = context.bible_service.compile_context(
             (story.get("bible_json") or {}) if story else {},
             macro_author_notes=str(story.get("macro_author_notes") or "") if story else "",
@@ -75,12 +96,14 @@ def run_graph_rag(state: dict, context: WorkflowContext) -> dict:
             + len(vector_context)
             + len(continuity.get("previous_chapter_summary") or "")
             + len(continuity.get("recent_chapter_context") or "")
+            + len(local_enforced_rules_context)
         )
         last_out = {
             "pov_character_id": resolved_pov_character_id,
             "bible_context": bible_context,
             "graph_context": graph_context,
             "vector_context": vector_context,
+            "local_enforced_rules_context": local_enforced_rules_context,
             "graph_rag_context_tier": tier,
             "context_overflow_char_estimate": total,
             "context_hitl_required": False,

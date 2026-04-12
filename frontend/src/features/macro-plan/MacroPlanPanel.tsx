@@ -1,9 +1,59 @@
 import { useState } from "react";
-import type { Anchor, CastMember, MacroCompileData, VolumePlan } from "../../types";
+import type { Anchor, CastMember, MacroCompileData, MacroPlanPutBody, MacroSnapshotResponse, VolumePlan } from "../../types";
+import { putMacroPlan } from "../../api";
 
 type Props = {
   macroData: MacroCompileData | null;
+  storyId: string | null;
+  configurationLocked: boolean;
+  onMacroDataUpdate: (data: MacroCompileData) => void;
+  onBusy: (busy: boolean) => void;
+  onError: (message: string) => void;
 };
+
+function snapshotToCompileData(snap: MacroSnapshotResponse): MacroCompileData {
+  return {
+    story_id: snap.story_id,
+    bible: snap.bible,
+    macro_author_notes: snap.macro_author_notes,
+    cast_seed: snap.cast_seed,
+    volumes: snap.volumes,
+    anchors: snap.anchors,
+    cast: snap.cast,
+    protagonist_character_id: snap.protagonist_character_id,
+  };
+}
+
+function buildPutBody(data: MacroCompileData): MacroPlanPutBody {
+  return {
+    bible: { ...(data.bible ?? {}) },
+    volumes: [...(data.volumes ?? [])],
+    anchors: (data.anchors ?? []).map((a) => ({
+      anchor_id: a.anchor_id,
+      volume_id: a.volume_id ?? "",
+      title: a.title ?? "",
+      description: a.description ?? "",
+      target_state: { ...(a.target_state ?? {}) },
+      chapter_target: a.chapter_target,
+      priority: a.priority ?? 1,
+    })),
+    cast: (data.cast ?? []).map((c) => ({
+      node_id: c.node_id,
+      canonical_name: c.canonical_name,
+      role: c.role,
+      short_bio: c.short_bio ?? "",
+      aliases: c.aliases ?? [],
+      age: c.age ?? "",
+      motivation: c.motivation ?? "",
+      core_motivation: c.core_motivation ?? "",
+      speech_style: c.speech_style ?? "",
+      fatal_flaw: c.fatal_flaw ?? "",
+      quirks_and_habits: c.quirks_and_habits ?? "",
+      core_value: c.core_value ?? "",
+    })),
+    protagonist_character_id: data.protagonist_character_id?.trim() || null,
+  };
+}
 
 type MacroTab = "bible" | "volumes" | "cast" | "anchors";
 
@@ -125,8 +175,19 @@ const tabAccent: Record<number, "secondary" | "primary" | "tertiary"> = {
   2: "tertiary",
 };
 
-export function MacroPlanPanel({ macroData }: Props) {
+export function MacroPlanPanel({
+  macroData,
+  storyId,
+  configurationLocked,
+  onMacroDataUpdate,
+  onBusy,
+  onError,
+}: Props) {
   const [tab, setTab] = useState<MacroTab>("volumes");
+  const [macroEditMode, setMacroEditMode] = useState(false);
+  const [macroEditJson, setMacroEditJson] = useState("");
+  const [macroEditParseError, setMacroEditParseError] = useState("");
+
   const volumes = macroData?.volumes ?? [];
   const anchors = macroData?.anchors ?? [];
   const cast = macroData?.cast ?? [];
@@ -134,9 +195,46 @@ export function MacroPlanPanel({ macroData }: Props) {
   const bible = macroData?.bible;
   const hasBible = bible && typeof bible === "object" && Object.keys(bible).length > 0;
 
+  const canEditMacro =
+    Boolean(storyId && macroData && volumes.length > 0 && anchors.length > 0 && !configurationLocked);
+
   function copyBibleJson() {
     if (!bible) return;
     void navigator.clipboard.writeText(JSON.stringify(bible, null, 2));
+  }
+
+  function enterMacroEdit() {
+    if (!macroData) return;
+    setMacroEditJson(JSON.stringify(buildPutBody(macroData), null, 2));
+    setMacroEditParseError("");
+    setMacroEditMode(true);
+  }
+
+  async function saveMacroEdit() {
+    if (!storyId) return;
+    let parsed: MacroPlanPutBody;
+    try {
+      parsed = JSON.parse(macroEditJson) as MacroPlanPutBody;
+    } catch {
+      setMacroEditParseError("JSON 格式不正確");
+      return;
+    }
+    if (!parsed.volumes?.length || !parsed.anchors?.length) {
+      setMacroEditParseError("volumes 與 anchors 不可為空");
+      return;
+    }
+    setMacroEditParseError("");
+    onBusy(true);
+    onError("");
+    try {
+      const snap = await putMacroPlan(storyId, parsed);
+      onMacroDataUpdate(snapshotToCompileData(snap));
+      setMacroEditMode(false);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "儲存宏觀規劃失敗");
+    } finally {
+      onBusy(false);
+    }
   }
 
   return (
@@ -146,14 +244,62 @@ export function MacroPlanPanel({ macroData }: Props) {
           <span className="material-symbols-outlined text-secondary">format_list_bulleted</span>
           世界觀與結構產出
         </h2>
-        {macroData ? (
-          <span className="rounded-full border border-outline-variant/20 bg-surface-container px-3 py-1 font-label text-[10px] font-bold uppercase tracking-widest text-outline">
-            分卷 {volumes.length}
-          </span>
-        ) : null}
+        <div className="flex flex-wrap items-center gap-2">
+          {macroData ? (
+            <span className="rounded-full border border-outline-variant/20 bg-surface-container px-3 py-1 font-label text-[10px] font-bold uppercase tracking-widest text-outline">
+              分卷 {volumes.length}
+            </span>
+          ) : null}
+          {configurationLocked ? (
+            <span className="rounded-full border border-outline-variant/30 bg-surface-container-high px-3 py-1 font-label text-[10px] text-on-surface-variant">
+              已鎖定（曾執行章節流程）
+            </span>
+          ) : null}
+          {canEditMacro && !macroEditMode ? (
+            <button type="button" className="btn-secondary text-xs" onClick={enterMacroEdit}>
+              編輯宏觀規劃
+            </button>
+          ) : null}
+          {macroEditMode ? (
+            <>
+              <button type="button" className="btn-primary-gradient text-xs" onClick={() => void saveMacroEdit()}>
+                儲存宏觀規劃
+              </button>
+              <button
+                type="button"
+                className="btn-secondary text-xs"
+                onClick={() => {
+                  setMacroEditMode(false);
+                  setMacroEditParseError("");
+                }}
+              >
+                取消
+              </button>
+            </>
+          ) : null}
+        </div>
       </div>
 
-      {!macroData ? (
+      {macroEditMode ? (
+        <div className="space-y-3 rounded-xl border border-primary/25 bg-surface-container-low p-4">
+          <p className="font-body text-sm text-on-surface-variant">
+            以下為完整宏觀規劃 JSON（世界觀、bible、分卷、錨點、cast）。儲存後會寫入資料庫並重建 macro
+            角色圖譜節點；請保留有效的 <code className="text-xs">volume_id</code> 與{" "}
+            <code className="text-xs">anchor.volume_id</code> 對應關係。
+          </p>
+          {macroEditParseError ? (
+            <p className="font-label text-sm text-error">{macroEditParseError}</p>
+          ) : null}
+          <textarea
+            className="auteur-input min-h-[min(60vh,420px)] w-full resize-y font-mono text-xs leading-relaxed"
+            spellCheck={false}
+            value={macroEditJson}
+            onChange={(e) => setMacroEditJson(e.target.value)}
+          />
+        </div>
+      ) : null}
+
+      {macroEditMode ? null : !macroData ? (
         <div className="rounded-xl border border-outline-variant/10 bg-surface-container-low p-8 text-center font-body text-on-surface-variant">
           執行「產生世界觀與結構」後，可在此檢視世界觀總表、分卷、人物與里程碑。
         </div>
@@ -244,7 +390,7 @@ export function MacroPlanPanel({ macroData }: Props) {
               </div>
             </div>
             <p className="font-body text-sm leading-relaxed text-on-surface-variant">
-              調整左側梗概與作者補充後按「儲存設定」，再按「產生世界觀與結構」以更新總表、分卷、里程碑與人物卡。
+              調整左側梗概與作者補充後按「儲存設定」，再按「產生世界觀與結構」以更新總表、分卷、里程碑與人物卡。編譯完成後可用「編輯宏觀規劃」手動覆寫（須尚未執行任何章節流程）。
             </p>
           </div>
         </>

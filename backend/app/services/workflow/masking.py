@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 
@@ -72,6 +73,7 @@ def build_planner_payload(state: dict, story: dict | None = None, volumes: list[
         graph_context=state["graph_context"],
         vector_context=state["vector_context"],
         bible_context=state["bible_context"],
+        local_enforced_rules_context=str(state.get("local_enforced_rules_context") or ""),
         previous_chapter_summary=state.get("previous_chapter_summary", ""),
         previous_chapter_tail_excerpt=state.get("previous_chapter_tail_excerpt", ""),
         recent_chapter_context=state.get("recent_chapter_context", ""),
@@ -95,6 +97,7 @@ def build_planner_payload(state: dict, story: dict | None = None, volumes: list[
         lore_mysteries_progression=list(state.get("lore_mysteries_progression") or []),
         ending_vibe_cooldown_constraint=dict(state.get("ending_vibe_cooldown_constraint") or {}),
         writing_note=list(state.get("writing_note") or []),
+        author_chapter_plan=str(state.get("chapter_outline") or state.get("author_chapter_plan") or ""),
     )
 
 
@@ -106,6 +109,13 @@ def build_author_payload(state: dict) -> SafeAuthorPayload:
         nmin = int(target_word_count * 0.65)
         nmax = int(target_word_count * 1.35)
     mandatory = planned_nodes_to_mandatory_entities(list(state.get("planned_graph_nodes") or []))
+    sanitized = sanitize_author_payload_for_identity_leak(
+        notes=list(state.get("author_safe_continuity_notes") or []),
+        recent_names=list(state.get("recent_entity_names") or []),
+        mandatory_entities=mandatory,
+        forbidden_reveals=list(state.get("forbidden_reveals") or []),
+        allowed_reveals=list(state.get("allowed_identity_reveals_this_chapter") or []),
+    )
     return SafeAuthorPayload(
         narrative_script=state["narrative_script"],
         chapter_start_location=state.get("chapter_start_location", ""),
@@ -117,7 +127,7 @@ def build_author_payload(state: dict) -> SafeAuthorPayload:
         ending_state_shift=state.get("ending_state_shift", ""),
         ending_boundary_rule=state.get("ending_boundary_rule", ""),
         forbidden_next_scene_actions=state.get("forbidden_next_scene_actions", []),
-        forbidden_reveals=state.get("forbidden_reveals", []),
+        forbidden_reveals=sanitized["forbidden_reveals"],
         tone_direction=state["tone_direction"],
         target_word_count=target_word_count,
         normalized_length_min=nmin,
@@ -126,13 +136,15 @@ def build_author_payload(state: dict) -> SafeAuthorPayload:
         previous_chapter_tail_excerpt=state.get("previous_chapter_tail_excerpt", ""),
         previous_attempt_draft=state.get("current_draft", ""),
         last_known_location=state.get("last_known_location", ""),
-        author_safe_continuity_notes=list(state.get("author_safe_continuity_notes") or []),
-        recent_entity_names=state.get("recent_entity_names", []),
+        local_enforced_rules_context=str(state.get("local_enforced_rules_context") or ""),
+        author_safe_continuity_notes=sanitized["author_safe_continuity_notes"],
+        recent_entity_names=sanitized["recent_entity_names"],
         draft_feedback=state["draft_feedback"],
         reader_feedback=state["reader_feedback"],
         length_adjustment=state.get("length_adjustment", "NONE"),
-        mandatory_new_entities=mandatory,
+        mandatory_new_entities=sanitized["mandatory_new_entities"],
         writing_note=list(state.get("writing_note") or []),
+        safe_chapter_rules=str(state.get("safe_chapter_rules") or ""),
     )
 
 
@@ -231,6 +243,7 @@ def build_draft_supervisor_payload(state: dict) -> SafeSupervisorPayload:
         lore_mysteries_progression=list(state.get("lore_mysteries_progression") or []),
         resolution_cooldown_constraint=dict(state.get("resolution_cooldown_constraint") or {}),
         ending_vibe_cooldown_constraint=dict(state.get("ending_vibe_cooldown_constraint") or {}),
+        allowed_identity_reveals_this_chapter=list(state.get("allowed_identity_reveals_this_chapter") or []),
     )
 
 
@@ -303,3 +316,94 @@ def _resolve_current_volume(chapter_id: int, volumes: list[dict]) -> dict | None
         if isinstance(start, int) and isinstance(end, int) and start <= chapter_id <= end:
             return volume
     return None
+
+
+def sanitize_author_payload_for_identity_leak(
+    *,
+    notes: list[str],
+    recent_names: list[str],
+    mandatory_entities: list[Any],
+    forbidden_reveals: list[str],
+    allowed_reveals: list[str],
+) -> dict[str, Any]:
+    blocked_terms = _collect_blocked_identity_terms(forbidden_reveals, allowed_reveals)
+    if not blocked_terms:
+        return {
+            "author_safe_continuity_notes": notes,
+            "recent_entity_names": recent_names,
+            "mandatory_new_entities": mandatory_entities,
+            "forbidden_reveals": forbidden_reveals,
+        }
+    redacted_notes = [_redact_text_with_terms(x, blocked_terms) for x in notes]
+    redacted_forbidden = [_redact_text_with_terms(x, blocked_terms) for x in forbidden_reveals]
+    trimmed_recent = [name for name in recent_names if not _contains_any_term(name, blocked_terms)]
+    redacted_mandatory = [_redact_mandatory_entity(ent, blocked_terms) for ent in mandatory_entities]
+    return {
+        "author_safe_continuity_notes": redacted_notes,
+        "recent_entity_names": trimmed_recent,
+        "mandatory_new_entities": redacted_mandatory,
+        "forbidden_reveals": redacted_forbidden,
+    }
+
+
+def _collect_blocked_identity_terms(forbidden_reveals: list[str], allowed_reveals: list[str]) -> list[str]:
+    allow = {s.strip() for s in allowed_reveals if isinstance(s, str) and s.strip()}
+    blocked: set[str] = set()
+    for row in forbidden_reveals:
+        if not isinstance(row, str) or not row.strip():
+            continue
+        txt = row.strip()
+        if not _looks_like_identity_rule(txt):
+            continue
+        for token in _extract_identity_tokens(txt):
+            if token not in allow:
+                blocked.add(token)
+    return sorted(blocked, key=len, reverse=True)
+
+
+def _looks_like_identity_rule(text: str) -> bool:
+    markers = ("身分", "身份", "真名", "真相", "其實是", "真正是", "revea")
+    return any(m in text for m in markers)
+
+
+def _extract_identity_tokens(text: str) -> list[str]:
+    candidates: set[str] = set()
+    for pat in (r"「([^」]{1,30})」", r"'([^']{1,30})'", r"\"([^\"]{1,30})\""):
+        for m in re.findall(pat, text):
+            t = m.strip()
+            if t:
+                candidates.add(t)
+    for pat in (r"(?:其實是|真正是|就是)([A-Za-z\u4e00-\u9fff]{2,20})",):
+        for m in re.findall(pat, text):
+            t = m.strip()
+            if t:
+                candidates.add(t)
+    return sorted(candidates)
+
+
+def _contains_any_term(text: str, terms: list[str]) -> bool:
+    lowered = text.casefold()
+    return any(term.casefold() in lowered for term in terms)
+
+
+def _redact_text_with_terms(text: str, terms: list[str]) -> str:
+    out = text
+    for term in terms:
+        if term:
+            out = re.sub(re.escape(term), "[REDACTED_IDENTITY]", out, flags=re.IGNORECASE)
+    return out
+
+
+def _redact_mandatory_entity(entity: Any, terms: list[str]) -> Any:
+    canonical = _redact_text_with_terms(getattr(entity, "canonical_name", "") or "", terms)
+    role = _redact_text_with_terms(getattr(entity, "role", "") or "", terms)
+    brief = _redact_text_with_terms(getattr(entity, "writing_brief", "") or "", terms)
+    kws = [_redact_text_with_terms(x, terms) for x in list(getattr(entity, "search_keywords", []) or [])]
+    return entity.model_copy(
+        update={
+            "canonical_name": canonical,
+            "role": role,
+            "writing_brief": brief,
+            "search_keywords": kws,
+        }
+    )

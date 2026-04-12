@@ -69,6 +69,18 @@ def get_profile(agent_name: str) -> AgentPromptProfile:
             model=settings.planner_llm_model or settings.llm_model,
             temperature=settings.planner_temperature,
         ),
+        "logic_alignment": AgentPromptProfile(
+            agent_name="logic_alignment",
+            system_prompt=(
+                "你是邏輯對齊與修補代理（Logic_Alignment_Agent）。"
+                "你的任務是把 planner 的草稿大綱與作者提供的硬性規則對齊，"
+                "並確保硬性規則在 POV 視角下安全可寫。"
+                "你必須輸出結構化 JSON，包含 final_* 章節指引與 safe_chapter_rules。"
+                "若草稿與規則存在不可修補衝突，你必須依規則重推演可行行動（fallback）。"
+            ),
+            model=settings.planner_llm_model or settings.llm_model,
+            temperature=0.2,
+        ),
         "plan_supervisor": AgentPromptProfile(
             agent_name="plan_supervisor",
             system_prompt=(
@@ -123,6 +135,17 @@ def get_profile(agent_name: str) -> AgentPromptProfile:
             ),
             model=settings.author_llm_model or settings.llm_model,
             temperature=settings.author_temperature,
+        ),
+        "copyeditor": AgentPromptProfile(
+            agent_name="copyeditor",
+            system_prompt=(
+                "你是紙本／網路小說的校閱編輯。你只處理使用者訊息中標為可編輯的那一章："
+                "刪除冗餘與 Markdown、理順語句與分段，不得新增或刪除事件層資訊，"
+                "不得改寫專名或關鍵指稱為無法在後續系統中對齊之晦澀代稱。"
+                "唯讀區僅供對照去重，絕不可抄入輸出。"
+            ),
+            model=settings.copyeditor_llm_model or settings.supervisor_llm_model or settings.llm_model,
+            temperature=settings.copyeditor_temperature,
         ),
         "reader": AgentPromptProfile(
             agent_name="reader",
@@ -193,6 +216,10 @@ def get_profile(agent_name: str) -> AgentPromptProfile:
                 "你是章節實體抽取器。請只輸出 JSON schema 要求的 entities 列表。"
                 "只抽取正文可直接支持的實體；可重用 existing_node_candidates 的 node_id 作為 suggested_node_id。"
                 "不要臆測未出現的角色、地點或物品。"
+                "CONCEPT 僅限世界觀術語、陣營、制度/規則/科技法則；"
+                "禁止把情緒、器官、生理不適或文學修辭抽為 CONCEPT。"
+                "優先對齊已知實體字典 existing_node_candidates，無法對齊才可新增。"
+                "node_type 僅能使用枚舉值；細分類用 tags，結構化細節用 metadata（JSON 可序列化）。"
             ),
             model=settings.supervisor_llm_model or settings.llm_model,
             temperature=0.0,
@@ -212,6 +239,8 @@ def get_profile(agent_name: str) -> AgentPromptProfile:
                 "你是章節關係抽取器。請只輸出 relations 列表；relation_type 必須為合法枚舉。"
                 "端點請使用 canonical_entities 的 node_id 或 canonical_name，或 ground_truth_events 的 event_id。"
                 "真實不等於公開：秘密行動、私下發現預設 is_public=false。"
+                "忽略比喻、擬人、誇飾等文學修辭，僅抽取字面可驗證事實。"
+                "可選 tags/metadata 豐富關係語義；勿發明新的 relation_type。"
             ),
             model=settings.supervisor_llm_model or settings.llm_model,
             temperature=0.0,

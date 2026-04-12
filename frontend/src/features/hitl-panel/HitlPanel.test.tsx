@@ -101,4 +101,44 @@ describe("HitlPanel", () => {
     expect(screen.getByText("收尾方式與近期重複")).toBeInTheDocument();
     expect(screen.getByText("微調章節方向")).toBeInTheDocument();
   });
+
+  it("alignment rules required: shows dedicated block and submits state injection patch", async () => {
+    const onStateInjection = vi.fn().mockResolvedValue(undefined);
+    render(
+      <HitlPanel
+        workflow={{
+          run: {
+            run_id: "run-4",
+            story_id: "story-1",
+            chapter_id: 3,
+            status: "WAITING_HITL",
+            requires_hitl: true,
+            hitl_reason: "Alignment_Rules_Required",
+            hitl_decision_mode: "MANUAL_EDIT",
+          },
+          state: {
+            pending_hitl_options: [],
+            resume_from: "logic_alignment",
+            chapter_hard_rules: "舊規則",
+            alignment_log: "[HITL_REQUEST] 請補充勝負條件與回合判定。",
+          },
+          steps: [],
+        }}
+        onDecision={noopAsync}
+        onOutlineEdit={noopAsync}
+        onStateInjection={onStateInjection}
+        onDraftEdit={noopAsync}
+      />,
+    );
+
+    expect(screen.getByText("偵測到複雜智鬥，需補充規則")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "套用硬性規則並繼續" }));
+    expect(onStateInjection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mutations: [],
+        chapter_hard_rules: "舊規則",
+        resume_from: "logic_alignment",
+      }),
+    );
+  });
 });

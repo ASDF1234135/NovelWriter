@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 from collections.abc import Iterable
 from typing import Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -48,13 +49,20 @@ RELATION_EXTRACTION_GUIDELINES: list[str] = [
     "PARTICIPATED_IN：表示角色或人格參與事件；方向必須是 CHARACTER/PERSONA -> EVENT。",
     "IS_ACTUALLY：表示表層身份/偽裝身份實際對應到底層真實身份；方向必須是 PERSONA -> CHARACTER，不能反過來。",
     "HAS_ATTRIBUTE：表示某節點具有可直接觀察的屬性概念；方向建議是 CHARACTER/PERSONA/ITEM/LOCATION/EVENT -> CONCEPT，且 target 應是屬性或狀態概念，不要拿角色或地點充當屬性。",
-    "BELIEVED_AS：表示某角色/人格把某人或某物誤認為某種身份/概念；方向建議是 CHARACTER/PERSONA -> CHARACTER/PERSONA/CONCEPT，context_details 必須寫明誤認內容。",
+    "BELIEVED_AS：僅限「身分偽裝／被誤認為某標籤、概念或人格面具」等錯誤認知；target 應優先為 CONCEPT 或 PERSONA（錯誤以為的身分標籤），context_details 必須寫明誤認內容。禁止將信任、依賴、敵友、情感等一般角色間關係標成 BELIEVED_AS，請改用 HAS_RELATION 並在 context_details 寫明。若為易容／替身且表裡身分皆為具名角色，優先 IS_ACTUALLY（PERSONA→CHARACTER）或建立代表錯誤標籤的 CONCEPT，避免 CHARACTER→CHARACTER 的模糊 BELIEVED_AS。",
     "KNOWS_ABOUT：表示某角色/人格知道某個角色、物品、地點、事件或概念；方向必須是 CHARACTER/PERSONA -> ANY_NODE。",
     "BELONGS_TO_EPOCH：表示事件屬於某個時代；方向必須是 EVENT -> EPOCH。",
     "HAPPENED_BEFORE：表示事件或狀態在時間上早於另一事件或狀態；方向建議是 EVENT/CONCEPT -> EVENT/CONCEPT，且 source 較早、target 較晚。",
     "CAUSED：表示因果關係；方向必須是 EVENT -> EVENT，且 source 是原因、target 是結果。",
+    "ENFORCED_IN：表示規則的生效範圍；方向必須是 RULE -> LOCATION 或 RULE -> EPOCH，且需與當前敘事時代的 valid_epoch 一致（由系統寫入）。",
+    "RESTRICTS：表示規則限制的對象；方向必須是 RULE -> CHARACTER / PERSONA / ITEM / CONCEPT。",
+    "EXEMPT_FROM：表示不受該規則約束的角色；方向必須是 RULE -> CHARACTER 或 RULE -> PERSONA（豁免名單）。",
     "【空間移動鐵律】若正文清楚寫出角色移動到新地點，必須抽出新 LOCATION（若不存在）與新的 LOCATED_IN 關係。",
+    "忽略文學修辭（比喻、擬人、誇飾、象徵）造成的假實體關係；僅抽取字面可驗證事實與角色真實認知。",
+    "若句子含「像、彷彿、宛如、如同、好似」等比喻觸發詞，除非同段落有可驗證事實錨點，否則不要輸出該關係。",
     "端點請使用 canonical_entities 中的 node_id 或 canonical_name，或 ground_truth_events 的 event_id。",
+    "tags：可選，為關係貼短標籤（如 secret、combat）；勿發明新的 relation_type。",
+    "metadata：可選，JSON 相容的鍵值（如強度、期限）；長敘事請寫在 context_details。",
 ]
 
 ENTITY_EXTRACTION_GUIDELINES: list[str] = [
@@ -62,6 +70,17 @@ ENTITY_EXTRACTION_GUIDELINES: list[str] = [
     "若與 existing_node_candidates 中節點同名或別名相符，請在 suggested_node_id 填寫該 node_id；否則 suggested_node_id 留空。",
     "不要自行發明 node_id；最終 ID 由系統決定。",
     "canonical_name 必須簡短、可作為圖譜主名稱。",
+    "CONCEPT 僅限世界觀設定、特殊專有名詞、陣營、制度或科技法則。",
+    "【RULE（規則）節點抽取鐵律】凡帶有必須／禁止／條件與懲罰的法律、遊戲機制、場域限制、系統協議，必須抽為 RULE；純名詞解釋、力量體系名稱、陣營標籤仍用 CONCEPT。",
+    "每個 RULE 必須至少一條 ENFORCED_IN 連到正文可指認的 LOCATION；若無法指認具體地點，可連到 loc_unknown，並在該邊的 context_details 簡述原因。",
+    "RULE 的 description 寫規則全文；penalty 寫違規代價（可空）；is_active 預設 true。",
+    "禁止把一般情緒、身體部位、短暫生理不適、狀態形容詞、文學意象抽為 CONCEPT。",
+    "若無符合條件的 CONCEPT，請輸出空缺，不要硬湊。",
+    "優先對齊已知實體字典 existing_node_candidates；只有明確不在字典中才建立新候選。",
+    "若正文使用描述性稱呼（如黑髮年輕人），請優先映射到既有角色 node_id，並將稱呼放入 aliases。",
+    "【嚴格骨架】禁止發明新的 node_type；細分類用 tags（例：ITEM + tags [\"weapon\",\"illegal\"]），勿輸出 node_type=自造字串。",
+    "metadata：可選，用於數值或結構化細節（如 bullet_count、溫度）；須為 JSON 可序列化；長描述請用 summary 或既有欄位。",
+    "無法穩定歸入角色/地點/物品/時代/事件/規則時，用 CONCEPT，並以 tags 與 metadata 補足語義。",
 ]
 
 MEMORY_EXTRACTION_GUIDELINES: list[str] = [
@@ -86,6 +105,7 @@ class ExtractionContext:
     planner_visibility_contract: dict
     author_surface_hints: list[dict[str, Any]] = field(default_factory=list)
     settings_snapshot: dict = field(default_factory=dict)
+    entity_glossary: list[dict[str, Any]] = field(default_factory=list)
 
 
 def build_extraction_context(
@@ -98,6 +118,7 @@ def build_extraction_context(
     full = chapter_content or ""
     cap_nodes = settings.extraction_candidate_nodes_cap
     candidates = _select_candidate_nodes(graph_snapshot.nodes, full, events, state, cap_nodes)
+    glossary = _build_entity_glossary(candidates, state, settings.extraction_entity_glossary_cap)
     summary = _build_graph_summary(graph_snapshot, {n.node_id for n in candidates}, settings.extraction_graph_summary_max_chars)
     ent_text = _chapter_text_for_entities(full, settings.extraction_entity_text_budget)
     mem_text = _chapter_text_for_memory(full, settings.extraction_memory_full_text_budget)
@@ -128,7 +149,10 @@ def build_extraction_context(
             "memory_budget": settings.extraction_memory_full_text_budget,
             "relation_budget": settings.extraction_relation_text_budget,
             "relation_entity_batch_size": settings.extraction_relation_entity_batch_size,
+            "entity_glossary_cap": settings.extraction_entity_glossary_cap,
+            "entity_glossary_count": len(glossary),
         },
+        entity_glossary=glossary,
     )
 
 
@@ -143,6 +167,7 @@ def _select_candidate_nodes(
     event_blob = " ".join(e.description for e in events).lower()
     beats = " ".join(str(x) for x in state.get("must_include_beats", [])).lower()
     facts = " ".join(str(x) for x in state.get("reader_visible_facts", [])).lower()
+    recent_names = " ".join(str(x) for x in state.get("recent_entity_names", [])).lower()
 
     def score_node(node: GraphNode) -> int:
         s = 0
@@ -159,6 +184,8 @@ def _select_candidate_nodes(
                 s += 3
             if n and n in facts:
                 s += 2
+            if n and n in recent_names:
+                s += 3
         if node.node_id in (state.get("pov_character_id"), state.get("active_epoch_id")):
             s += 6
         return s
@@ -204,6 +231,31 @@ def _build_graph_summary(snapshot: GraphSnapshot, candidate_ids: set[str], max_c
     }
     raw = json.dumps(payload, ensure_ascii=False)
     return raw if len(raw) <= max_chars else raw[: max_chars - 3] + "..."
+
+
+def _build_entity_glossary(candidates: list[GraphNode], state: dict, cap: int) -> list[dict[str, Any]]:
+    if cap <= 0:
+        return []
+    recent = {str(x).strip().casefold() for x in (state.get("recent_entity_names") or []) if str(x).strip()}
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for node in candidates:
+        if node.node_id in seen:
+            continue
+        seen.add(node.node_id)
+        aliases = list(getattr(node, "aliases", []) or [])
+        out.append(
+            {
+                "node_id": node.node_id,
+                "node_type": str(node.node_type),
+                "canonical_name": node.canonical_name,
+                "aliases": aliases[:8],
+                "recent_chapters_seen": 1 if node.canonical_name.casefold() in recent else 0,
+            }
+        )
+        if len(out) >= cap:
+            break
+    return out
 
 
 def _chapter_text_for_entities(full: str, budget: int) -> str:
@@ -295,6 +347,20 @@ def _paragraph_sample_middle(full: str, budget: int) -> str:
     return text[:budget]
 
 
+def _merge_tag_lists(a: list[str], b: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in list(a) + list(b):
+        s = str(t).strip()
+        if not s:
+            continue
+        k = s.casefold()
+        if k not in seen:
+            seen.add(k)
+            out.append(s)
+    return out
+
+
 def canonicalize_entity_candidates(
     candidates: list[ExtractedEntityCandidate],
     graph_snapshot: GraphSnapshot,
@@ -344,6 +410,8 @@ def canonicalize_entity_candidates(
             aliases=merged_aliases,
             summary=c.summary or f"章節提及 {display_name}。",
             properties=dict(c.properties),
+            tags=list(c.tags),
+            metadata=dict(c.metadata),
         )
         if node_id in seen_ids_map:
             prev = seen_ids_map[node_id]
@@ -351,6 +419,8 @@ def canonicalize_entity_candidates(
             if not prev.summary and ent.summary:
                 prev.summary = ent.summary
             prev.properties = {**ent.properties, **prev.properties}
+            prev.tags = _merge_tag_lists(prev.tags, ent.tags)
+            prev.metadata = {**ent.metadata, **prev.metadata}
         else:
             seen_ids_map[node_id] = ent
             entities.append(ent)
@@ -443,6 +513,18 @@ def _relation_direction_valid(
             {NodeType.EVENT},
             {NodeType.EVENT},
         ),
+        EdgeType.ENFORCED_IN: (
+            {NodeType.RULE},
+            {NodeType.LOCATION, NodeType.EPOCH},
+        ),
+        EdgeType.RESTRICTS: (
+            {NodeType.RULE},
+            {NodeType.CHARACTER, NodeType.PERSONA, NodeType.ITEM, NodeType.CONCEPT},
+        ),
+        EdgeType.EXEMPT_FROM: (
+            {NodeType.RULE},
+            {NodeType.CHARACTER, NodeType.PERSONA},
+        ),
     }
     allowed = direction_rules.get(relation_type)
     if allowed is None:
@@ -480,6 +562,7 @@ def _validation_gate(
         node_types[ev.event_id] = NodeType.EVENT
 
     kept: list[ExtractedRelation] = []
+    figurative_tokens = ("像", "彷彿", "宛如", "如同", "好似", "仿佛", "as if", "like a")
     for rel in output.relations:
         sid = _resolve_relation_endpoint(
             rel.source_node_id, rel.source_name, resolved_name_index, event_ids, entity_ids, existing_ids
@@ -492,6 +575,11 @@ def _validation_gate(
         if sid not in known_ids or tid not in known_ids:
             continue
         if not _relation_direction_valid(rel.relation_type, sid, tid, node_types):
+            continue
+        details = (rel.context_details or "").casefold()
+        if rel.relation_type in {EdgeType.BELIEVED_AS, EdgeType.HAS_ATTRIBUTE} and any(t in details for t in figurative_tokens):
+            continue
+        if rel.relation_type == EdgeType.HAS_ATTRIBUTE and node_types.get(tid) != NodeType.CONCEPT:
             continue
         kept.append(
             ExtractedRelation(
@@ -541,15 +629,7 @@ def _validation_gate(
 
 
 def _build_entity_prompt(ctx: ExtractionContext) -> str:
-    existing = [
-        {
-            "node_id": n.node_id,
-            "node_type": str(n.node_type),
-            "canonical_name": n.canonical_name,
-            "aliases": list(getattr(n, "aliases", []) or []),
-        }
-        for n in ctx.candidate_nodes
-    ]
+    existing = ctx.entity_glossary
     return json.dumps(
         {
             "story_id": ctx.state["story_id"],
@@ -560,6 +640,7 @@ def _build_entity_prompt(ctx: ExtractionContext) -> str:
             + [
                 "author_surface_hints 為主筆登記的 node_id 與正文中「精確子字串」稱呼；"
                 "抽取時應把對應實體對齊到該 node_id，並可把這些字串納入 aliases。",
+                "existing_node_candidates 即為已知實體字典（Entity Glossary）；抽取時先比對再新增。",
             ],
             "chapter_excerpt": ctx.chapter_text_for_entities,
             "prompt_char_budget": len(ctx.chapter_text_for_entities),
@@ -709,7 +790,14 @@ def extract_chapter_artifacts(
                 resolved_name_index[al.casefold()] = ent.node_id
         diagnostics["steps"]["entity_extractor"] = {**(diagnostics["steps"].get("entity_extractor") or {}), "fallback": True}
     else:
-        entities, resolved_name_index = canonicalize_entity_candidates(entity_out.entities, graph_snapshot)
+        raw_count = len(entity_out.entities)
+        filtered_candidates = _filter_entity_candidates_by_scope(entity_out.entities, ctx.chapter_text_for_entities)
+        diagnostics["quality_metrics"] = {
+            "entity_candidates_raw": raw_count,
+            "entity_candidates_kept": len(filtered_candidates),
+            "concept_candidates_dropped": raw_count - len(filtered_candidates),
+        }
+        entities, resolved_name_index = canonicalize_entity_candidates(filtered_candidates, graph_snapshot)
 
     if memory_out is None:
         memory = fb.chapter_memory
@@ -962,9 +1050,49 @@ def stable_entity_id(node_type: NodeType, canonical_name: str) -> str:
         NodeType.CONCEPT: "concept",
         NodeType.EVENT: "event",
         NodeType.EPOCH: "epoch",
+        NodeType.RULE: "rule",
     }[node_type]
+    slug = _slugify(canonical_name)
+    if slug:
+        return f"{prefix}_{slug}"
     digest = hashlib.sha1(canonical_name.strip().lower().encode("utf-8")).hexdigest()[:10]
     return f"{prefix}_{digest}"
+
+
+def _slugify(raw: str) -> str:
+    normalized = unicodedata.normalize("NFKC", (raw or "").strip().lower())
+    ascii_only = re.sub(r"[^a-z0-9]+", "_", normalized)
+    ascii_only = re.sub(r"_+", "_", ascii_only).strip("_")
+    return ascii_only[:36]
+
+
+def _filter_entity_candidates_by_scope(
+    candidates: list[ExtractedEntityCandidate],
+    chapter_excerpt: str,
+) -> list[ExtractedEntityCandidate]:
+    allowed: list[ExtractedEntityCandidate] = []
+    excerpt = chapter_excerpt or ""
+    for c in candidates:
+        if c.node_type != NodeType.CONCEPT:
+            allowed.append(c)
+            continue
+        if _is_valid_world_concept(c.canonical_name, c.summary, excerpt):
+            allowed.append(c)
+    return allowed
+
+
+def _is_valid_world_concept(name: str, summary: str, excerpt: str) -> bool:
+    nm = (name or "").strip()
+    if not nm:
+        return False
+    # Reject obvious figurative / body / emotion-only concepts.
+    blocked = ("肌肉", "恐懼", "驚訝", "悲傷", "白沫", "痛苦", "不適", "緊張", "瞳孔", "眼淚")
+    if any(tok in nm for tok in blocked):
+        return False
+    evidence_text = f"{summary or ''} {excerpt[:1200]}"
+    # Keep only concepts with definitional signal in nearby text.
+    definitional_signals = ("稱為", "被稱為", "是一種", "規則", "法則", "機制", "組織", "陣營", "能力", "代號")
+    return any(sig in evidence_text for sig in definitional_signals)
 
 
 def _normalize_text(text: str) -> str:

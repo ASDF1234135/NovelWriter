@@ -27,7 +27,12 @@ type Props = {
   variant?: "default" | "compact";
   onDecision: (optionId: string) => Promise<void>;
   onOutlineEdit: (payload: { ground_truth_events: Array<Record<string, unknown>>; narrative_script?: string }) => Promise<void>;
-  onStateInjection: (payload: { mutations: Array<Record<string, unknown>> }) => Promise<void>;
+  onStateInjection: (payload: {
+    mutations: Array<Record<string, unknown>>;
+    chapter_hard_rules?: string;
+    resume_from?: string;
+    reason?: string;
+  }) => Promise<void>;
   onDraftEdit: (payload: {
     chapter_content: string;
     resume_from?: string;
@@ -103,6 +108,7 @@ export function HitlPanel({
   const [injectionJson, setInjectionJson] = useState(
     '[{"action":"CREATE_NODE","node_id":"item_backup_relic","node_type":"ITEM","properties":{"canonical_name":"備用道具","description":"HITL 強制注入"}}]',
   );
+  const [alignmentRulesInput, setAlignmentRulesInput] = useState("");
   const [draftText, setDraftText] = useState("");
   const [resumeFrom, setResumeFrom] = useState("reader");
   const [mergeHintsOnDraft, setMergeHintsOnDraft] = useState(false);
@@ -202,6 +208,9 @@ export function HitlPanel({
       setPrunePrevSummary(String(st.previous_chapter_summary ?? ""));
       setPruneTier(Number(st.graph_rag_context_tier ?? 1));
     }
+    if (reason === HITL_REASON.ALIGNMENT_RULES_REQUIRED) {
+      setAlignmentRulesInput(String(st.chapter_hard_rules ?? ""));
+    }
   }, [hitlActive, reason, workflow?.run.run_id, workflow?.state]);
 
   const shell = compact
@@ -271,6 +280,37 @@ export function HitlPanel({
             <p className="mb-3 rounded-lg bg-primary/10 px-3 py-2 font-body text-sm text-on-surface">
               請在下方選擇做法並填寫表單，決定副線是否已收尾；無需使用其他按鈕。
             </p>
+          ) : null}
+          {reason === HITL_REASON.ALIGNMENT_RULES_REQUIRED ? (
+            <div className="mb-4 rounded-lg border border-warning/40 bg-warning/10 px-3 py-3">
+              <p className="font-label text-xs font-semibold text-on-surface">Alignment 需要你補充章節硬性規則</p>
+              <blockquote className="mt-2 border-l-2 border-warning/60 pl-3 font-body text-xs text-on-surface-variant">
+                {String(workflow?.state.alignment_log ?? "").trim() || "請補充可執行的勝負條件與判定流程。"}
+              </blockquote>
+              <textarea
+                className={inputClass}
+                value={alignmentRulesInput}
+                rows={taRows(4)}
+                onChange={(e) => setAlignmentRulesInput(e.target.value)}
+                disabled={!hitlActive}
+                placeholder="補充本章硬性規則：勝負條件、回合流程、籌碼/代價、可用策略邊界"
+              />
+              <button
+                type="button"
+                className={btnClass}
+                disabled={!hitlActive}
+                onClick={() =>
+                  onStateInjection({
+                    mutations: [],
+                    chapter_hard_rules: alignmentRulesInput,
+                    resume_from: "logic_alignment",
+                    reason: "alignment_rules_patch",
+                  })
+                }
+              >
+                套用硬性規則並繼續
+              </button>
+            </div>
           ) : null}
 
           {options.length > 0 ? (

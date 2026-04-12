@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from app.domain.schema import GraphSnapshot, NodeType, EdgeType, VectorDocument
+from app.domain.schema import EnforcedRuleContext, GraphSnapshot, NodeType, EdgeType, VectorDocument
 
 
 def build_continuity_packet(
@@ -181,6 +181,58 @@ def _collect_recent_entities(
         seen.add(key)
         deduped.append(normalized)
     return deduped
+
+
+def resolve_pov_location_node_id(
+    graph_snapshot: GraphSnapshot,
+    pov_character_id: str,
+    active_epoch_id: str,
+) -> str:
+    """POV 當前開放 LOCATED_IN 的目標地點 node_id；無則空字串。"""
+    if not pov_character_id:
+        return ""
+    for edge in graph_snapshot.edges:
+        if (
+            edge.relation_type == EdgeType.LOCATED_IN
+            and edge.source_id == pov_character_id
+            and edge.end_event_id is None
+            and (not active_epoch_id or edge.valid_epoch == active_epoch_id)
+        ):
+            return edge.target_id
+    return ""
+
+
+def format_local_enforced_rules_block(
+    rules: list[EnforcedRuleContext],
+    location_display_name: str,
+) -> str:
+    if not rules:
+        return ""
+    loc = (location_display_name or "").strip() or "（當前場域）"
+    lines: list[str] = [
+        "【當前場域絕對法則 (Local Enforced Rules)】",
+        f"地點：{loc}",
+        "",
+    ]
+    for i, r in enumerate(rules, start=1):
+        body = (r.description or "").strip() or (r.canonical_name or "").strip() or r.rule_id
+        lines.append(f"- 規則 {i}：{body}")
+        if r.penalty and str(r.penalty).strip():
+            lines.append(f"  違規代價：{str(r.penalty).strip()}")
+        extra_bits: list[str] = []
+        if r.restrict_target_names:
+            extra_bits.append("限制標的：" + "、".join(r.restrict_target_names[:8]))
+        if r.exempt_character_names:
+            extra_bits.append("豁免角色：" + "、".join(r.exempt_character_names[:8]))
+        if extra_bits:
+            lines.append(f"  （{'；'.join(extra_bits)}）")
+    lines.extend(
+        [
+            "",
+            "【生成約束】本章情節推演必須嚴格遵守上述法則。若角色意圖違背，必須描寫其如何承擔代價，或如何利用漏洞／豁免合理解釋繞過。",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _collect_last_known_location(

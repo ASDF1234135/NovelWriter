@@ -252,12 +252,18 @@ def test_author_prompt_includes_writing_note_block() -> None:
             draft_feedback=[],
             reader_feedback=[],
             writing_note=["短句優先", "避免過度抒情"],
+            safe_chapter_rules="遊戲規則：每回合只能行動一次；不可瞬間破局。",
             length_adjustment="NONE",
         )
     )
     assert "作者寫作規定（writing_note）" in prompt
+    assert "本章絕對法則" in prompt
+    assert "每回合只能行動一次" in prompt
     assert "短句優先" in prompt
     assert "避免過度抒情" in prompt
+    assert "命名節制鐵律" in prompt
+    assert "非必要不命名" in prompt
+    assert "陌生事物先描寫再命名" in prompt
 
 
 def test_author_compresses_when_draft_is_too_long() -> None:

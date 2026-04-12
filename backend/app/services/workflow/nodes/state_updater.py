@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from app.domain.schema import (
     ChapterExtractionOutput,
     ChapterMemory,
@@ -22,7 +24,8 @@ from app.services.workflow.context import WorkflowContext
 
 
 def run_state_updater(state: dict, context: WorkflowContext) -> dict:
-    events = [EventOutline.model_validate(event) for event in state["ground_truth_events"]]
+    raw_events = [EventOutline.model_validate(event) for event in state["ground_truth_events"]]
+    events = _coalesce_micro_events(raw_events)
     chapter_content = state["best_draft_content"] or state["current_draft"]
     graph_snapshot = context.graph_store.query_context(
         GraphQueryRequest(
@@ -110,7 +113,7 @@ def run_state_updater(state: dict, context: WorkflowContext) -> dict:
                 action="UPDATE_NODE" if resolved["node_id"] in existing_ids else "CREATE_NODE",
                 node_id=resolved["node_id"],
                 node_type=resolved["node_type"],
-                properties=resolved["properties"],
+                properties=_sanitize_node_properties(resolved["node_type"], resolved["properties"]),
             )
         )
 
@@ -130,6 +133,15 @@ def run_state_updater(state: dict, context: WorkflowContext) -> dict:
                 mutations.extend(_build_location_transition_mutations(edge, active_location_edges, primary_event_id))
                 _register_active_location_edge(active_location_edges, edge)
             mutations.append(edge)
+
+    # Resolve state updates after event granularity is stabilized to avoid dangling start_event_id.
+    mutations.extend(
+        _resolve_state_mutations(
+            events=events,
+            extracted_entities=resolved_entities,
+            existing_nodes_by_id=existing_nodes_by_id,
+        )
+    )
 
     # `query_context()` may return a filtered epistemic view and omit baseline nodes
     # that are still valid references for vector metadata.
@@ -187,6 +199,11 @@ def _resolve_extracted_entities(
         node_id = existing_node.node_id if existing_node is not None else (entity.node_id or stable_entity_id(entity.node_type, entity.canonical_name))
         node_type = existing_node.node_type if existing_node is not None else entity.node_type
         properties = _build_node_properties(entity, node_type)
+        if existing_node is not None:
+            if not entity.tags:
+                properties["tags"] = list(getattr(existing_node, "tags", []) or [])
+            if not entity.metadata:
+                properties["metadata"] = dict(getattr(existing_node, "metadata", {}) or {})
         resolved_entities[node_id] = {
             "node_id": node_id,
             "node_type": node_type,
@@ -204,6 +221,10 @@ def _build_node_properties(entity: ExtractedEntity, node_type: NodeType) -> dict
         "aliases": entity.aliases,
         **entity.properties,
     }
+    if entity.tags:
+        properties["tags"] = list(entity.tags)
+    if entity.metadata:
+        properties["metadata"] = dict(entity.metadata)
     if node_type in {NodeType.CHARACTER, NodeType.PERSONA}:
         properties.setdefault("description", entity.summary or f"{entity.canonical_name} 在章節中出現。")
         properties.setdefault("is_alive", True)
@@ -215,7 +236,99 @@ def _build_node_properties(entity: ExtractedEntity, node_type: NodeType) -> dict
         properties.setdefault("is_unique", False)
     if node_type == NodeType.EPOCH:
         properties.setdefault("order_index", 0)
+    if node_type == NodeType.RULE:
+        properties.setdefault("description", entity.summary or entity.properties.get("description") or "")
+        if "penalty" not in properties and entity.properties.get("penalty") is not None:
+            properties["penalty"] = entity.properties.get("penalty")
+        properties.setdefault("is_active", True)
     return properties
+
+
+def _coalesce_micro_events(events: list[EventOutline]) -> list[EventOutline]:
+    if len(events) < 5:
+        return events
+    micro_markers = ("閃避", "揮拳", "出手", "反擊", "翻滾", "轉身", "格擋", "刺擊", "扣下", "躍起")
+    if sum(1 for e in events if any(tok in (e.description or "") for tok in micro_markers)) < 4:
+        return events
+    merged_desc = "；".join((e.description or "").strip() for e in events if (e.description or "").strip())
+    merged_event = EventOutline(
+        event_id=events[-1].event_id,
+        description=merged_desc[:300],
+        caused_by_event_id=events[0].caused_by_event_id,
+    )
+    return [merged_event]
+
+
+def _sanitize_tags_value(raw: object) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    return [str(x).strip() for x in raw if str(x).strip()]
+
+
+def _sanitize_metadata_value(raw: object) -> dict:
+    if not isinstance(raw, dict):
+        return {}
+    try:
+        json.dumps(raw, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return {}
+    return dict(raw)
+
+
+def _sanitize_node_properties(node_type: NodeType, properties: dict) -> dict:
+    allowed = {
+        NodeType.CHARACTER: {"canonical_name", "aliases", "description", "is_alive"},
+        NodeType.PERSONA: {"canonical_name", "aliases", "description", "is_alive"},
+        NodeType.LOCATION: {"canonical_name", "aliases", "environmental_condition", "is_accessible"},
+        NodeType.ITEM: {"canonical_name", "aliases", "item_status", "is_unique"},
+        NodeType.EVENT: {"canonical_name", "aliases"},
+        NodeType.EPOCH: {"canonical_name", "aliases", "order_index"},
+        NodeType.CONCEPT: {"canonical_name", "aliases"},
+        NodeType.RULE: {"canonical_name", "aliases", "description", "penalty", "is_active"},
+    }[node_type]
+    clean: dict = {}
+    for k, v in (properties or {}).items():
+        if k == "tags":
+            clean["tags"] = _sanitize_tags_value(v)
+        elif k == "metadata":
+            clean["metadata"] = _sanitize_metadata_value(v)
+        elif k in allowed:
+            clean[k] = v
+    return clean
+
+
+def _resolve_state_mutations(
+    events: list[EventOutline],
+    extracted_entities: dict[str, dict],
+    existing_nodes_by_id: dict[str, GraphNode],
+) -> list[NodeMutation]:
+    by_name: dict[str, tuple[str, NodeType]] = {}
+    for node_id, row in extracted_entities.items():
+        cname = str(row["properties"].get("canonical_name") or "").strip()
+        if cname:
+            by_name[cname.casefold()] = (node_id, row["node_type"])
+    for node in existing_nodes_by_id.values():
+        by_name[node.canonical_name.casefold()] = (node.node_id, node.node_type)
+    out: list[NodeMutation] = []
+    death_tokens = ("死亡", "死去", "斷氣", "喪命")
+    for ev in events:
+        desc = (ev.description or "").strip()
+        if not desc:
+            continue
+        if any(t in desc for t in death_tokens):
+            for name, (node_id, nt) in by_name.items():
+                if nt not in {NodeType.CHARACTER, NodeType.PERSONA}:
+                    continue
+                if name and name in desc.casefold():
+                    out.append(
+                        NodeMutation(
+                            action="UPDATE_NODE",
+                            node_id=node_id,
+                            node_type=nt,
+                            properties={"is_alive": False},
+                        )
+                    )
+    return out
 
 
 def _build_relation_mutation(
@@ -255,6 +368,8 @@ def _build_relation_mutation(
             "known_by": known_by,
             "holder": holder,
             "context_details": relation.context_details,
+            "tags": _sanitize_tags_value(relation.tags),
+            "metadata": _sanitize_metadata_value(relation.metadata),
         },
     )
 
@@ -314,6 +429,18 @@ def _is_valid_relation_direction(
         EdgeType.CAUSED: (
             {NodeType.EVENT},
             {NodeType.EVENT},
+        ),
+        EdgeType.ENFORCED_IN: (
+            {NodeType.RULE},
+            {NodeType.LOCATION, NodeType.EPOCH},
+        ),
+        EdgeType.RESTRICTS: (
+            {NodeType.RULE},
+            {NodeType.CHARACTER, NodeType.PERSONA, NodeType.ITEM, NodeType.CONCEPT},
+        ),
+        EdgeType.EXEMPT_FROM: (
+            {NodeType.RULE},
+            {NodeType.CHARACTER, NodeType.PERSONA},
         ),
     }
     allowed_types = direction_rules.get(relation_type)
@@ -420,6 +547,8 @@ def _build_location_transition_mutations(
                     "known_by": edge.known_by,
                     "holder": edge.holder,
                     "context_details": edge.context_details,
+                    "tags": list(edge.tags),
+                    "metadata": dict(edge.metadata),
                 },
             )
         )
@@ -431,6 +560,8 @@ def _register_active_location_edge(
     edge: EdgeMutation,
 ) -> None:
     edge_id = edge.edge_id or f"{edge.source_id}:{edge.relation_type}:{edge.target_id}"
+    raw_em = edge.attributes.get("metadata")
+    em = dict(raw_em) if isinstance(raw_em, dict) else {}
     active_location_edges[edge.source_id] = [
         GraphEdge(
             edge_id=edge_id,
@@ -445,6 +576,8 @@ def _register_active_location_edge(
             known_by=edge.attributes.get("known_by", []),
             holder=edge.attributes.get("holder", []),
             context_details=edge.attributes.get("context_details", ""),
+            tags=_sanitize_tags_value(edge.attributes.get("tags")),
+            metadata=_sanitize_metadata_value(em),
         )
     ]
 

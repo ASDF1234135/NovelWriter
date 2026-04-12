@@ -20,6 +20,7 @@ class AgentWorkflowState(TypedDict):
     bible_context: str
     graph_context: str
     vector_context: str
+    local_enforced_rules_context: NotRequired[str]
     previous_chapter_summary: str
     previous_chapter_tail_excerpt: NotRequired[str]
     recent_chapter_context: str
@@ -104,6 +105,16 @@ class AgentWorkflowState(TypedDict):
     resolution_cooldown_constraint: NotRequired[dict[str, Any]]
     ending_vibe_cooldown_constraint: NotRequired[dict[str, Any]]
     writing_note: NotRequired[list[str]]
+    author_chapter_plan: NotRequired[str]
+    chapter_outline: NotRequired[str]
+    chapter_hard_rules: NotRequired[str]
+    safe_chapter_rules: NotRequired[str]
+    alignment_log: NotRequired[str]
+    alignment_hitl_retry_count: NotRequired[int]
+    original_draft_narrative_script: NotRequired[str]
+    original_draft_must_include_beats: NotRequired[list[str]]
+    original_draft_ground_truth_events: NotRequired[list[dict[str, Any]]]
+    allowed_identity_reveals_this_chapter: NotRequired[list[str]]
 
 
 class SafeAuthorPayload(BaseModel):
@@ -126,6 +137,7 @@ class SafeAuthorPayload(BaseModel):
     previous_chapter_tail_excerpt: str = ""
     previous_attempt_draft: str = ""
     last_known_location: str = ""
+    local_enforced_rules_context: str = ""
     author_safe_continuity_notes: list[str] = Field(default_factory=list)
     recent_entity_names: list[str] = Field(default_factory=list)
     draft_feedback: list[dict[str, Any]] = Field(default_factory=list)
@@ -133,6 +145,7 @@ class SafeAuthorPayload(BaseModel):
     length_adjustment: LengthAdjustment = LengthAdjustment.NONE
     mandatory_new_entities: list[MandatoryNewEntity] = Field(default_factory=list)
     writing_note: list[str] = Field(default_factory=list)
+    safe_chapter_rules: str = ""
 
 
 class SafePlannerPayload(BaseModel):
@@ -149,6 +162,7 @@ class SafePlannerPayload(BaseModel):
     graph_context: str
     vector_context: str
     bible_context: str
+    local_enforced_rules_context: str = ""
     previous_chapter_summary: str = ""
     previous_chapter_tail_excerpt: str = ""
     recent_chapter_context: str = ""
@@ -173,6 +187,7 @@ class SafePlannerPayload(BaseModel):
     lore_mysteries_progression: list[dict[str, Any]] = Field(default_factory=list)
     ending_vibe_cooldown_constraint: dict[str, Any] = Field(default_factory=dict)
     writing_note: list[str] = Field(default_factory=list)
+    author_chapter_plan: str = ""
 
 
 class SafeSupervisorPayload(BaseModel):
@@ -216,6 +231,7 @@ class SafeSupervisorPayload(BaseModel):
     lore_mysteries_progression: list[dict[str, Any]] = Field(default_factory=list)
     resolution_cooldown_constraint: dict[str, Any] = Field(default_factory=dict)
     ending_vibe_cooldown_constraint: dict[str, Any] = Field(default_factory=dict)
+    allowed_identity_reveals_this_chapter: list[str] = Field(default_factory=list)
 
 
 class WorkflowBootstrapState(BaseModel):
@@ -234,6 +250,9 @@ def build_initial_state(
     plan_retry_limit: int = 3,
     draft_loop_retry_limit: int = 3,
     pov_character_id: str = "char_public_observer",
+    author_chapter_plan: str = "",
+    chapter_outline: str = "",
+    chapter_hard_rules: str = "",
 ) -> AgentWorkflowState:
     return AgentWorkflowState(
         story_id=story_id,
@@ -325,6 +344,16 @@ def build_initial_state(
         resolution_cooldown_constraint={},
         ending_vibe_cooldown_constraint={},
         writing_note=[],
+        author_chapter_plan=author_chapter_plan or "",
+        chapter_outline=chapter_outline or "",
+        chapter_hard_rules=chapter_hard_rules or "",
+        safe_chapter_rules="",
+        alignment_log="",
+        alignment_hitl_retry_count=0,
+        original_draft_narrative_script="",
+        original_draft_must_include_beats=[],
+        original_draft_ground_truth_events=[],
+        allowed_identity_reveals_this_chapter=[],
     )
 
 
@@ -364,6 +393,14 @@ def normalize_workflow_state(state: dict[str, Any]) -> dict[str, Any]:
         "resolution_cooldown_constraint": {},
         "ending_vibe_cooldown_constraint": {},
         "writing_note": [],
+        "author_chapter_plan": "",
+        "chapter_outline": "",
+        "chapter_hard_rules": "",
+        "safe_chapter_rules": "",
+        "alignment_log": "",
+        "alignment_hitl_retry_count": 0,
+        "allowed_identity_reveals_this_chapter": [],
+        "local_enforced_rules_context": "",
     }
     for key, val in defaults.items():
         if key not in state:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from app.domain.schema import DraftSupervisorOutput, LengthAdjustment, SuggestionType, ViolationType
 from app.services.llm import MockLLMClient
@@ -130,6 +131,28 @@ def run_draft_supervisor(state: dict, context: WorkflowContext) -> tuple[dict, d
         )
         return out.model_dump(mode="json"), payload.model_dump(mode="json")
 
+    jargon_fail = _jargon_pruning_violation(payload)
+    if jargon_fail:
+        out = DraftSupervisorOutput(
+            is_approved=False,
+            violation_type=[ViolationType.INCONSISTENCY],
+            suggestion_type=SuggestionType.REWRITE,
+            feedback_to_agent=jargon_fail,
+            length_adjustment=LengthAdjustment.NONE,
+        )
+        return out.model_dump(mode="json"), payload.model_dump(mode="json")
+
+    identity_fail = _identity_reveal_violation(state, payload)
+    if identity_fail:
+        out = DraftSupervisorOutput(
+            is_approved=False,
+            violation_type=[ViolationType.POV_LEAK],
+            suggestion_type=SuggestionType.REWRITE,
+            feedback_to_agent=identity_fail,
+            length_adjustment=LengthAdjustment.NONE,
+        )
+        return out.model_dump(mode="json"), payload.model_dump(mode="json")
+
     if not isinstance(context.llm_client, MockLLMClient):
         profile = get_profile("draft_supervisor")
         prompt = _build_draft_supervisor_prompt(payload)
@@ -205,10 +228,34 @@ def _build_draft_supervisor_prompt(payload) -> str:
         "只有當前草稿讓未來錨點不可達時，才可使用 ANCHOR_DIVERGENCE。\n"
         "若草稿把秘密行動、私下發現或 POV 不可能知道的資訊寫成公開事實，可使用 POV_LEAK。\n"
         "若草稿涉及移動，必須能判斷角色離開了哪裡、抵達或停留在哪裡；若章末位置模糊到無法建立穩定空間狀態，也可視為問題。\n"
+        "若草稿出現過量生硬術語、遊戲化專名或『引號+標籤化命名』，而且可改以自然感官敘述呈現，應視為 INCONSISTENCY 並要求重寫。\n"
         "若 chapter_end_location_hint、ending_boundary_rule 或 forbidden_next_scene_actions 已定義，"
         "你必須把它們視為本章硬邊界；一旦草稿寫到邊界之後的進屋、會面、轉場、抵達新據點或提前揭曉，都應視為 INCONSISTENCY。\n"
         "請輸出單一 JSON 物件。\n\n"
         f"{payload.model_dump_json(indent=2)}"
+    )
+
+
+def _jargon_pruning_violation(payload) -> str:
+    draft = (payload.current_draft or "").strip()
+    if not draft:
+        return ""
+    quoted_terms = re.findall(r"「([^」]{2,30})」", draft)
+    suspicious_quoted = [
+        t
+        for t in quoted_terms
+        if ("：" in t)
+        or any(k in t for k in ("節點", "邏輯", "協同", "模組", "矩陣", "協議", "模式", "演算", "緩衝"))
+    ]
+    jargon_tokens = ("節點", "協同邏輯", "緩衝節點", "戰術模組", "策略模組", "演算", "協議棧")
+    jargon_hits = sum(draft.count(tok) for tok in jargon_tokens)
+    if len(suspicious_quoted) < 2 and jargon_hits < 3:
+        return ""
+    samples = "、".join(suspicious_quoted[:3]) if suspicious_quoted else "（術語密度偏高）"
+    return (
+        "草稿存在免洗專有名詞/標籤化命名過量，閱讀負擔過高。"
+        f"偵測樣本：{samples}。"
+        "請改寫為自然敘述：保留事件事實與因果，但把做作術語拆成可觀察的動作、感官與結果。"
     )
 
 
@@ -275,3 +322,52 @@ def _resolve_length_adjustment(normalized_count: int, lower: int, upper: int) ->
     if normalized_count > upper:
         return LengthAdjustment.COMPRESS
     return LengthAdjustment.NONE
+
+
+def _identity_reveal_violation(state: dict, payload) -> str:
+    draft = str(payload.current_draft or "")
+    if not draft.strip():
+        return ""
+    allowed = {
+        str(x).strip().casefold()
+        for x in (state.get("allowed_identity_reveals_this_chapter") or [])
+        if str(x).strip()
+    }
+    violations: list[str] = []
+    for rule in (state.get("forbidden_reveals") or []):
+        if not isinstance(rule, str) or not rule.strip():
+            continue
+        if not _looks_like_identity_rule(rule):
+            continue
+        for token in _extract_identity_tokens(rule):
+            if token.casefold() in allowed:
+                continue
+            if re.search(re.escape(token), draft, flags=re.IGNORECASE):
+                violations.append(token)
+    if not violations:
+        return ""
+    terms = "、".join(sorted(set(violations))[:5])
+    return (
+        "檢測到草稿出現本章尚未允許揭露的身分資訊："
+        f"{terms}。請改寫為讀者可見層級，不可直接揭露真身分或對應關係。"
+    )
+
+
+def _looks_like_identity_rule(text: str) -> bool:
+    markers = ("身分", "身份", "真名", "真相", "其實是", "真正是", "revea")
+    return any(m in text for m in markers)
+
+
+def _extract_identity_tokens(text: str) -> list[str]:
+    candidates: set[str] = set()
+    for pat in (r"「([^」]{1,30})」", r"'([^']{1,30})'", r"\"([^\"]{1,30})\""):
+        for m in re.findall(pat, text):
+            t = m.strip()
+            if t:
+                candidates.add(t)
+    for pat in (r"(?:其實是|真正是|就是)([A-Za-z\u4e00-\u9fff]{2,20})",):
+        for m in re.findall(pat, text):
+            t = m.strip()
+            if t:
+                candidates.add(t)
+    return sorted(candidates)

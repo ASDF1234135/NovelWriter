@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 import logging
 import re
+import sqlite3
 from uuid import uuid4
 
 from app.domain.schema import (
@@ -18,6 +19,7 @@ from app.domain.schema import (
     HitlOutlineEditRequest,
     HitlReason,
     HitlStateInjectionRequest,
+    MacroPlanPut,
     NodeMutation,
     NodeType,
     StateAnchor,
@@ -31,6 +33,7 @@ from app.domain.schema import (
 )
 from app.domain.state import apply_length_bounds_to_state, build_initial_state, normalize_workflow_state
 from app.services.workflow.chapter_pipeline import extraction_substantiated_event_ids, validate_b_story_resolution
+from app.services.workflow.constants import AUTHOR_CHAPTER_PLAN_MAX_CHARS, CHAPTER_HARD_RULES_MAX_CHARS
 from app.repositories.sqlite.story_repository import StoryRepository
 from app.repositories.sqlite.workflow_repository import WorkflowRepository
 from app.services.anchor_service import AnchorService
@@ -45,11 +48,13 @@ _ALLOWED_HITL_RESUME_NODES = frozenset(
     {
         "director",
         "planner",
+        "logic_alignment",
         "author",
         "draft_supervisor",
         "reader",
         "graph_rag",
         "extraction_gate",
+        "copyeditor",
         "b_story_resolve",
         "state_updater",
     }
@@ -103,7 +108,47 @@ class MacroCompileAlreadyRunningError(RuntimeError):
     """Raised when macro compile is requested while a compile is already in progress."""
 
 
+class MacroPlanValidationError(ValueError):
+    """Raised when manual macro plan payload fails structural checks."""
+
+
 logger = logging.getLogger(__name__)
+
+_NAMING_DISCIPLINE_WRITING_NOTES: tuple[str, ...] = (
+    "命名節制：新名詞只在必要時使用；若不影響後文辨識與決策，優先不用命名。",
+    "去標籤化：遇到陌生現象或物件，先用可觀察的感官與行為結果描述，不要先貼術語標籤。",
+)
+
+
+def _validate_macro_plan_put(body: MacroPlanPut) -> None:
+    vol_by_id = {v.volume_id: v for v in body.volumes}
+    if len(vol_by_id) != len(body.volumes):
+        raise MacroPlanValidationError("Duplicate volume_id in volumes")
+    for v in body.volumes:
+        if v.chapter_end < v.chapter_start:
+            raise MacroPlanValidationError(
+                f"Volume {v.volume_id}: chapter_end must be >= chapter_start"
+            )
+        if v.chapter_start < 1:
+            raise MacroPlanValidationError(f"Volume {v.volume_id}: chapter_start must be >= 1")
+    seen_anchor: set[str] = set()
+    for a in body.anchors:
+        if a.anchor_id in seen_anchor:
+            raise MacroPlanValidationError(f"Duplicate anchor_id: {a.anchor_id}")
+        seen_anchor.add(a.anchor_id)
+        vol = vol_by_id.get(a.volume_id)
+        if not vol:
+            raise MacroPlanValidationError(f"Anchor {a.anchor_id}: unknown volume_id {a.volume_id}")
+        if a.chapter_target < vol.chapter_start or a.chapter_target > vol.chapter_end:
+            raise MacroPlanValidationError(
+                f"Anchor {a.anchor_id}: chapter_target {a.chapter_target} "
+                f"outside volume range [{vol.chapter_start}, {vol.chapter_end}]"
+            )
+    prot = (body.protagonist_character_id or "").strip()
+    if prot:
+        cast_ids = {c.node_id for c in body.cast}
+        if prot not in cast_ids:
+            raise MacroPlanValidationError("protagonist_character_id must match a cast member node_id")
 
 
 def _cast_graph_description(member: StoryCastMemberStored) -> str:
@@ -130,6 +175,13 @@ def _cast_graph_description(member: StoryCastMemberStored) -> str:
 
 def _chapter_distance_to_anchor(chapter_id: int, unachieved_anchors: list[dict]) -> int | None:
     if not unachieved_anchors:
+        return None
+    ct = unachieved_anchors[0].get("chapter_target")
+    if ct is None:
+        return None
+    try:
+        return int(ct) - int(chapter_id)
+    except (TypeError, ValueError):
         return None
 
 
@@ -172,24 +224,20 @@ def _build_ending_vibe_cooldown_constraint(recent_summaries: list[dict]) -> dict
 
 
 def _normalize_writing_note(raw: object) -> list[str]:
-    if not isinstance(raw, list):
-        return []
+    src = raw if isinstance(raw, list) else []
     out: list[str] = []
-    for item in raw:
+    for item in src:
         if not isinstance(item, str):
             continue
         text = item.strip()
         if not text:
             continue
-        out.append(text)
+        if text not in out:
+            out.append(text)
+    for text in _NAMING_DISCIPLINE_WRITING_NOTES:
+        if text not in out:
+            out.append(text)
     return out[:24]
-    ct = unachieved_anchors[0].get("chapter_target")
-    if ct is None:
-        return None
-    try:
-        return int(ct) - int(chapter_id)
-    except (TypeError, ValueError):
-        return None
 
 
 def _trim_to_sentence_boundary(text: str, max_chars: int) -> str:
@@ -425,6 +473,58 @@ class WorkflowService:
             "macro_compile_error": str(story.get("macro_compile_error") or ""),
         }
 
+    def put_macro_plan(self, story_id: str, body: MacroPlanPut) -> dict:
+        if not self.story_repository.get_story(story_id):
+            raise KeyError(f"Story not found: {story_id}")
+        if self.workflow_repository.count_workflow_runs_for_story(story_id) > 0:
+            raise StoryConfigurationLockedError(
+                "故事已有章節工作流程紀錄，無法再修改宏觀規劃；請在未執行 run_chapter 前調整。"
+            )
+        _validate_macro_plan_put(body)
+        try:
+            self.story_repository.update_story_bible_json(story_id, dict(body.bible or {}))
+            self.story_repository.store_volumes(story_id, list(body.volumes))
+            anchors = [
+                StateAnchor(
+                    anchor_id=a.anchor_id,
+                    story_id=story_id,
+                    volume_id=a.volume_id,
+                    title=a.title,
+                    description=a.description,
+                    target_state=dict(a.target_state or {}),
+                    chapter_target=a.chapter_target,
+                    priority=a.priority,
+                )
+                for a in body.anchors
+            ]
+            self.story_repository.store_anchors(story_id, anchors)
+            protagonist_id = (body.protagonist_character_id or "").strip()
+            if not protagonist_id:
+                protagonist_id = next((c.node_id for c in body.cast if c.role == "protagonist"), "")
+            self.story_repository.update_story_cast(story_id, list(body.cast), protagonist_id)
+            self.graph_store.clear_macro_cast_characters(story_id)
+            cast_mutations = [
+                NodeMutation(
+                    action="CREATE_NODE",
+                    node_id=member.node_id,
+                    node_type=NodeType.CHARACTER,
+                    properties={
+                        "canonical_name": member.canonical_name,
+                        "description": _cast_graph_description(member),
+                        "aliases": member.aliases,
+                        "is_alive": True,
+                    },
+                )
+                for member in body.cast
+            ]
+            self.graph_store.apply_mutations(story_id, cast_mutations)
+        except sqlite3.IntegrityError as exc:
+            raise MacroPlanValidationError(
+                "Macro plan contains IDs that violate DB uniqueness constraints "
+                "(likely duplicated volume_id/anchor_id across stories)."
+            ) from exc
+        return self.get_macro_snapshot(story_id)
+
     def begin_macro_compile_async(self, story_id: str) -> None:
         """Acquire RUNNING lock or raise KeyError / MacroCompileAlreadyRunningError."""
         if not self.story_repository.get_story(story_id):
@@ -446,13 +546,34 @@ class WorkflowService:
             return
         self.story_repository.finish_macro_compile(story_id, success=True)
 
-    def run_chapter(self, story_id: str, chapter_id: int) -> dict:
+    def run_chapter(
+        self,
+        story_id: str,
+        chapter_id: int,
+        *,
+        author_chapter_plan: str = "",
+        chapter_outline: str = "",
+        chapter_hard_rules: str = "",
+    ) -> dict:
         """Blocking: create run and execute graph to completion (tests / scripts)."""
-        wf = self.start_run_chapter(story_id, chapter_id)
+        wf = self.start_run_chapter(
+            story_id,
+            chapter_id,
+            author_chapter_plan=author_chapter_plan,
+            chapter_outline=chapter_outline,
+            chapter_hard_rules=chapter_hard_rules,
+        )
         self.execute_stored_run(wf["run"]["run_id"])
         return self.get_workflow(wf["run"]["run_id"])
 
-    def start_run_chapter(self, story_id: str, chapter_id: int) -> dict:
+    def start_run_chapter(
+        self,
+        story_id: str,
+        chapter_id: int,
+        author_chapter_plan: str = "",
+        chapter_outline: str = "",
+        chapter_hard_rules: str = "",
+    ) -> dict:
         """Create workflow run and persist initial state only (graph not executed yet)."""
         story = self.story_repository.get_story(story_id)
         if not story:
@@ -470,6 +591,11 @@ class WorkflowService:
         ]
         pov_raw = (story.get("protagonist_character_id") or "").strip()
         pov_character_id = pov_raw if pov_raw else "char_public_observer"
+        # Backward compatible:
+        # - Prefer chapter_outline, fallback to legacy author_chapter_plan.
+        outline = (chapter_outline or "").strip() or (author_chapter_plan or "").strip()
+        outline = outline[:AUTHOR_CHAPTER_PLAN_MAX_CHARS]
+        hard_rules = (chapter_hard_rules or "").strip()[:CHAPTER_HARD_RULES_MAX_CHARS]
         initial_state = build_initial_state(
             story_id=story_id,
             chapter_id=chapter_id,
@@ -478,6 +604,9 @@ class WorkflowService:
             plan_retry_limit=int(story.get("plan_retry_limit", 3)),
             draft_loop_retry_limit=int(story.get("draft_loop_retry_limit", 3)),
             pov_character_id=pov_character_id,
+            author_chapter_plan=outline,
+            chapter_outline=outline,
+            chapter_hard_rules=hard_rules,
         )
 
         # Tail-End Context Injection: provide the previous chapter trailing excerpt to this run.
@@ -691,14 +820,31 @@ class WorkflowService:
     def apply_hitl_state_injection(self, run_id: str, request: HitlStateInjectionRequest) -> None:
         state = normalize_workflow_state(self.workflow_repository.get_run_state(run_id))
         _ensure_hitl_waiting(state)
-        resume = state.get("resume_from", "author")
-        self.graph_store.apply_mutations(state["story_id"], request.mutations)
+        prev_hitl_reason = str(state.get("hitl_reason", "") or "")
+        resume = (request.resume_from or state.get("resume_from", "author") or "author").strip()
+        if resume not in _ALLOWED_HITL_RESUME_NODES:
+            resume = str(state.get("resume_from", "author") or "author")
+        if request.mutations:
+            self.graph_store.apply_mutations(state["story_id"], request.mutations)
+        patched_rules = (request.chapter_hard_rules or "").strip()
+        if patched_rules:
+            state["chapter_hard_rules"] = patched_rules[:8000]
+        elif prev_hitl_reason == HitlReason.ALIGNMENT_RULES_REQUIRED:
+            # Explicitly allow empty rules fallback for alignment HITL, but leave a warning.
+            warnings = list(state.get("plan_warnings") or [])
+            msg = "Alignment HITL resumed with empty chapter_hard_rules; system will force-pass if retry budget is exhausted."
+            if msg not in warnings:
+                warnings.append(msg)
+            state["plan_warnings"] = warnings
         state["requires_hitl"] = False
         state["hitl_reason"] = ""
         state["hitl_decision_mode"] = "NONE"
         state["pending_hitl_options"] = []
         state["workflow_status"] = WorkflowStatus.RUNNING.value
-        state["resume_from"] = resume
+        if prev_hitl_reason == HitlReason.ALIGNMENT_RULES_REQUIRED:
+            state["resume_from"] = "logic_alignment"
+        else:
+            state["resume_from"] = resume
         self.workflow_repository.append_hitl_action(run_id, "state_injection", request.model_dump(mode="json"))
         self.workflow_repository.update_run(run_id, state)
 

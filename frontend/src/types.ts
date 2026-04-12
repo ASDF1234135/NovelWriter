@@ -17,6 +17,14 @@ export type StoryInput = {
   draft_loop_retry_limit: number;
 };
 
+export type ImportMergeMode = "replace" | "merge";
+
+export type StorySettingsExportPayload = {
+  kind: "story_settings";
+  version: 1;
+  story: StoryInput;
+};
+
 export type StoryPatch = {
   title?: string;
   premise?: string;
@@ -55,9 +63,42 @@ export type CastMember = {
   aliases?: string[];
   age?: string;
   motivation?: string;
+  core_motivation?: string;
   core_value?: string;
   speech_style?: string;
   fatal_flaw?: string;
+  quirks_and_habits?: string;
+};
+
+/** PUT /api/stories/:id/macro-plan — full replace (manual edit). */
+export type MacroPlanPutBody = {
+  bible: Record<string, unknown>;
+  volumes: VolumePlan[];
+  anchors: Array<{
+    anchor_id: string;
+    volume_id: string;
+    title?: string;
+    description?: string;
+    target_state?: Record<string, unknown>;
+    chapter_target: number;
+    priority?: number;
+  }>;
+  cast: CastMember[];
+  protagonist_character_id?: string | null;
+};
+
+export type MacroCompileExportPayload = {
+  kind: "macro_compile";
+  version: 1;
+  macro_plan: MacroPlanPutBody;
+};
+
+/** Single-file export: story fields + optional macro plan (legacy kinds remain importable). */
+export type StoryProjectBundlePayload = {
+  kind: "story_project_bundle";
+  version: 1;
+  story?: StoryInput;
+  macro_plan?: MacroPlanPutBody;
 };
 
 export type MacroCompileData = {
@@ -128,9 +169,64 @@ export type WorkflowPayload = {
   steps: WorkflowStep[];
 };
 
+export type GraphNodeType =
+  | "CHARACTER"
+  | "PERSONA"
+  | "EPOCH"
+  | "LOCATION"
+  | "ITEM"
+  | "EVENT"
+  | "CONCEPT"
+  | "RULE"
+  | string;
+
+export type GraphNode = {
+  node_id: string;
+  node_type: GraphNodeType;
+  canonical_name?: string;
+  aliases?: string[];
+  /** Free-form labels; node_type stays an enum on the backend. */
+  tags?: string[];
+  /** JSON-compatible key-value extras from extraction / graph store. */
+  metadata?: Record<string, unknown>;
+  description?: string;
+  /** LOCATION: ambient state text from backend defaults. */
+  environmental_condition?: string;
+  title?: string;
+  order_index?: number;
+  is_alive?: boolean;
+  is_accessible?: boolean;
+  item_status?: string;
+  /** ITEM: single-instance lore flag. */
+  is_unique?: boolean;
+  /** RULE: violation cost text from graph. */
+  penalty?: string | null;
+  /** RULE: false when rule no longer applies. */
+  is_active?: boolean;
+  [key: string]: unknown;
+};
+
+export type GraphEdge = {
+  edge_id?: string;
+  source_id: string;
+  target_id: string;
+  relation_type?: string;
+  valid_epoch?: string;
+  start_event_id?: string;
+  end_event_id?: string;
+  is_truth?: boolean;
+  is_public?: boolean;
+  known_by?: string[];
+  holder?: string[];
+  context_details?: string;
+  tags?: string[];
+  metadata?: Record<string, unknown>;
+  [key: string]: unknown;
+};
+
 export type GraphSnapshot = {
-  nodes: Array<Record<string, unknown>>;
-  edges: Array<Record<string, unknown>>;
+  nodes: GraphNode[];
+  edges: GraphEdge[];
 };
 
 export type ChapterSummary = {

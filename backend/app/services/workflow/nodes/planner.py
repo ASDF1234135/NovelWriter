@@ -17,6 +17,7 @@ from app.services.llm import MockLLMClient
 from app.services.workflow.chapter_words import clamp_chapter_word_count
 from app.services.workflow.context import WorkflowContext
 from app.services.workflow.constants import (
+    LOCAL_ENFORCED_RULES_CONTEXT_CAP,
     PLANNER_BIBLE_CONTEXT_CAP,
     PLANNER_CONTINUITY_NOTE_MAX_CHARS,
     PLANNER_CONTINUITY_NOTE_MAX_ITEMS,
@@ -90,7 +91,7 @@ def run_planner(state: dict, context: WorkflowContext) -> tuple[dict, dict, int,
             settings.chapter_word_min,
             settings.chapter_word_max,
         )
-        nodes = list(structured_output.proposed_new_nodes)[:3]
+        nodes = list(structured_output.proposed_new_nodes)[:2]
         seeds = list(structured_output.new_active_b_stories)[:2]
         out = structured_output.model_dump(mode="json")
         out["proposed_new_nodes"] = [n.model_dump(mode="json") if isinstance(n, ProposedGraphNode) else n for n in nodes]
@@ -113,7 +114,7 @@ def run_planner(state: dict, context: WorkflowContext) -> tuple[dict, dict, int,
         settings.chapter_word_max,
     )
     mock_nodes: list[ProposedGraphNode] = []
-    for raw in (payload.new_elements_to_introduce or [])[:3]:
+    for raw in (payload.new_elements_to_introduce or [])[:2]:
         need, reason, label = "", "", ""
         if isinstance(raw, dict):
             need = str(raw.get("need") or "").strip()
@@ -210,7 +211,7 @@ def run_planner(state: dict, context: WorkflowContext) -> tuple[dict, dict, int,
         new_active_b_stories=mock_b_stories,
     )
     dumped = output.model_dump(mode="json")
-    dumped["proposed_new_nodes"] = [n.model_dump(mode="json") for n in mock_nodes[:3]]
+    dumped["proposed_new_nodes"] = [n.model_dump(mode="json") for n in mock_nodes[:2]]
     dumped["new_active_b_stories"] = [s.model_dump(mode="json") for s in mock_b_stories[:2]]
     return dumped, payload.model_dump(mode="json"), llm_result.token_usage, llm_result.latency_ms
 
@@ -225,8 +226,24 @@ def _build_planner_prompt(payload: SafePlannerPayload) -> str:
         if payload.previous_chapter_tail_excerpt
         else ""
     )
+    ap = (payload.author_chapter_plan or "").strip()
+    author_plan_block = ""
+    if ap:
+        author_plan_block = (
+            "## 作者本章寫作計畫（可選參考；非強制；與錨點或硬性約束衝突時以後者為準）\n"
+            f"{_clip(ap, 1600)}\n\n"
+        )
+    loc_rules = (payload.local_enforced_rules_context or "").strip()
+    local_rules_block = ""
+    if loc_rules:
+        local_rules_block = (
+            "## 當前場域絕對法則（硬性；優先於一般世界觀描述）\n"
+            f"{_clip(loc_rules, LOCAL_ENFORCED_RULES_CONTEXT_CAP)}\n\n"
+        )
     return (
         "請依照以下安全載荷產出底層真實大綱與表層敘事劇本。\n\n"
+        f"{author_plan_block}"
+        f"{local_rules_block}"
         "## 字數與本章內容（必做）\n"
         f"- default_chapter_words: {payload.default_chapter_words}（僅作參考起點，**非**卷字數攤分或硬性配額）\n"
         f"- 允許的 target_word_count 硬邊界：{payload.chapter_word_min} ~ {payload.chapter_word_max}（後端會截斷越界值）\n"
@@ -277,9 +294,10 @@ def _build_planner_prompt(payload: SafePlannerPayload) -> str:
         "- 若本章設計包含『記憶獲取／記憶閃回』，必須從 lore_mysteries_progression 的 pending_stages 取下一階段，"
         "並把該內容寫入 new_elements_to_introduce 對應的 proposed_new_nodes / must_include_beats，禁止重播舊片段。\n"
         "- 若 ending_vibe_cooldown_constraint.active=true，章末規劃必須遵守 required_vibe，不得落入 forbidden_vibes。\n"
+        "- 本章新重要實體配額：允許 0 個；若需引入新重要實體，最多 2 個，且必須有劇情必要性。其餘場景優先重用既有角色、地點、道具。\n"
         "- 對 new_elements_to_introduce 每一項，在 proposed_new_nodes 輸出對應條目（node_id、node_type、role、canonical_name、writing_brief）；"
         "若 node_type 為 CHARACTER，必須同時輸出 character_profile（core_motivation、core_value、fatal_flaw、speech_style、quirks_and_habits、short_bio、age），"
-        "欄位語意需與宏觀編譯 cast 一致。最多 3 條，並在 ground_truth_events 安排與其互動。\n"
+        "欄位語意需與宏觀編譯 cast 一致。最多 2 條，並在 ground_truth_events 安排與其互動。\n"
         "- 若 request_new_b_story 非空：你必須以 new_active_b_stories 具體化該需求（type 對齊、desc 具體），或解釋為何改以既有 active_b_stories 承接。\n"
         "- new_active_b_stories：若本章**新開一條**獨立副線（需穩定 id），最多 2 條，每條含 id、desc、type、**resolution_condition**（客觀核銷標準）；"
         "type 為 BStoryType：FETCH_QUEST / RELATIONSHIP_DRAMA / ENVIRONMENTAL_HAZARD / LORE_DISCOVERY / INTERNAL_CONFLICT。"
@@ -291,6 +309,9 @@ def _build_planner_prompt(payload: SafePlannerPayload) -> str:
         "- 這一章必須帶來新的因果推進，不能只是重述上一章。\n"
         "- 不得把上一章已完成的交易、發現、對話或衝突，重新包裝成本章的新事件。\n"
         "- ground_truth_events 每一條都必須代表本章新增的狀態變化，而不是前情摘要重寫。\n"
+        "- 事件粒度規則（硬性）：連續戰鬥或連續對話預設聚合為單一宏觀 EVENT；"
+        "只有在目標改變、主導方改變、場景位置改變、或結果相位改變時才拆成多個事件。\n"
+        "- 禁止把一段連續動作拆成多個微事件（例如連續閃避、出拳、回擊、翻滾）；請改寫成單一事件摘要。\n"
         "- narrative_script 必須清楚區分：哪些是承接上一章，哪些是本章新增的行動、發現、衝突與章末變化。\n"
         "- 你必須輸出 chapter_start_location；若沒有明確切景，應默認延續 last_known_location。\n"
         "- 若 chapter_start_location 與 last_known_location 不同，ground_truth_events 與 narrative_script 必須先規劃移動、撤離、趕路、換場或其他可抽取的過渡。\n"

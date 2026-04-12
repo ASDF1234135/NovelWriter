@@ -3,6 +3,7 @@ import type {
   ChapterSummary,
   GraphSnapshot,
   MacroCompileData,
+  MacroPlanPutBody,
   MacroSnapshotResponse,
   StoryDetailResponse,
   StoryInput,
@@ -77,6 +78,15 @@ export async function fetchMacroSnapshot(storyId: string): Promise<MacroSnapshot
   return parseJson(response);
 }
 
+export async function putMacroPlan(storyId: string, body: MacroPlanPutBody): Promise<MacroSnapshotResponse> {
+  const response = await fetch(`${API_BASE}/stories/${encodeURIComponent(storyId)}/macro-plan`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return parseJson(response);
+}
+
 const MACRO_POLL_MS = 800;
 const MACRO_TIMEOUT_MS = 30 * 60 * 1000;
 
@@ -113,9 +123,23 @@ export async function macroCompile(storyId: string): Promise<MacroCompileData> {
   throw new Error("Macro compile timed out waiting for completion");
 }
 
-export async function runChapter(storyId: string, chapterId: number): Promise<WorkflowPayload> {
+export async function runChapter(
+  storyId: string,
+  chapterId: number,
+  options?: { chapterOutline?: string; chapterHardRules?: string; authorChapterPlan?: string },
+): Promise<WorkflowPayload> {
+  const chapterOutline = (options?.chapterOutline ?? options?.authorChapterPlan ?? "").trim();
+  const chapterHardRules = (options?.chapterHardRules ?? "").trim();
   const response = await fetch(`${API_BASE}/stories/${storyId}/chapters/${chapterId}/run`, {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      // Backward-compatible: server still accepts author_chapter_plan.
+      author_chapter_plan: chapterOutline,
+      // New dual-track inputs.
+      chapter_outline: chapterOutline,
+      chapter_hard_rules: chapterHardRules,
+    }),
   });
   return parseJson(response);
 }
@@ -148,7 +172,7 @@ export async function sendOutlineEdit(
 
 export async function sendStateInjection(
   runId: string,
-  payload: { mutations: Array<Record<string, unknown>>; reason?: string },
+  payload: { mutations: Array<Record<string, unknown>>; chapter_hard_rules?: string; resume_from?: string; reason?: string },
 ): Promise<WorkflowPayload> {
   const response = await fetch(`${API_BASE}/workflows/${runId}/hitl/state-injection`, {
     method: "POST",

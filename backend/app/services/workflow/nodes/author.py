@@ -4,6 +4,7 @@ import json
 
 from app.domain.schema import AuthorExtractionHintsOutput, AuthorExtractionSurfaceEntry, AuthorOutput
 from app.services.llm import MockLLMClient
+from app.services.workflow.constants import LOCAL_ENFORCED_RULES_CONTEXT_CAP
 from app.services.workflow.context import WorkflowContext
 from app.services.workflow.masking import build_author_payload
 from app.services.workflow.profiles import get_profile
@@ -44,6 +45,16 @@ def _build_extraction_hints_prompt(chapter_content: str, state: dict, payload) -
         "excerpt_was_truncated": len(chapter_content) > len(excerpt),
     }
     return json.dumps(instructions, ensure_ascii=False)
+
+
+def _format_local_enforced_rules_for_author(payload) -> str:
+    raw = str(getattr(payload, "local_enforced_rules_context", "") or "").strip()
+    if not raw:
+        return ""
+    clipped = raw[:LOCAL_ENFORCED_RULES_CONTEXT_CAP]
+    if len(raw) > LOCAL_ENFORCED_RULES_CONTEXT_CAP:
+        clipped += "…"
+    return f"## 當前場域絕對法則（硬性；優先於表層劇本中與之衝突的暗示）\n{clipped}\n"
 
 
 def _format_author_safe_continuity(notes: list[str]) -> str:
@@ -227,6 +238,18 @@ def _build_author_prompt(payload) -> str:
 {_format_writing_note(payload)}
 上述規定為本章硬性寫作約束；若與一般風格建議衝突，優先遵守 writing_note。
 
+## ⚠️ 本章絕對法則（硬性；視為物理定律）
+{str(getattr(payload, "safe_chapter_rules", "") or "").strip() or "（無硬性規則）"}
+你在描寫角色行動與系統／遊戲過程時，絕對不可違背上述法則。
+
+{_format_local_enforced_rules_for_author(payload)}
+
+## 命名節制鐵律（Show, Don't Label）
+1. 非必要不命名：除非該實體會在後文反覆使用、影響決策，或是本章核心辨識點，否則優先不用新專有名詞。
+2. 允許必要命名，但要節制：若真的需要命名，同章避免連續新增多個平行新名詞；名稱要簡潔，避免「引號+副標+冒號」式包裝。
+3. 陌生事物先描寫再命名：優先寫可觀察的光線、聲音、觸感、動作結果，不要先貼標籤再補解釋。
+4. 若非本章必選創世實體，原則上不要新創做作術語（例如招式代號、系統術語、地點代號）；必要時請用自然語句表達其效果。
+
 主筆任務：
 {payload.author_goal}
 
@@ -325,6 +348,8 @@ def _build_author_prompt(payload) -> str:
 15. 若 feedback 指的是局部問題，例如結尾越界、位置不一致、缺少某個 beat，請只修正相關段落，不要把整章前半全部推翻重寫。
 16. 若 `length_adjustment=COMPRESS` 或內容偏長，優先刪除重複檢查、重複等待、連續空轉心理描寫與重複氛圍句，但不得刪掉 `must_include_beats`、`ending_state_shift` 與章末位置。
 17. 嚴格遵守「前情提要」內「與上一章正文銜接」四條：不得逐字或近抄「上一章摘要」「上一章尾端節錄」；本章開頭必須是新的推進句，不是前章結尾的複製。
+18. 遇到陌生機制、物件或區域時，先寫角色可感知到的現象與影響，再決定是否需要命名；禁止用術語替代描寫。
+19. 非本章必選創世實體，若無劇情必要不得任意發明帶引號或冒號格式的專屬名稱；必要命名可保留，但同章須控制密度。
 """.strip()
 
 

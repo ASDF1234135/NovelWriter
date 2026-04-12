@@ -5,11 +5,12 @@ import json
 from urllib.parse import quote
 from typing import AsyncIterator
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 from app.dependencies import get_graph_store, get_story_repository, get_workflow_service, get_workflow_repository
 from app.domain.schema import (
+    ChapterRunRequest,
     GraphQueryRequest,
     HitlAnchorDelayRequest,
     HitlBStoryJudgementRequest,
@@ -21,6 +22,7 @@ from app.domain.schema import (
     HitlExtractionRemapRequest,
     HitlOutlineEditRequest,
     HitlStateInjectionRequest,
+    MacroPlanPut,
     StoryInput,
     StoryPatch,
 )
@@ -30,6 +32,7 @@ from app.services.workflow.service import (
     ChapterAlreadyCompletedError,
     HitlNotWaitingError,
     MacroCompileAlreadyRunningError,
+    MacroPlanValidationError,
     StoryConfigurationLockedError,
     WorkflowService,
 )
@@ -133,6 +136,22 @@ def macro_snapshot(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.put("/stories/{story_id}/macro-plan")
+def put_macro_plan(
+    story_id: str,
+    body: MacroPlanPut,
+    workflow_service: WorkflowService = Depends(get_workflow_service),
+) -> dict:
+    try:
+        return workflow_service.put_macro_plan(story_id, body)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except StoryConfigurationLockedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except MacroPlanValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/stories/{story_id}/macro-compile")
 def macro_compile(
     story_id: str,
@@ -158,9 +177,16 @@ def run_chapter(
     chapter_id: int,
     background_tasks: BackgroundTasks,
     workflow_service: WorkflowService = Depends(get_workflow_service),
+    run_body: ChapterRunRequest = Body(default_factory=ChapterRunRequest),
 ) -> JSONResponse:
     try:
-        payload = workflow_service.start_run_chapter(story_id, chapter_id)
+        payload = workflow_service.start_run_chapter(
+            story_id,
+            chapter_id,
+            author_chapter_plan=run_body.author_chapter_plan,
+            chapter_outline=run_body.chapter_outline,
+            chapter_hard_rules=run_body.chapter_hard_rules,
+        )
         run_id = payload["run"]["run_id"]
         background_tasks.add_task(workflow_service.execute_stored_run, run_id)
         return JSONResponse(status_code=202, content=payload)

@@ -199,6 +199,8 @@ def test_planner_prompt_includes_story_premise_volume_summary_and_anchor_descrip
     assert "若上方已提供 previous_attempt_ground_truth_events 或 previous_attempt_narrative_script" in prompt
     assert "優先保留已經合理的事件鏈與章節方向" in prompt
     assert "ground_truth_events 每一條都必須代表本章新增的狀態變化" in prompt
+    assert "事件粒度規則（硬性）" in prompt
+    assert "連續戰鬥或連續對話預設聚合為單一宏觀 EVENT" in prompt
     assert "不得把上一章已完成的交易、發現、對話或衝突" in prompt
     assert "author_goal" in prompt
     assert "must_include_beats" in prompt
@@ -218,6 +220,8 @@ def test_planner_prompt_includes_story_premise_volume_summary_and_anchor_descrip
     assert "lore_mysteries_progression" in prompt
     assert "ending_vibe_cooldown_constraint" in prompt
     assert "writing_note_rules" in prompt
+    assert "本章新重要實體配額：允許 0 個" in prompt
+    assert "最多 2 條" in prompt
 
 
 def test_planner_prompt_includes_previous_chapter_tail_excerpt() -> None:

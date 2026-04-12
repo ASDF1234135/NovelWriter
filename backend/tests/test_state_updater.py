@@ -1,6 +1,16 @@
 import pytest
 
-from app.domain.schema import EdgeMutation, EdgeType, EventOutline, ExtractedRelation, GraphQueryRequest, GraphSnapshot, NodeMutation, NodeType
+from app.domain.schema import (
+    EdgeMutation,
+    EdgeType,
+    EventOutline,
+    ExtractedEntity,
+    ExtractedRelation,
+    GraphQueryRequest,
+    GraphSnapshot,
+    NodeMutation,
+    NodeType,
+)
 from app.repositories.sqlite.database import SQLiteDatabase
 from app.repositories.sqlite.story_repository import StoryRepository
 from app.repositories.sqlite.workflow_repository import WorkflowRepository
@@ -12,8 +22,10 @@ from app.services.vector_store import InMemoryVectorStore
 from app.services.workflow.context import WorkflowContext
 from app.services.workflow.nodes.state_updater import (
     _build_location_transition_mutations,
+    _build_node_properties,
     _build_relation_mutation,
     _is_valid_relation_direction,
+    _sanitize_node_properties,
     run_state_updater,
 )
 
@@ -424,3 +436,114 @@ def test_query_context_hides_ended_located_in_edge() -> None:
     location_edges = [edge for edge in snapshot.edges if edge.relation_type == EdgeType.LOCATED_IN]
     assert len(location_edges) == 1
     assert location_edges[0].target_id == "loc_new"
+
+
+def test_state_updater_sanitizes_non_whitelisted_update_fields(workflow_context: WorkflowContext) -> None:
+    workflow_context.graph_store.seed_story("story_guard")
+    workflow_context.graph_store.apply_mutations(
+        "story_guard",
+        [
+            NodeMutation(
+                action="CREATE_NODE",
+                node_id="char_noah",
+                node_type=NodeType.CHARACTER,
+                properties={"canonical_name": "Noah", "aliases": [], "description": "主角", "is_alive": True},
+            )
+        ],
+    )
+    state = {
+        "story_id": "story_guard",
+        "chapter_id": 3,
+        "active_epoch_id": "epoch_present",
+        "pov_character_id": "char_public_observer",
+        "narrative_directive": "測試",
+        "ground_truth_events": [
+            EventOutline(event_id="event_ch3_01", description="Noah 負傷後仍存活", caused_by_event_id=None).model_dump(mode="json")
+        ],
+        "current_draft": "Noah 站穩腳步。",
+        "best_draft_content": "",
+        "pending_chapter_extraction": {
+            "entities": [
+                {
+                    "node_id": "char_noah",
+                    "node_type": "CHARACTER",
+                    "canonical_name": "Noah",
+                    "aliases": [],
+                    "summary": "",
+                    "properties": {"mood": "angry", "blood_pressure": 180, "is_alive": True},
+                }
+            ],
+            "relations": [],
+            "chapter_memory": {"summary": "Noah 存活", "unresolved_threads": [], "notable_entities": ["Noah"], "latest_location": ""},
+        },
+    }
+    output = run_state_updater(state, workflow_context)
+    noah_mutation = next(
+        m for m in output["mutations"] if m["action"] in {"CREATE_NODE", "UPDATE_NODE"} and m["node_id"] == "char_noah"
+    )
+    assert "mood" not in noah_mutation["properties"]
+    assert "blood_pressure" not in noah_mutation["properties"]
+
+
+def test_sanitize_node_properties_keeps_tags_and_metadata() -> None:
+    raw = {
+        "canonical_name": "以太協議",
+        "aliases": [],
+        "tags": ["sci-fi", "law"],
+        "metadata": {"version": 2},
+        "noise": "x",
+    }
+    clean = _sanitize_node_properties(NodeType.CONCEPT, raw)
+    assert clean["tags"] == ["sci-fi", "law"]
+    assert clean["metadata"] == {"version": 2}
+    assert "noise" not in clean
+
+
+def test_sanitize_metadata_non_serializable_dropped() -> None:
+    raw = {
+        "canonical_name": "槍",
+        "aliases": [],
+        "item_status": "完好",
+        "is_unique": False,
+        "metadata": {"bad": object()},
+    }
+    clean = _sanitize_node_properties(NodeType.ITEM, raw)
+    assert clean["metadata"] == {}
+
+
+def test_build_node_properties_merges_entity_tags_metadata() -> None:
+    ent = ExtractedEntity(
+        node_type=NodeType.ITEM,
+        canonical_name="手槍",
+        tags=["weapon"],
+        metadata={"bullets": 3},
+        properties={"item_status": "缺件"},
+    )
+    props = _build_node_properties(ent, NodeType.ITEM)
+    assert props["tags"] == ["weapon"]
+    assert props["metadata"] == {"bullets": 3}
+    assert props["item_status"] == "缺件"
+
+
+def test_build_relation_mutation_includes_tags_and_metadata() -> None:
+    edge = _build_relation_mutation(
+        relation=ExtractedRelation(
+            source_node_id="char_elian",
+            target_node_id="loc_gate",
+            relation_type=EdgeType.LOCATED_IN,
+            context_details="經城門入內",
+            is_truth=True,
+            is_public=True,
+            tags=["movement"],
+            metadata={"via": "north_gate"},
+        ),
+        resolved_name_index={},
+        known_ids={"char_elian", "loc_gate"},
+        node_types={"char_elian": NodeType.CHARACTER, "loc_gate": NodeType.LOCATION},
+        active_epoch_id="epoch_present",
+        primary_event_id="evt_1",
+        pov_character_id="char_elian",
+    )
+    assert edge is not None
+    assert edge.attributes["tags"] == ["movement"]
+    assert edge.attributes["metadata"] == {"via": "north_gate"}

@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import type { StoryCastSeedEntry, StoryInput } from "../../types";
+import { type ChangeEvent, useEffect, useRef, useState } from "react";
+import type { ImportMergeMode, StoryCastSeedEntry, StoryInput } from "../../types";
 
 const MACRO_NOTES_SOFT_MAX = 8000;
 
@@ -48,6 +48,10 @@ type Props = {
   onSaveSettings?: (payload: StoryInput) => Promise<void>;
   /** True when creating a new story (show 建立故事); false when editing existing. */
   showCreateButton?: boolean;
+  onExportProjectBundle?: () => void;
+  onImportProjectBundle?: (jsonText: string, mode: ImportMergeMode) => Promise<void>;
+  onBusy?: (busy: boolean) => void;
+  onError?: (message: string) => void;
 };
 
 function hydrateFromStoryInput(input: StoryInput): {
@@ -100,6 +104,10 @@ export function StorySetupForm({
   onValuesChange,
   onSaveSettings,
   showCreateButton = true,
+  onExportProjectBundle,
+  onImportProjectBundle,
+  onBusy,
+  onError,
 }: Props) {
   const [title, setTitle] = useState("王都疑雲");
   const [premise, setPremise] = useState("一名被流放的年輕騎士回到王都，追查皇室命案背後的真正凶手。");
@@ -109,6 +117,7 @@ export function StorySetupForm({
   const [macroAuthorNotes, setMacroAuthorNotes] = useState("");
   const [castRows, setCastRows] = useState<CastSeedRow[]>([]);
   const [saveBusy, setSaveBusy] = useState(false);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (initialValues) {
@@ -174,6 +183,28 @@ export function StorySetupForm({
       );
     } finally {
       setSaveBusy(false);
+    }
+  }
+
+  function askImportMode(): ImportMergeMode {
+    const replace = window.confirm("匯入模式：按「確定」= 覆蓋目前資料；按「取消」= 合併（已有值優先）");
+    return replace ? "replace" : "merge";
+  }
+
+  async function handleImportProjectBundleFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || !onImportProjectBundle) return;
+    const mode = askImportMode();
+    onBusy?.(true);
+    onError?.("");
+    try {
+      const text = await file.text();
+      await onImportProjectBundle(text, mode);
+    } catch (err) {
+      onError?.(err instanceof Error ? err.message : "匯入專案 JSON 失敗");
+    } finally {
+      onBusy?.(false);
     }
   }
 
@@ -248,9 +279,12 @@ export function StorySetupForm({
             readOnly={locked}
           />
         </div>
-        <div className="space-y-3 rounded-lg border border-outline-variant/15 bg-surface-container/40 p-4">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <label className="auteur-label mb-0">核心角色種子（選填）</label>
+        <div className="space-y-3 rounded-xl border border-outline-variant/15 bg-surface-container/40 p-4">
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <p className="font-label text-[10px] font-bold uppercase tracking-wider text-secondary">Cast Seed</p>
+              <label className="auteur-label mb-0">核心角色種子（選填）</label>
+            </div>
             {fieldDisabled ? null : (
               <button
                 type="button"
@@ -262,7 +296,7 @@ export function StorySetupForm({
               </button>
             )}
           </div>
-          <p className="font-body text-xs text-on-surface-variant">
+          <p className="rounded-lg border border-outline-variant/10 bg-surface-container-low px-3 py-2 font-body text-xs text-on-surface-variant">
             留空則人物完全由系統依梗概與筆記生成。若填寫，請列出貫穿主線的核心人物；編譯時會保留這些姓名。
           </p>
           {castRows.length === 0 ? (
@@ -272,64 +306,74 @@ export function StorySetupForm({
               {castRows.map((row, index) => (
                 <li
                   key={`cast-${index}`}
-                  className="grid grid-cols-1 gap-2 rounded-md border border-outline-variant/10 bg-surface-container-low p-3 sm:grid-cols-12"
+                  className="rounded-lg border border-outline-variant/10 bg-surface-container-low p-3"
                 >
-                  <div className="sm:col-span-4">
-                    <label className="auteur-label text-[10px]">正式名稱</label>
-                    <input
-                      className="auteur-input font-body"
-                      value={row.canonical_name}
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        setCastRows((rows) => rows.map((x, i) => (i === index ? { ...x, canonical_name: v } : x)));
-                      }}
-                      disabled={fieldDisabled}
-                      readOnly={locked}
-                      placeholder="例如：林澈"
-                    />
+                  <div className="mb-2 flex items-center justify-between">
+                    <p className="font-label text-[10px] font-bold uppercase tracking-wider text-on-surface-variant">
+                      角色 #{index + 1}
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <span className="rounded-full border border-outline-variant/25 bg-surface px-2 py-0.5 font-label text-[10px] text-outline">
+                        {row.role ? (row.role === "protagonist" ? "主角" : row.role === "antagonist" ? "反派" : "配角") : "未指定"}
+                      </span>
+                      {fieldDisabled ? null : (
+                        <button
+                          type="button"
+                          className="rounded-md p-2 text-on-surface-variant hover:bg-error/10 hover:text-error"
+                          aria-label="移除此列"
+                          onClick={() => setCastRows((rows) => rows.filter((_, i) => i !== index))}
+                        >
+                          <span className="material-symbols-outlined text-xl">close</span>
+                        </button>
+                      )}
+                    </div>
                   </div>
-                  <div className="sm:col-span-3">
-                    <label className="auteur-label text-[10px]">角色類型（選填）</label>
-                    <select
-                      className="auteur-input font-body"
-                      value={row.role}
-                      onChange={(e) => {
-                        const v = e.target.value as CastSeedRow["role"];
-                        setCastRows((rows) => rows.map((x, i) => (i === index ? { ...x, role: v } : x)));
-                      }}
-                      disabled={fieldDisabled}
-                    >
-                      <option value="">未指定</option>
-                      <option value="protagonist">主角</option>
-                      <option value="antagonist">反派</option>
-                      <option value="supporting">配角</option>
-                    </select>
-                  </div>
-                  <div className="sm:col-span-4">
-                    <label className="auteur-label text-[10px]">一句提示（選填）</label>
-                    <input
-                      className="auteur-input font-body text-sm"
-                      value={row.short_hint}
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        setCastRows((rows) => rows.map((x, i) => (i === index ? { ...x, short_hint: v } : x)));
-                      }}
-                      disabled={fieldDisabled}
-                      readOnly={locked}
-                      placeholder="給系統的短註（例如性格關鍵字）"
-                    />
-                  </div>
-                  <div className="flex items-end justify-end sm:col-span-1">
-                    {fieldDisabled ? null : (
-                      <button
-                        type="button"
-                        className="rounded-md p-2 text-on-surface-variant hover:bg-error/10 hover:text-error"
-                        aria-label="移除此列"
-                        onClick={() => setCastRows((rows) => rows.filter((_, i) => i !== index))}
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-12">
+                    <div className="sm:col-span-8">
+                      <label className="auteur-label text-[10px]">正式名稱</label>
+                      <input
+                        className="auteur-input font-body"
+                        value={row.canonical_name}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setCastRows((rows) => rows.map((x, i) => (i === index ? { ...x, canonical_name: v } : x)));
+                        }}
+                        disabled={fieldDisabled}
+                        readOnly={locked}
+                        placeholder="例如：林澈"
+                      />
+                    </div>
+                    <div className="sm:col-span-4">
+                      <label className="auteur-label text-[10px]">角色類型（選填）</label>
+                      <select
+                        className="auteur-input font-body"
+                        value={row.role}
+                        onChange={(e) => {
+                          const v = e.target.value as CastSeedRow["role"];
+                          setCastRows((rows) => rows.map((x, i) => (i === index ? { ...x, role: v } : x)));
+                        }}
+                        disabled={fieldDisabled}
                       >
-                        <span className="material-symbols-outlined text-xl">close</span>
-                      </button>
-                    )}
+                        <option value="">未指定</option>
+                        <option value="protagonist">主角</option>
+                        <option value="antagonist">反派</option>
+                        <option value="supporting">配角</option>
+                      </select>
+                    </div>
+                    <div className="sm:col-span-12">
+                      <label className="auteur-label text-[10px]">一句提示（選填）</label>
+                      <input
+                        className="auteur-input font-body text-sm"
+                        value={row.short_hint}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setCastRows((rows) => rows.map((x, i) => (i === index ? { ...x, short_hint: v } : x)));
+                        }}
+                        disabled={fieldDisabled}
+                        readOnly={locked}
+                        placeholder="給系統的短註（例如性格關鍵字）"
+                      />
+                    </div>
                   </div>
                 </li>
               ))}
@@ -375,6 +419,36 @@ export function StorySetupForm({
             ) : null}
           </div>
         )}
+        <div className="border-t border-outline-variant/10 pt-4">
+          <p className="mb-2 font-label text-[10px] font-bold uppercase tracking-wider text-secondary">
+            專案 JSON（故事 + 宏觀規劃）
+          </p>
+          <input
+            ref={importInputRef}
+            type="file"
+            accept="application/json,.json"
+            className="hidden"
+            onChange={(e) => void handleImportProjectBundleFile(e)}
+          />
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <button
+              type="button"
+              className="btn-secondary flex-1 justify-center"
+              onClick={onExportProjectBundle}
+              disabled={!onExportProjectBundle}
+            >
+              匯出專案 JSON
+            </button>
+            <button
+              type="button"
+              className="btn-secondary flex-1 justify-center"
+              onClick={() => importInputRef.current?.click()}
+              disabled={!onImportProjectBundle || fieldDisabled}
+            >
+              匯入專案 JSON
+            </button>
+          </div>
+        </div>
       </form>
     </section>
   );

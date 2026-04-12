@@ -118,6 +118,7 @@ def test_canonicalize_ignores_hallucinated_suggested_node_id() -> None:
     assert len(entities) == 1
     assert entities[0].node_id == stable_entity_id(NodeType.CHARACTER, "Zara")
     assert name_index["zara"] == entities[0].node_id
+    assert entities[0].node_id == "char_zara"
 
 
 def test_build_extraction_context_uses_full_text_for_short_chapter() -> None:
@@ -133,6 +134,7 @@ def test_build_extraction_context_uses_full_text_for_short_chapter() -> None:
     ctx = build_extraction_context(state, GraphSnapshot(nodes=[], edges=[]), short, [])
     assert ctx.chapter_text_for_memory == short
     assert len(ctx.chapter_text_for_entities) == len(short)
+    assert len(ctx.entity_glossary) <= get_settings().extraction_entity_glossary_cap
 
 
 def test_extract_chapter_artifacts_runs_three_steps_with_fake_llm(split_workflow_context: WorkflowContext) -> None:

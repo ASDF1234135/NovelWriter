@@ -32,6 +32,7 @@ def test_author_payload_masks_sensitive_state() -> None:
         "graph_context": "forbidden",
         "plan_feedback": [{"message": "future leak"}],
         "writing_note": ["短句優先", "避免過度抒情"],
+        "safe_chapter_rules": "規則：每回合只能行動一次",
     }
 
     payload = build_author_payload(state)
@@ -56,9 +57,38 @@ def test_author_payload_masks_sensitive_state() -> None:
     assert dumped["length_adjustment"] == "NONE"
     assert dumped["author_safe_continuity_notes"] == ["灰鴉的密信尚未解讀。"]
     assert dumped["writing_note"] == ["短句優先", "避免過度抒情"]
+    assert dumped["safe_chapter_rules"] == "規則：每回合只能行動一次"
     assert "ground_truth_events" not in dumped
     assert "graph_context" not in dumped
     assert "plan_feedback" not in dumped
+
+
+def test_author_payload_redacts_identity_tokens_from_forbidden_reveals() -> None:
+    state = {
+        "narrative_script": "安全劇本",
+        "chapter_start_location": "暗巷",
+        "author_goal": "維持懸疑",
+        "must_include_beats": [],
+        "reader_visible_facts": [],
+        "reader_unresolved_questions": [],
+        "chapter_end_location_hint": "",
+        "ending_state_shift": "",
+        "ending_boundary_rule": "",
+        "forbidden_next_scene_actions": [],
+        "forbidden_reveals": ["不要揭露「夜鴉」的真身分"],
+        "tone_direction": "懸疑",
+        "target_word_count": 1200,
+        "current_draft": "",
+        "draft_feedback": [],
+        "reader_feedback": [],
+        "author_safe_continuity_notes": ["線人其實是夜鴉。"],
+        "recent_entity_names": ["夜鴉", "灰鴉"],
+        "allowed_identity_reveals_this_chapter": [],
+    }
+    payload = build_author_payload(state).model_dump()
+    assert "夜鴉" not in " ".join(payload["author_safe_continuity_notes"])
+    assert "夜鴉" not in payload["recent_entity_names"]
+    assert "[REDACTED_IDENTITY]" in " ".join(payload["author_safe_continuity_notes"])
 
 
 def test_plan_supervisor_payload_includes_anchor_distance() -> None:
@@ -184,6 +214,7 @@ def test_draft_supervisor_payload_includes_normalized_length() -> None:
         "graph_context": "{}",
         "vector_context": "{}",
         "bible_context": "{}",
+        "allowed_identity_reveals_this_chapter": ["灰鴉"],
     }
 
     payload = build_draft_supervisor_payload(state)
@@ -193,3 +224,4 @@ def test_draft_supervisor_payload_includes_normalized_length() -> None:
     assert payload.chapter_start_location == "舊鐘樓。"
     assert payload.ending_boundary_rule == "本章最遠只能停在舊鐘樓。"
     assert payload.previous_chapter_summary == "上一章主角潛入王都。"
+    assert payload.allowed_identity_reveals_this_chapter == ["灰鴉"]

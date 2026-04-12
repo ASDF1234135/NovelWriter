@@ -187,6 +187,14 @@ def _build_director_prompt(
     cooldown_block = (cooldown.get("ban_text") or "無")
     vibe_block = (vibe_cooldown.get("interrupt_text") or "無")
 
+    ap = (state.get("chapter_outline") or state.get("author_chapter_plan") or "").strip()
+    author_plan_block = ""
+    if ap:
+        author_plan_block = (
+            "## 作者本章寫作計畫（可選參考；非強制；若與錨點、一致性或下方系統強制約束衝突，以錨點與約束為準）\n"
+            f"{ap[:1600]}\n\n"
+        )
+
     return (
         "## 章節定位\n"
         f"- chapter_id: {state['chapter_id']}\n\n"
@@ -224,6 +232,7 @@ def _build_director_prompt(
         f"{lore_block}\n\n"
         "## Writing Notes（全域寫作規定）\n"
         f"{writing_note_block}\n\n"
+        f"{author_plan_block}"
         "## 系統強制約束（不可違反）\n"
         f"- resolution_tactic_cooldown: {cooldown_block}\n"
         f"- ending_vibe_cooldown: {vibe_block}\n\n"

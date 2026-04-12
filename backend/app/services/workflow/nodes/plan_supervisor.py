@@ -114,6 +114,9 @@ def run_plan_supervisor(state: dict, context: WorkflowContext) -> tuple[dict, di
     wc_violations, wc_feedback = _detect_word_count_violations(payload)
     violations.extend(violation for violation in wc_violations if violation not in violations)
     feedback.extend(wc_feedback)
+    gran_violations, gran_feedback = _detect_event_granularity_violations(payload)
+    violations.extend(violation for violation in gran_violations if violation not in violations)
+    feedback.extend(gran_feedback)
 
     output = PlanSupervisorOutput(
         is_approved=not violations,
@@ -176,7 +179,8 @@ def _build_plan_supervisor_prompt(payload) -> str:
 def _apply_deterministic_checks(output: PlanSupervisorOutput, payload) -> PlanSupervisorOutput:
     directive_violations, directive_feedback = _detect_directive_structural_violations(payload)
     word_violations, word_feedback = _detect_word_count_violations(payload)
-    violations = [*directive_violations, *word_violations]
+    gran_violations, gran_feedback = _detect_event_granularity_violations(payload)
+    violations = [*directive_violations, *word_violations, *gran_violations]
 
     soft = list(output.soft_warnings or [])
     for w in _timeline_rollback_soft_warnings(payload):
@@ -194,7 +198,7 @@ def _apply_deterministic_checks(output: PlanSupervisorOutput, payload) -> PlanSu
         if violation not in merged_violations:
             merged_violations.append(violation)
     merged_feedback = output.feedback_to_agent.strip()
-    for message in [*directive_feedback, *word_feedback]:
+    for message in [*directive_feedback, *word_feedback, *gran_feedback]:
         if message not in merged_feedback:
             merged_feedback = f"{merged_feedback} {message}".strip()
 
@@ -233,6 +237,26 @@ def _detect_word_count_violations(payload) -> tuple[list[ViolationType], list[st
     if len(script) < 80 and tw > 5000:
         violations.append(ViolationType.WORD_COUNT_UNMATCH)
         feedback.append("表層劇本過短但字數目標過高；請降低 target_word_count 或充實 narrative_script。")
+    return violations, feedback
+
+
+def _detect_event_granularity_violations(payload) -> tuple[list[ViolationType], list[str]]:
+    events = getattr(payload, "ground_truth_events", None) or []
+    if len(events) < 5:
+        return [], []
+    violations: list[ViolationType] = []
+    feedback: list[str] = []
+    micro_markers = ("閃避", "揮拳", "出手", "反擊", "翻滾", "轉身", "格擋", "刺擊", "扣下", "躍起")
+    micro_count = 0
+    for e in events:
+        desc = str(getattr(e, "description", "") or "")
+        if any(tok in desc for tok in micro_markers):
+            micro_count += 1
+    if micro_count >= 4:
+        violations.append(ViolationType.INCONSISTENCY)
+        feedback.append(
+            "ground_truth_events 疑似過度微拆（連續動作事件過多）；請合併為宏觀事件，僅保留目標/場景/結果相位變化。"
+        )
     return violations, feedback
 
 

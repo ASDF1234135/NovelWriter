@@ -6,6 +6,7 @@ from app.domain.schema import (
     HitlDecisionRequest,
     HitlOutlineEditRequest,
     HitlReason,
+    HitlStateInjectionRequest,
     StoryInput,
 )
 from app.domain.state import build_initial_state
@@ -412,6 +413,65 @@ def test_hitl_outline_sets_resume_from_by_reason(monkeypatch, tmp_path) -> None:
         assert st["resume_from"] == expected
 
 
+def test_alignment_hitl_state_injection_sets_rules_and_resumes_alignment(tmp_path) -> None:
+    service = build_service(str(tmp_path / "workflow_align_hitl_state.sqlite3"))
+    story = service.create_story(StoryInput(title="T", premise="p", bible={}, target_total_words=12000))
+    base = build_initial_state(story["story_id"], 1, [], "trace-align-hitl")
+    base["requires_hitl"] = True
+    base["workflow_status"] = "WAITING_HITL"
+    base["hitl_reason"] = HitlReason.ALIGNMENT_RULES_REQUIRED
+    base["resume_from"] = "logic_alignment"
+    run = service.workflow_repository.create_run(story["story_id"], 1, base)
+
+    req = HitlStateInjectionRequest(
+        mutations=[],
+        chapter_hard_rules="每回合只能行動一次；失敗方失去全部籌碼。",
+        resume_from="logic_alignment",
+    )
+    service.apply_hitl_state_injection(run.run_id, req)
+    st = service.workflow_repository.get_run_state(run.run_id)
+    assert st["requires_hitl"] is False
+    assert st["hitl_reason"] == ""
+    assert st["resume_from"] == "logic_alignment"
+    assert st["chapter_hard_rules"] == "每回合只能行動一次；失敗方失去全部籌碼。"
+
+
+def test_logic_alignment_routes_to_hitl_when_rules_missing_and_draft_complex(tmp_path) -> None:
+    service = build_service(str(tmp_path / "workflow_align_route.sqlite3"))
+    story = service.create_story(StoryInput(title="T", premise="p", bible={}, target_total_words=12000))
+    base = build_initial_state(story["story_id"], 1, [], "trace-align-route")
+    base["resume_from"] = "logic_alignment"
+    base["chapter_hard_rules"] = ""
+    base["narrative_script"] = "啟動俄羅斯輪盤變體，依回合判定與籌碼結算決定生死。"
+    base["must_include_beats"] = ["宣告勝利條件", "回合判定", "籌碼結算"]
+    base["ground_truth_events"] = [{"event_id": "E1", "description": "開局與判定機制"}]
+    run = service.workflow_repository.create_run(story["story_id"], 1, base)
+    service.execute_stored_run(run.run_id)
+    st = service.workflow_repository.get_run_state(run.run_id)
+    assert st["workflow_status"] == "WAITING_HITL"
+    assert st["requires_hitl"] is True
+    assert st["hitl_reason"] == HitlReason.ALIGNMENT_RULES_REQUIRED
+    assert st["resume_from"] == "logic_alignment"
+
+
+def test_logic_alignment_retry_limit_force_passes_with_warning(tmp_path) -> None:
+    service = build_service(str(tmp_path / "workflow_align_retry.sqlite3"))
+    story = service.create_story(StoryInput(title="T", premise="p", bible={}, target_total_words=12000))
+    base = build_initial_state(story["story_id"], 1, [], "trace-align-retry")
+    base["resume_from"] = "logic_alignment"
+    base["chapter_hard_rules"] = ""
+    base["narrative_script"] = "進入俄羅斯輪盤變體，採回合制與籌碼談判。"
+    base["must_include_beats"] = ["回合判定", "籌碼談判"]
+    base["ground_truth_events"] = [{"event_id": "E1", "description": "高複雜博弈"}]
+    base["alignment_hitl_retry_count"] = 1
+    run = service.workflow_repository.create_run(story["story_id"], 1, base)
+    service.execute_stored_run(run.run_id)
+    st = service.workflow_repository.get_run_state(run.run_id)
+    # Should not get stuck in infinite HITL loop.
+    assert st["requires_hitl"] is False
+    assert "force-pass" in str(st.get("alignment_log") or "").lower() or st["workflow_status"] in ("RUNNING", "COMPLETED")
+
+
 def test_hitl_force_approve_plan_sets_resume_author(monkeypatch, tmp_path) -> None:
     service = build_service(str(tmp_path / "workflow_hitl_force_approve.sqlite3"))
     story = service.create_story(
@@ -645,4 +705,7 @@ def test_start_run_bootstraps_writing_note_from_bible(tmp_path) -> None:
     )
     wf = service.start_run_chapter(story["story_id"], 1)
     st = wf["state"]
-    assert st["writing_note"] == ["短句優先", "避免過度抒情"]
+    assert "短句優先" in st["writing_note"]
+    assert "避免過度抒情" in st["writing_note"]
+    assert any("命名節制" in line for line in st["writing_note"])
+    assert any("去標籤化" in line for line in st["writing_note"])

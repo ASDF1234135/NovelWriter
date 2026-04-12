@@ -1,12 +1,21 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { GraphSnapshot } from "../../types";
 import G6 from "@antv/g6";
 import { styleForNodeType } from "./nodeTypeStyles";
+import {
+  buildDisplayNameMap,
+  GraphDetailDrawer,
+  GraphEdgeDetailPanel,
+  GraphNodeDetailPanel,
+} from "./graphDetailPanels";
 
 type Props = {
   graph: GraphSnapshot;
   /** Prefer this node as radial center when present in the graph. */
   protagonistCharacterId?: string;
+  viewMode?: "all" | "ego" | "location-item" | "epoch";
+  /** Switch parent to Ego mode and center on this node. */
+  onSetEgoCenter?: (nodeId: string) => void;
 };
 
 type RawNode = Record<string, unknown>;
@@ -17,11 +26,15 @@ type MappedNode = Record<string, unknown> & {
   node_type: string;
 };
 
+type MappedEdge = Record<string, unknown> & {
+  id: string;
+  source: string;
+  target: string;
+  relation_type: string;
+};
+
 function nodeLabel(n: RawNode): string {
-  const name = String(n.canonical_name ?? n.title ?? "");
-  const id = String(n.node_id ?? "");
-  const t = String(n.node_type ?? "");
-  return name ? `${name} (${t})` : `${id || "?"} (${t})`;
+  return String(n.canonical_name ?? n.title ?? n.node_id ?? "?").slice(0, 28);
 }
 
 function pickRadialFocusNode(
@@ -37,10 +50,38 @@ function pickRadialFocusNode(
   return String(nodes[0].id);
 }
 
-export function UniverseGraphAntv({ graph, protagonistCharacterId }: Props) {
+function distributedCurveOffset(index: number): number {
+  if (index === 0) return 0;
+  const mag = Math.ceil(index / 2) * 18;
+  return index % 2 === 0 ? -mag : mag;
+}
+
+export function UniverseGraphAntv({
+  graph,
+  protagonistCharacterId,
+  viewMode = "all",
+  onSetEgoCenter,
+}: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const graphRef = useRef<any>(null);
   const [selectedNodeModel, setSelectedNodeModel] = useState<Record<string, unknown> | null>(null);
+  const [selectedEdgeModel, setSelectedEdgeModel] = useState<Record<string, unknown> | null>(null);
+
+  const displayNames = useMemo(() => buildDisplayNameMap(graph.nodes ?? []), [graph.nodes]);
+
+  const focusNodeById = useCallback((id: string) => {
+    const g = graphRef.current;
+    if (!g || !id) return;
+    const item = g.findById(id);
+    if (!item || item.getType?.() !== "node") return;
+    try {
+      g.focusItem(item, true, { duration: 220 } as object);
+    } catch {
+      g.focusItem(item, true);
+    }
+    setSelectedEdgeModel(null);
+    setSelectedNodeModel(item.getModel());
+  }, []);
 
   const { safeNodes, safeEdges, layoutCfg } = useMemo(() => {
     const nodes = (graph.nodes ?? []) as RawNode[];
@@ -52,17 +93,26 @@ export function UniverseGraphAntv({ graph, protagonistCharacterId }: Props) {
         if (!id) return null;
         const nodeType = String(n.node_type ?? "");
         const { fill, stroke } = styleForNodeType(nodeType);
+        const isCharacter = nodeType.toUpperCase() === "CHARACTER";
+        const isLocation = nodeType.toUpperCase() === "LOCATION";
+        const isRule = nodeType.toUpperCase() === "RULE";
+        const isDead = isCharacter && n.is_alive === false;
+        const isInaccessible = isLocation && n.is_accessible === false;
+        const ruleInactive = isRule && n.is_active === false;
+        const statusBadge = isDead ? " ☠" : isInaccessible ? " 🔒" : ruleInactive ? " ⊗" : "";
         return {
+          ...n,
           id,
-          label: nodeLabel(n).slice(0, 28),
+          label: `${nodeLabel(n)}${statusBadge}`.slice(0, 28),
           node_id: id,
           node_type: nodeType,
           canonical_name: String(n.canonical_name ?? ""),
           title: String(n.title ?? ""),
           style: {
-            fill,
-            stroke,
+            fill: isDead || ruleInactive ? "#9ca3af" : fill,
+            stroke: isDead || ruleInactive ? "#d1d5db" : stroke,
             lineWidth: 1,
+            opacity: isDead || ruleInactive ? 0.55 : 1,
           },
         } as MappedNode;
       })
@@ -70,16 +120,64 @@ export function UniverseGraphAntv({ graph, protagonistCharacterId }: Props) {
 
     const validNodeIds = new Set(mappedNodes.map((n) => String(n.id)));
 
-    const slicedEdges = edges
+    const mappedEdges = edges
       .slice(0, 400)
       .map((e) => {
         const source = String(e.source_id ?? "");
         const target = String(e.target_id ?? "");
         const relation_type = String(e.relation_type ?? e.edge_type ?? "REL");
         const edge_id = String(e.edge_id ?? `${source}-${target}-${relation_type}`);
-        return { id: edge_id, source, target, relation_type };
+        const isTruth = e.is_truth !== false;
+        return {
+          ...e,
+          id: edge_id,
+          source,
+          target,
+          relation_type,
+          label: relation_type.slice(0, 24),
+          type: "line",
+          style: {
+            stroke: isTruth ? "#64748b" : "#ef4444",
+            lineWidth: 1.6,
+            opacity: isTruth ? 0.75 : 0.9,
+            lineDash: isTruth ? undefined : [6, 4],
+            endArrow: {
+              path: G6.Arrow.triangle(6, 8, 2),
+              fill: isTruth ? "#64748b" : "#ef4444",
+            },
+          },
+          labelCfg: {
+            autoRotate: true,
+            style: {
+              fill: "#e5e7eb",
+              fontSize: 10,
+              background: {
+                fill: "#111827",
+                stroke: "#374151",
+                radius: 4,
+                padding: [2, 4, 2, 4],
+              },
+            },
+          },
+        } as MappedEdge;
       })
       .filter((e) => validNodeIds.has(String(e.source)) && validNodeIds.has(String(e.target)));
+
+    const byPair = new Map<string, MappedEdge[]>();
+    for (const edge of mappedEdges) {
+      const key = `${edge.source}::${edge.target}`;
+      const arr = byPair.get(key) ?? [];
+      arr.push(edge);
+      byPair.set(key, arr);
+    }
+    const slicedEdges = [...mappedEdges];
+    for (const group of byPair.values()) {
+      if (group.length <= 1) continue;
+      group.forEach((edge, idx) => {
+        edge.type = "quadratic";
+        edge.curveOffset = distributedCurveOffset(idx);
+      });
+    }
 
     const connectedNodeIds = new Set<string>();
     for (const e of slicedEdges) {
@@ -97,7 +195,26 @@ export function UniverseGraphAntv({ graph, protagonistCharacterId }: Props) {
     const focusId = pickRadialFocusNode(connected, protagonistCharacterId);
 
     let layoutCfg: Record<string, unknown>;
-    if (hasCharacterNode && focusId) {
+    if (viewMode === "ego" && focusId) {
+      layoutCfg = {
+        type: "radial",
+        focusNode: focusId,
+        unitRadius: 88,
+        linkDistance: 120,
+        preventOverlap: true,
+        nodeSpacing: 36,
+        nodeSize: 24,
+        maxPreventOverlap: 150,
+      };
+    } else if (viewMode === "location-item") {
+      layoutCfg = {
+        type: "force",
+        preventOverlap: true,
+        nodeStrength: 1.1,
+        edgeStrength: 0.5,
+        linkDistance: 90,
+      };
+    } else if (hasCharacterNode && focusId) {
       layoutCfg = {
         type: "radial",
         focusNode: focusId,
@@ -119,7 +236,7 @@ export function UniverseGraphAntv({ graph, protagonistCharacterId }: Props) {
     }
 
     return { safeNodes: connected, safeEdges, layoutCfg };
-  }, [graph, protagonistCharacterId]);
+  }, [graph, protagonistCharacterId, viewMode]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -175,7 +292,14 @@ export function UniverseGraphAntv({ graph, protagonistCharacterId }: Props) {
       g.on("node:click", (evt: any) => {
         const model = evt?.item?.getModel?.();
         if (!model) return;
+        setSelectedEdgeModel(null);
         setSelectedNodeModel(model);
+      });
+      g.on("edge:click", (evt: any) => {
+        const model = evt?.item?.getModel?.();
+        if (!model) return;
+        setSelectedNodeModel(null);
+        setSelectedEdgeModel(model);
       });
     }
 
@@ -223,67 +347,35 @@ export function UniverseGraphAntv({ graph, protagonistCharacterId }: Props) {
   return (
     <div className="space-y-4">
       <div
-        ref={containerRef}
-        style={{ width: "100%", height: 600, background: "#060e20", borderRadius: 16 }}
-        className="overflow-hidden border border-outline-variant/20"
-      />
-
-      {selectedNodeModel ? (
+        className="flex w-full overflow-hidden rounded-2xl border border-outline-variant/20 bg-[#060e20]"
+        style={{ minHeight: 600 }}
+      >
         <div
-          role="dialog"
-          aria-modal="true"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
-          onMouseDown={(e) => {
-            if (e.target === e.currentTarget) setSelectedNodeModel(null);
-          }}
-        >
-          <div className="w-full max-w-xl rounded-xl border border-outline-variant/20 bg-surface-container-lowest p-4 shadow-lg">
-            <div className="mb-3 flex items-start justify-between gap-4">
-              <div>
-                <div className="font-headline text-sm font-bold uppercase tracking-wider text-primary">節點詳情</div>
-                <div className="mt-1 text-xs text-on-surface-variant">
-                  {String((selectedNodeModel as any).node_id ?? "")}{" "}
-                  {String((selectedNodeModel as any).node_type ?? "")
-                    ? `(${String((selectedNodeModel as any).node_type ?? "")})`
-                    : ""}
-                </div>
-              </div>
-              <button
-                type="button"
-                className="rounded-lg border border-outline-variant/20 bg-surface-container-low px-3 py-1 text-xs font-label text-primary hover:bg-surface-container-lowest"
-                onClick={() => setSelectedNodeModel(null)}
-              >
-                關閉
-              </button>
-            </div>
-
-            <div className="space-y-2 text-xs text-on-surface-variant">
-              <div>
-                <span className="font-mono">內部編號</span>：{String((selectedNodeModel as any).node_id ?? "")}
-              </div>
-              <div>
-                <span className="font-mono">類型</span>：{String((selectedNodeModel as any).node_type ?? "")}
-              </div>
-              <div>
-                <span className="font-mono">正式名稱</span>：{String((selectedNodeModel as any).canonical_name ?? "")}
-              </div>
-              <div>
-                <span className="font-mono">標題</span>：{String((selectedNodeModel as any).title ?? "")}
-              </div>
-              <div>
-                <span className="font-mono">顯示標籤</span>：{String((selectedNodeModel as any).label ?? "")}
-              </div>
-            </div>
-
-            <details className="mt-3 rounded-xl border border-outline-variant/15 bg-surface-container-lowest p-3">
-              <summary className="cursor-pointer font-label text-xs text-on-surface-variant">完整資料（進階）</summary>
-              <pre className="mt-2 max-h-64 overflow-auto text-[11px] text-on-surface-variant">
-                {JSON.stringify(selectedNodeModel, null, 2)}
-              </pre>
-            </details>
-          </div>
-        </div>
-      ) : null}
+          ref={containerRef}
+          style={{ height: 600, flex: 1, minWidth: 0, background: "#060e20" }}
+          className="overflow-hidden"
+        />
+        {selectedNodeModel ? (
+          <GraphDetailDrawer open title="節點資料" onClose={() => setSelectedNodeModel(null)}>
+            <GraphNodeDetailPanel
+              model={selectedNodeModel}
+              graph={graph}
+              displayNames={displayNames}
+              onFocusNodeId={focusNodeById}
+              onSetEgoCenter={onSetEgoCenter}
+            />
+          </GraphDetailDrawer>
+        ) : selectedEdgeModel ? (
+          <GraphDetailDrawer open title="連線情報" onClose={() => setSelectedEdgeModel(null)}>
+            <GraphEdgeDetailPanel
+              model={selectedEdgeModel}
+              graph={graph}
+              displayNames={displayNames}
+              onFocusNodeId={focusNodeById}
+            />
+          </GraphDetailDrawer>
+        ) : null}
+      </div>
     </div>
   );
 }

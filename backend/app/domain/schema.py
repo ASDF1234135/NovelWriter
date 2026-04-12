@@ -8,6 +8,32 @@ MacroCastRole = Literal["protagonist", "supporting", "antagonist"]
 from pydantic import BaseModel, Field, field_validator
 
 
+def _coerce_tags_list(v: Any) -> list[str]:
+    if v is None:
+        return []
+    if not isinstance(v, list):
+        return []
+    out: list[str] = []
+    seen_lower: set[str] = set()
+    for x in v:
+        s = str(x).strip()
+        if not s:
+            continue
+        k = s.casefold()
+        if k not in seen_lower:
+            seen_lower.add(k)
+            out.append(s)
+    return out
+
+
+def _coerce_metadata_dict(v: Any) -> dict[str, Any]:
+    if v is None or v == {}:
+        return {}
+    if isinstance(v, dict):
+        return dict(v)
+    return {}
+
+
 class NodeType(str, Enum):
     CHARACTER = "CHARACTER"
     PERSONA = "PERSONA"
@@ -16,6 +42,7 @@ class NodeType(str, Enum):
     CONCEPT = "CONCEPT"
     EPOCH = "EPOCH"
     EVENT = "EVENT"
+    RULE = "RULE"
 
 
 class EdgeType(str, Enum):
@@ -30,6 +57,9 @@ class EdgeType(str, Enum):
     BELONGS_TO_EPOCH = "BELONGS_TO_EPOCH"
     HAPPENED_BEFORE = "HAPPENED_BEFORE"
     CAUSED = "CAUSED"
+    ENFORCED_IN = "ENFORCED_IN"
+    RESTRICTS = "RESTRICTS"
+    EXEMPT_FROM = "EXEMPT_FROM"
 
 
 class BaseNode(BaseModel):
@@ -37,6 +67,24 @@ class BaseNode(BaseModel):
     node_type: NodeType
     canonical_name: str
     aliases: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(
+        default_factory=list,
+        description="Free-form labels (e.g. weapon, faction); do not invent new node_type.",
+    )
+    metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="JSON-serializable extras; nested structures allowed in app layer, stored as JSON in Neo4j.",
+    )
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def normalize_node_tags(cls, v: Any) -> list[str]:
+        return _coerce_tags_list(v)
+
+    @field_validator("metadata", mode="before")
+    @classmethod
+    def normalize_node_metadata(cls, v: Any) -> dict[str, Any]:
+        return _coerce_metadata_dict(v)
 
 
 class CharacterNode(BaseNode):
@@ -76,6 +124,13 @@ class ConceptNode(BaseNode):
     node_type: Literal[NodeType.CONCEPT] = NodeType.CONCEPT
 
 
+class RuleNode(BaseNode):
+    node_type: Literal[NodeType.RULE] = NodeType.RULE
+    description: str = ""
+    penalty: str | None = None
+    is_active: bool = True
+
+
 GraphNode = Union[
     CharacterNode,
     PersonaNode,
@@ -84,7 +139,19 @@ GraphNode = Union[
     ItemNode,
     EventNode,
     ConceptNode,
+    RuleNode,
 ]
+
+
+class EnforcedRuleContext(BaseModel):
+    """One RULE active for the current POV location/epoch (for prompt injection)."""
+
+    rule_id: str
+    canonical_name: str
+    description: str
+    penalty: str | None = None
+    restrict_target_names: list[str] = Field(default_factory=list)
+    exempt_character_names: list[str] = Field(default_factory=list)
 
 
 class GraphEdge(BaseModel):
@@ -100,6 +167,18 @@ class GraphEdge(BaseModel):
     known_by: list[str] = Field(default_factory=list)
     holder: list[str] = Field(default_factory=list)
     context_details: str = ""
+    tags: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def normalize_edge_tags(cls, v: Any) -> list[str]:
+        return _coerce_tags_list(v)
+
+    @field_validator("metadata", mode="before")
+    @classmethod
+    def normalize_edge_metadata(cls, v: Any) -> dict[str, Any]:
+        return _coerce_metadata_dict(v)
 
 
 class StoryCastSeedEntry(BaseModel):
@@ -151,6 +230,15 @@ class StoryPatch(BaseModel):
     draft_loop_retry_limit: int | None = Field(default=None, ge=0, le=20)
     macro_author_notes: str | None = None
     cast_seed: list[StoryCastSeedEntry] | None = None
+
+
+class ChapterRunRequest(BaseModel):
+    """Optional body for POST .../chapters/{n}/run."""
+
+    author_chapter_plan: str = Field(default="", max_length=2000)
+    # New dual-track inputs (prefer these over author_chapter_plan).
+    chapter_outline: str = Field(default="", max_length=2000)
+    chapter_hard_rules: str = Field(default="", max_length=8000)
 
 
 class VolumePlan(BaseModel):
@@ -243,6 +331,28 @@ class StateAnchor(BaseModel):
     target_state: dict[str, Any]
     chapter_target: int
     priority: int = 1
+
+
+class MacroPlanAnchorBody(BaseModel):
+    """Anchor row for manual macro-plan PUT/PATCH (story_id set server-side)."""
+
+    anchor_id: str
+    volume_id: str
+    title: str = ""
+    description: str = ""
+    target_state: dict[str, Any] = Field(default_factory=dict)
+    chapter_target: int
+    priority: int = Field(default=1, ge=1)
+
+
+class MacroPlanPut(BaseModel):
+    """Full replacement of macro-planned artifacts (manual edit; same persistence as macro compile)."""
+
+    bible: dict[str, Any] = Field(default_factory=dict)
+    volumes: list[VolumePlan] = Field(..., min_length=1)
+    anchors: list[MacroPlanAnchorBody] = Field(..., min_length=1)
+    cast: list[StoryCastMemberStored] = Field(default_factory=list)
+    protagonist_character_id: str | None = None
 
 
 class MacroAnchorDraft(BaseModel):
@@ -420,7 +530,7 @@ class ProposedCharacterProfile(BaseModel):
 
 
 class ProposedGraphNode(BaseModel):
-    """Planner-invented graph node for genesis; max 3 per chapter (enforced in planner_node)."""
+    """Planner-invented graph node for genesis; max 2 per chapter (enforced in planner_node)."""
 
     node_id: str
     node_type: NodeType
@@ -480,6 +590,28 @@ class PlannerOutput(BaseModel):
     new_active_b_stories: list[BStorySeed] = Field(
         default_factory=list,
         description="本章若開啟全新副線（有獨立 id），最多 2 條；成功定稿後併入 bible。",
+    )
+
+
+class AlignmentOutput(BaseModel):
+    final_ground_truth_events: list[EventOutline] = Field(default_factory=list)
+    final_narrative_script: str = ""
+    final_must_include_beats: list[str] = Field(default_factory=list)
+    safe_chapter_rules: str = Field(
+        default="",
+        description="經過 POV 視角安全遮蔽後的硬性規則原文。",
+    )
+    alignment_log: str = Field(
+        default="",
+        description="內部審計日誌：記錄了哪些草稿內容因為違反規則而被修改。",
+    )
+    requires_hitl: bool = Field(
+        default=False,
+        description="當草稿出現複雜設定但缺乏人類規則時，設為 True 請求介入。",
+    )
+    hitl_reason: str | None = Field(
+        default=None,
+        description="若 requires_hitl=True，具體說明需要人類補充的規則內容。",
     )
 
 
@@ -566,6 +698,18 @@ class ExtractedEntity(BaseModel):
     aliases: list[str] = Field(default_factory=list)
     summary: str = ""
     properties: dict[str, Any] = Field(default_factory=dict)
+    tags: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _v_tags(cls, v: Any) -> list[str]:
+        return _coerce_tags_list(v)
+
+    @field_validator("metadata", mode="before")
+    @classmethod
+    def _v_metadata(cls, v: Any) -> dict[str, Any]:
+        return _coerce_metadata_dict(v)
 
 
 class ExtractedRelation(BaseModel):
@@ -577,6 +721,18 @@ class ExtractedRelation(BaseModel):
     context_details: str = ""
     is_truth: bool = True
     is_public: bool = False
+    tags: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _v_rel_tags(cls, v: Any) -> list[str]:
+        return _coerce_tags_list(v)
+
+    @field_validator("metadata", mode="before")
+    @classmethod
+    def _v_rel_metadata(cls, v: Any) -> dict[str, Any]:
+        return _coerce_metadata_dict(v)
 
 
 class ChapterMemory(BaseModel):
@@ -602,6 +758,18 @@ class ExtractedEntityCandidate(BaseModel):
     aliases: list[str] = Field(default_factory=list)
     summary: str = ""
     properties: dict[str, Any] = Field(default_factory=dict)
+    tags: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _v_cand_tags(cls, v: Any) -> list[str]:
+        return _coerce_tags_list(v)
+
+    @field_validator("metadata", mode="before")
+    @classmethod
+    def _v_cand_metadata(cls, v: Any) -> dict[str, Any]:
+        return _coerce_metadata_dict(v)
 
 
 class EntityExtractionOutput(BaseModel):
@@ -738,6 +906,7 @@ class HitlReason:
     RESOLUTION_TACTIC_COOLDOWN_VIOLATION = "Resolution_Tactic_Cooldown_Violation"
     ENDING_VIBE_COOLDOWN_VIOLATION = "Ending_Vibe_Cooldown_Violation"
     CONTEXT_LENGTH_EXCEEDED = "Context_Length_Exceeded"
+    ALIGNMENT_RULES_REQUIRED = "Alignment_Rules_Required"
 
 
 class HitlDecisionRequest(BaseModel):
@@ -753,6 +922,12 @@ class HitlOutlineEditRequest(BaseModel):
 
 class HitlStateInjectionRequest(BaseModel):
     mutations: list[Union[NodeMutation, EdgeMutation]]
+    chapter_hard_rules: str = Field(
+        default="",
+        max_length=8000,
+        description="Optional: update state.chapter_hard_rules before resume (for alignment HITL).",
+    )
+    resume_from: str = ""
     reason: str = ""
 
 

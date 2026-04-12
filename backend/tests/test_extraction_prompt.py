@@ -31,9 +31,37 @@ def test_extraction_prompt_documents_all_edge_types() -> None:
     assert "BELONGS_TO_EPOCH" in prompt
     assert "HAPPENED_BEFORE" in prompt
     assert "CAUSED" in prompt
+    assert "ENFORCED_IN" in prompt
+    assert "RESTRICTS" in prompt
+    assert "EXEMPT_FROM" in prompt
+    assert "RULE" in prompt
     assert "權限標籤鐵律" in prompt
+    assert "忽略文學修辭" in prompt
     assert "planner_visibility_contract" in prompt
     assert "守衛長官暗中監視" in prompt
+
+
+def test_believed_as_guideline_forbids_interpersonal_misuse() -> None:
+    prompt = _build_extraction_prompt(
+        state={
+            "story_id": "story_test",
+            "chapter_id": 1,
+            "active_epoch_id": "epoch_present",
+            "pov_character_id": "char_observer",
+            "reader_visible_facts": [],
+            "private_facts_or_secret_actions": [],
+            "reader_unresolved_questions": [],
+            "chapter_end_location_hint": "",
+            "last_known_location": "",
+        },
+        graph_snapshot=GraphSnapshot(nodes=[], edges=[]),
+        chapter_content="x",
+        events=[],
+    )
+    assert "BELIEVED_AS" in prompt
+    assert "禁止將信任" in prompt
+    assert "HAS_RELATION" in prompt
+    assert "IS_ACTUALLY" in prompt
 
 
 def test_extracted_relation_defaults_to_private() -> None:

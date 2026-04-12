@@ -8,6 +8,7 @@ export const HITL_REASON = {
   RESOLUTION_TACTIC: "Resolution_Tactic_Cooldown_Violation",
   ENDING_VIBE: "Ending_Vibe_Cooldown_Violation",
   CONTEXT: "Context_Length_Exceeded",
+  ALIGNMENT_RULES_REQUIRED: "Alignment_Rules_Required",
 } as const;
 
 export type HitlReasonValue = (typeof HITL_REASON)[keyof typeof HITL_REASON];
@@ -17,6 +18,7 @@ export const FLOW_STEPS = [
   { id: "graph_rag", userLabel: "背景整理" },
   { id: "planner", userLabel: "劇情規劃" },
   { id: "plan_supervisor", userLabel: "大綱審核" },
+  { id: "logic_alignment", userLabel: "規則對齊" },
   { id: "author", userLabel: "撰寫內文" },
   { id: "draft_supervisor", userLabel: "內文審核" },
   { id: "reader", userLabel: "閱讀檢查" },
@@ -30,13 +32,14 @@ const RESUME_TO_STEP_INDEX: Record<string, number> = {
   graph_rag: 1,
   planner: 2,
   plan_supervisor: 3,
-  author: 4,
-  draft_supervisor: 5,
-  reader: 6,
-  extraction_gate: 7,
-  chapter_summarizer: 8,
-  b_story_resolve: 8,
-  state_updater: 9,
+  logic_alignment: 4,
+  author: 5,
+  draft_supervisor: 6,
+  reader: 7,
+  extraction_gate: 8,
+  chapter_summarizer: 9,
+  b_story_resolve: 9,
+  state_updater: 10,
 };
 
 const REASON_TO_STEP_INDEX: Partial<Record<string, number>> = {
@@ -45,6 +48,7 @@ const REASON_TO_STEP_INDEX: Partial<Record<string, number>> = {
   [HITL_REASON.ENDING_VIBE]: 3,
   [HITL_REASON.B_STORY_COOLDOWN]: 0,
   [HITL_REASON.CONTEXT]: 1,
+  [HITL_REASON.ALIGNMENT_RULES_REQUIRED]: 4,
   [HITL_REASON.DRAFT_LOOP]: 5,
   [HITL_REASON.EXTRACTION_GATE]: 7,
   [HITL_REASON.B_STORY]: 8,
@@ -96,6 +100,10 @@ const HITL_SITUATION_COPY: Record<string, { title: string; why: string }> = {
   [HITL_REASON.CONTEXT]: {
     title: "參考資料量過大",
     why: "系統準備寫作背景時，一次載入的內容超過上限。請刪減或精簡各段參考文字後再繼續。",
+  },
+  [HITL_REASON.ALIGNMENT_RULES_REQUIRED]: {
+    title: "偵測到複雜智鬥，需補充規則",
+    why: "草稿包含高複雜智鬥元素，但缺少可執行的硬性規則。請補充勝負條件、回合/判定流程與籌碼代價，系統才能安全對齊後續正文。",
   },
 };
 

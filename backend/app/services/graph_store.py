@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from dataclasses import dataclass, field
 from time import sleep
-from typing import Iterable, Protocol
+from typing import Any, Iterable, Protocol
 
 from neo4j import GraphDatabase
 from neo4j.exceptions import ServiceUnavailable
@@ -13,6 +14,7 @@ from app.domain.schema import (
     ConceptNode,
     EdgeMutation,
     EdgeType,
+    EnforcedRuleContext,
     EpochNode,
     EventNode,
     GraphEdge,
@@ -24,7 +26,60 @@ from app.domain.schema import (
     NodeMutation,
     NodeType,
     PersonaNode,
+    RuleNode,
 )
+
+
+def _tags_from_storage(props: dict[str, Any]) -> list[str]:
+    raw = props.get("tags")
+    if not isinstance(raw, list):
+        return []
+    return [str(x).strip() for x in raw if str(x).strip()]
+
+
+def _metadata_dict_from_json_prop(props: dict[str, Any], key: str = "metadata_json") -> dict[str, Any]:
+    raw = props.get(key)
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def _dump_metadata_json(metadata: dict[str, Any] | None) -> str:
+    if not metadata:
+        return ""
+    try:
+        return json.dumps(metadata, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return ""
+
+
+def _prepare_neo4j_node_properties(node: GraphNode, story_id: str) -> dict[str, Any]:
+    props = node.model_dump(mode="json")
+    props["story_id"] = story_id
+    meta = props.pop("metadata", None) or {}
+    props["metadata_json"] = _dump_metadata_json(meta if isinstance(meta, dict) else {})
+    return props
+
+
+def _prepare_neo4j_rel_attributes(attributes: dict[str, Any]) -> dict[str, Any]:
+    out = dict(attributes)
+    meta = out.pop("metadata", None)
+    out["metadata_json"] = _dump_metadata_json(meta if isinstance(meta, dict) else {})
+    return out
+
+
+def _tags_and_metadata_from_properties(properties: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
+    raw_tags = properties.get("tags")
+    tags: list[str] = []
+    if isinstance(raw_tags, list):
+        tags = [str(x).strip() for x in raw_tags if str(x).strip()]
+    raw_meta = properties.get("metadata")
+    meta = dict(raw_meta) if isinstance(raw_meta, dict) else {}
+    return tags, meta
 
 
 class GraphStore(Protocol):
@@ -48,6 +103,101 @@ class GraphStore(Protocol):
     def clear_macro_cast_characters(self, story_id: str) -> None:
         """Remove CHARACTER nodes created by macro compile (node_id prefix story_id_mc_)."""
         ...
+
+    def list_enforced_rules_for_context(
+        self,
+        story_id: str,
+        location_node_id: str,
+        epoch_id: str,
+        pov_character_id: str,
+    ) -> list[EnforcedRuleContext]:
+        """RULE nodes enforced at the given location and/or epoch, excluding POV exemptions."""
+        ...
+
+
+def collect_enforced_rules_for_context(
+    nodes: dict[str, GraphNode],
+    edges: dict[str, GraphEdge],
+    *,
+    location_node_id: str,
+    epoch_id: str,
+    pov_character_id: str,
+) -> list[EnforcedRuleContext]:
+    if not epoch_id:
+        return []
+    scope_ids: list[str] = [epoch_id]
+    loc = (location_node_id or "").strip()
+    if loc and loc not in scope_ids:
+        scope_ids.append(loc)
+    scope_set = set(scope_ids)
+
+    candidate_rules: set[str] = set()
+    for edge in edges.values():
+        if edge.relation_type != EdgeType.ENFORCED_IN:
+            continue
+        if edge.valid_epoch != epoch_id:
+            continue
+        if edge.target_id not in scope_set:
+            continue
+        src_node = nodes.get(edge.source_id)
+        if src_node is None or src_node.node_type != NodeType.RULE:
+            continue
+        candidate_rules.add(edge.source_id)
+
+    out: list[EnforcedRuleContext] = []
+    for rid in sorted(candidate_rules):
+        rule_node = nodes.get(rid)
+        if rule_node is None or rule_node.node_type != NodeType.RULE:
+            continue
+        is_active = getattr(rule_node, "is_active", True)
+        if not is_active:
+            continue
+        exempt_ids = {
+            e.target_id
+            for e in edges.values()
+            if e.source_id == rid and e.relation_type == EdgeType.EXEMPT_FROM
+        }
+        if pov_character_id and pov_character_id in exempt_ids:
+            continue
+        restrict_names: list[str] = []
+        seen_r: set[str] = set()
+        for e in edges.values():
+            if e.source_id != rid or e.relation_type != EdgeType.RESTRICTS:
+                continue
+            tgt = nodes.get(e.target_id)
+            if tgt is None:
+                continue
+            name = (tgt.canonical_name or "").strip()
+            if name and name not in seen_r:
+                seen_r.add(name)
+                restrict_names.append(name)
+        exempt_names: list[str] = []
+        seen_e: set[str] = set()
+        for e in edges.values():
+            if e.source_id != rid or e.relation_type != EdgeType.EXEMPT_FROM:
+                continue
+            tgt = nodes.get(e.target_id)
+            if tgt is None:
+                continue
+            name = (tgt.canonical_name or "").strip()
+            if name and name not in seen_e:
+                seen_e.add(name)
+                exempt_names.append(name)
+        desc = getattr(rule_node, "description", "") or ""
+        penalty = getattr(rule_node, "penalty", None)
+        if penalty is not None:
+            penalty = str(penalty).strip() or None
+        out.append(
+            EnforcedRuleContext(
+                rule_id=rid,
+                canonical_name=rule_node.canonical_name or rid,
+                description=desc,
+                penalty=penalty,
+                restrict_target_names=restrict_names,
+                exempt_character_names=exempt_names,
+            )
+        )
+    return out
 
 
 @dataclass
@@ -112,6 +262,8 @@ class InMemoryGraphStore:
                 if mutation.action == "DELETE_EDGE":
                     self.story_edges[story_id].pop(edge_id, None)
                 else:
+                    raw_meta = mutation.attributes.get("metadata")
+                    edge_meta = dict(raw_meta) if isinstance(raw_meta, dict) else {}
                     self.story_edges[story_id][edge_id] = GraphEdge(
                         edge_id=edge_id,
                         source_id=mutation.source_id,
@@ -125,7 +277,25 @@ class InMemoryGraphStore:
                         known_by=mutation.attributes.get("known_by", []),
                         holder=mutation.attributes.get("holder", []),
                         context_details=mutation.attributes.get("context_details", ""),
+                        tags=_tags_from_storage(mutation.attributes),
+                        metadata=edge_meta,
                     )
+
+    def list_enforced_rules_for_context(
+        self,
+        story_id: str,
+        location_node_id: str,
+        epoch_id: str,
+        pov_character_id: str,
+    ) -> list[EnforcedRuleContext]:
+        self.seed_story(story_id)
+        return collect_enforced_rules_for_context(
+            self.story_nodes[story_id],
+            self.story_edges[story_id],
+            location_node_id=location_node_id,
+            epoch_id=epoch_id,
+            pov_character_id=pov_character_id,
+        )
 
 
 class Neo4jGraphStore:
@@ -156,8 +326,7 @@ class Neo4jGraphStore:
             with self.driver.session(database=self.database) as session:
                 for node in nodes:
                     label = node.node_type.value
-                    props = node.model_dump(mode="json")
-                    props["story_id"] = story_id
+                    props = _prepare_neo4j_node_properties(node, story_id)
                     session.run(
                         f"""
                         MERGE (n:StoryNode:{label} {{story_id: $story_id, node_id: $node_id}})
@@ -322,8 +491,7 @@ class Neo4jGraphStore:
                     if isinstance(mutation, NodeMutation):
                         node = GraphNodeAdapter.from_mutation(mutation)
                         label = node.node_type.value
-                        props = node.model_dump(mode="json")
-                        props["story_id"] = story_id
+                        props = _prepare_neo4j_node_properties(node, story_id)
                         session.run(
                             f"""
                             MERGE (n:StoryNode:{label} {{story_id: $story_id, node_id: $node_id}})
@@ -355,6 +523,7 @@ class Neo4jGraphStore:
                         attributes["source_id"] = mutation.source_id
                         attributes["target_id"] = mutation.target_id
                         attributes["relation_type"] = rel_type
+                        attributes = _prepare_neo4j_rel_attributes(attributes)
                         session.run(
                             f"""
                             MATCH (s:StoryNode {{story_id: $story_id, node_id: $source_id}})
@@ -370,6 +539,87 @@ class Neo4jGraphStore:
                         )
         self._run_with_retry(operation)
 
+    def list_enforced_rules_for_context(
+        self,
+        story_id: str,
+        location_node_id: str,
+        epoch_id: str,
+        pov_character_id: str,
+    ) -> list[EnforcedRuleContext]:
+        if not epoch_id:
+            return []
+        scope_ids: list[str] = [epoch_id]
+        loc = (location_node_id or "").strip()
+        if loc and loc not in scope_ids:
+            scope_ids.append(loc)
+        rows: list[dict] = []
+
+        def operation() -> None:
+            nonlocal rows
+            with self.driver.session(database=self.database) as session:
+                result = session.run(
+                    """
+                    MATCH (r:StoryNode:RULE {story_id: $story_id})
+                    WHERE coalesce(r.is_active, true) = true
+                    MATCH (r)-[e:ENFORCED_IN]->(t:StoryNode {story_id: $story_id})
+                    WHERE e.story_id = $story_id AND e.valid_epoch = $epoch_id AND t.node_id IN $scope_ids
+                    WITH DISTINCT r
+                    OPTIONAL MATCH (r)-[ex:EXEMPT_FROM {story_id: $story_id}]->(xc:StoryNode {story_id: $story_id})
+                    WITH r, collect(DISTINCT xc.node_id) AS exempt_ids
+                    WHERE $pov_id = "" OR NOT $pov_id IN exempt_ids
+                    OPTIONAL MATCH (r)-[rs:RESTRICTS {story_id: $story_id}]->(rt:StoryNode {story_id: $story_id})
+                    OPTIONAL MATCH (r)-[ex2:EXEMPT_FROM {story_id: $story_id}]->(xc2:StoryNode {story_id: $story_id})
+                    RETURN r.node_id AS rule_id,
+                           r.canonical_name AS canonical_name,
+                           coalesce(r.description, "") AS description,
+                           r.penalty AS penalty,
+                           collect(DISTINCT rt.canonical_name) AS restrict_names,
+                           collect(DISTINCT xc2.canonical_name) AS exempt_names
+                    """,
+                    story_id=story_id,
+                    epoch_id=epoch_id,
+                    scope_ids=scope_ids,
+                    pov_id=pov_character_id or "",
+                )
+                rows = [dict(record) for record in result]
+
+        self._run_with_retry(operation)
+
+        def _clean_names(raw: object) -> list[str]:
+            if not isinstance(raw, list):
+                return []
+            out_names: list[str] = []
+            seen: set[str] = set()
+            for x in raw:
+                if x is None:
+                    continue
+                s = str(x).strip()
+                if s and s not in seen:
+                    seen.add(s)
+                    out_names.append(s)
+            return out_names
+
+        out: list[EnforcedRuleContext] = []
+        for row in rows:
+            rid = str(row.get("rule_id") or "").strip()
+            if not rid:
+                continue
+            pen = row.get("penalty")
+            if pen is not None:
+                pen = str(pen).strip() or None
+            out.append(
+                EnforcedRuleContext(
+                    rule_id=rid,
+                    canonical_name=str(row.get("canonical_name") or rid).strip() or rid,
+                    description=str(row.get("description") or "").strip(),
+                    penalty=pen,
+                    restrict_target_names=_clean_names(row.get("restrict_names")),
+                    exempt_character_names=_clean_names(row.get("exempt_names")),
+                )
+            )
+        out.sort(key=lambda x: x.rule_id)
+        return out
+
 
 class GraphNodeAdapter:
     @staticmethod
@@ -379,6 +629,8 @@ class GraphNodeAdapter:
         description: str,
         aliases: list[str] | None = None,
         is_alive: bool = True,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> GraphNode:
         from app.domain.schema import CharacterNode
 
@@ -388,6 +640,8 @@ class GraphNodeAdapter:
             aliases=aliases or [],
             description=description,
             is_alive=is_alive,
+            tags=tags or [],
+            metadata=metadata or {},
         )
 
     @staticmethod
@@ -410,22 +664,43 @@ class GraphNodeAdapter:
 
     @staticmethod
     def generic(node_id: str, node_type: NodeType, properties: dict) -> GraphNode:
+        tags, meta = _tags_and_metadata_from_properties(properties)
         if node_type == NodeType.ITEM:
             return ItemNode(
                 node_id=node_id,
                 canonical_name=properties.get("canonical_name", node_id),
                 item_status=properties.get("item_status", "完好"),
                 is_unique=properties.get("is_unique", False),
+                tags=tags,
+                metadata=meta,
             )
         if node_type == NodeType.CONCEPT:
             return ConceptNode(
                 node_id=node_id,
                 canonical_name=properties.get("canonical_name", node_id),
+                aliases=properties.get("aliases", []) or [],
+                tags=tags,
+                metadata=meta,
+            )
+        if node_type == NodeType.RULE:
+            pen = properties.get("penalty")
+            if pen is not None:
+                pen = str(pen).strip() or None
+            return RuleNode(
+                node_id=node_id,
+                canonical_name=properties.get("canonical_name", node_id),
+                aliases=properties.get("aliases", []) or [],
+                description=str(properties.get("description", "") or ""),
+                penalty=pen,
+                is_active=bool(properties.get("is_active", True)),
+                tags=tags,
+                metadata=meta,
             )
         return GraphNodeAdapter.location(node_id, properties.get("canonical_name", node_id))
 
     @staticmethod
     def from_mutation(mutation: NodeMutation) -> GraphNode:
+        tags, meta = _tags_and_metadata_from_properties(mutation.properties)
         if mutation.node_type == NodeType.CHARACTER:
             return GraphNodeAdapter.character(
                 mutation.node_id,
@@ -433,6 +708,8 @@ class GraphNodeAdapter:
                 mutation.properties.get("description", ""),
                 aliases=mutation.properties.get("aliases", []),
                 is_alive=mutation.properties.get("is_alive", True),
+                tags=tags,
+                metadata=meta,
             )
         if mutation.node_type == NodeType.PERSONA:
             return PersonaNode(
@@ -441,6 +718,8 @@ class GraphNodeAdapter:
                 description=mutation.properties.get("description", ""),
                 aliases=mutation.properties.get("aliases", []),
                 is_alive=mutation.properties.get("is_alive", True),
+                tags=tags,
+                metadata=meta,
             )
         if mutation.node_type == NodeType.LOCATION:
             return LocationNode(
@@ -449,6 +728,8 @@ class GraphNodeAdapter:
                 aliases=mutation.properties.get("aliases", []),
                 environmental_condition=mutation.properties.get("environmental_condition", "正常"),
                 is_accessible=mutation.properties.get("is_accessible", True),
+                tags=tags,
+                metadata=meta,
             )
         if mutation.node_type == NodeType.EPOCH:
             return EpochNode(
@@ -456,12 +737,30 @@ class GraphNodeAdapter:
                 canonical_name=mutation.properties.get("canonical_name", mutation.node_id),
                 aliases=mutation.properties.get("aliases", []),
                 order_index=mutation.properties.get("order_index", 0),
+                tags=tags,
+                metadata=meta,
             )
         if mutation.node_type == NodeType.EVENT:
             return EventNode(
                 node_id=mutation.node_id,
                 canonical_name=mutation.properties.get("canonical_name", mutation.node_id),
                 aliases=mutation.properties.get("aliases", []),
+                tags=tags,
+                metadata=meta,
+            )
+        if mutation.node_type == NodeType.RULE:
+            pen = mutation.properties.get("penalty")
+            if pen is not None:
+                pen = str(pen).strip() or None
+            return RuleNode(
+                node_id=mutation.node_id,
+                canonical_name=mutation.properties.get("canonical_name", mutation.node_id),
+                aliases=mutation.properties.get("aliases", []),
+                description=str(mutation.properties.get("description", "") or ""),
+                penalty=pen,
+                is_active=bool(mutation.properties.get("is_active", True)),
+                tags=tags,
+                metadata=meta,
             )
         return GraphNodeAdapter.generic(mutation.node_id, mutation.node_type, mutation.properties)
 
@@ -472,7 +771,9 @@ class GraphNodeAdapter:
         base = {
             "node_id": props["node_id"],
             "canonical_name": props.get("canonical_name", props["node_id"]),
-            "aliases": props.get("aliases", []),
+            "aliases": list(props.get("aliases", []) or []),
+            "tags": _tags_from_storage(props),
+            "metadata": _metadata_dict_from_json_prop(props),
         }
         if node_type == NodeType.CHARACTER:
             return CharacterNode(node_type=node_type, description=props.get("description", ""), is_alive=props.get("is_alive", True), **base)
@@ -496,6 +797,17 @@ class GraphNodeAdapter:
             return EpochNode(node_type=node_type, order_index=props.get("order_index", 0), **base)
         if node_type == NodeType.EVENT:
             return EventNode(node_type=node_type, **base)
+        if node_type == NodeType.RULE:
+            pen = props.get("penalty")
+            if pen is not None:
+                pen = str(pen).strip() or None
+            return RuleNode(
+                node_type=node_type,
+                description=str(props.get("description", "") or ""),
+                penalty=pen,
+                is_active=bool(props.get("is_active", True)),
+                **base,
+            )
         return ConceptNode(node_type=node_type, **base)
 
     @staticmethod
@@ -526,6 +838,8 @@ def _graph_edge_from_neo4j_relationship(rel: object) -> GraphEdge:
         known_by=list(props.get("known_by", []) or []),
         holder=list(props.get("holder", []) or []),
         context_details=str(props.get("context_details", "") or ""),
+        tags=_tags_from_storage(props),
+        metadata=_metadata_dict_from_json_prop(props),
     )
 
 

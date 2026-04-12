@@ -37,12 +37,18 @@ class Settings(BaseSettings):
     supervisor_llm_model: str = ""
     author_llm_model: str = ""
     reader_llm_model: str = ""
+    copyeditor_llm_model: str = ""
     macro_temperature: float = 0.25
     director_temperature: float = 0.2
     planner_temperature: float = 0.35
     supervisor_temperature: float = 0.1
     author_temperature: float = 0.85
     reader_temperature: float = 0.3
+    copyeditor_temperature: float = 0.0
+    # Post-extraction prose cleanup (reader-approved draft); does not re-run extraction.
+    copyeditor_enabled: bool = True
+    copyeditor_prev_tail_n1_max_chars: int = 800
+    copyeditor_prev_tail_n2_max_chars: int = 500
     openai_base_url: str = "https://api.openai.com/v1"
     openai_api_key: str = ""
     openai_embedding_model: str = "text-embedding-3-small"
@@ -67,6 +73,7 @@ class Settings(BaseSettings):
     extraction_memory_full_text_budget: int = 14000
     extraction_relation_text_budget: int = 8000
     extraction_candidate_nodes_cap: int = 60
+    extraction_entity_glossary_cap: int = 40
     extraction_graph_summary_max_chars: int = 2500
     # Relation extractor: chunk canonical_entities into batches (smaller N reduces provider timeouts).
     # 0 = legacy single call with all entities in one prompt.
