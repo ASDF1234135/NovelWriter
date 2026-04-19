@@ -100,8 +100,8 @@ class GraphStore(Protocol):
     def apply_mutations(self, story_id: str, mutations: Iterable[NodeMutation | EdgeMutation]) -> None:
         ...
 
-    def clear_macro_cast_characters(self, story_id: str) -> None:
-        """Remove CHARACTER nodes created by macro compile (node_id prefix story_id_mc_)."""
+    def clear_macro_cast_characters(self, story_id: str, include_node_ids: Iterable[str] = ()) -> None:
+        """Remove macro cast CHARACTER nodes by story prefix and explicit node ids."""
         ...
 
     def list_enforced_rules_for_context(
@@ -235,17 +235,23 @@ class InMemoryGraphStore:
         edges = list(self.story_edges[story_id].values())
         return GraphSnapshot(nodes=nodes, edges=edges)
 
-    def clear_macro_cast_characters(self, story_id: str) -> None:
+    def clear_macro_cast_characters(self, story_id: str, include_node_ids: Iterable[str] = ()) -> None:
         self.seed_story(story_id)
         prefix = f"{story_id}_mc_"
+        extra_ids = {str(nid).strip() for nid in include_node_ids if str(nid).strip()}
         nodes = self.story_nodes[story_id]
         for nid in list(nodes.keys()):
-            if nid.startswith(prefix):
+            if nid.startswith(prefix) or nid in extra_ids:
                 del nodes[nid]
         edges = self.story_edges[story_id]
         for eid in list(edges.keys()):
             edge = edges[eid]
-            if edge.source_id.startswith(prefix) or edge.target_id.startswith(prefix):
+            if (
+                edge.source_id.startswith(prefix)
+                or edge.target_id.startswith(prefix)
+                or edge.source_id in extra_ids
+                or edge.target_id in extra_ids
+            ):
                 del edges[eid]
 
     def remove_story(self, story_id: str) -> None:
@@ -338,8 +344,9 @@ class Neo4jGraphStore:
                     )
         self._run_with_retry(operation)
 
-    def clear_macro_cast_characters(self, story_id: str) -> None:
+    def clear_macro_cast_characters(self, story_id: str, include_node_ids: Iterable[str] = ()) -> None:
         prefix = f"{story_id}_mc_"
+        extra_ids = [str(nid).strip() for nid in include_node_ids if str(nid).strip()]
 
         def operation() -> None:
             with self.driver.session(database=self.database) as session:
@@ -347,10 +354,12 @@ class Neo4jGraphStore:
                     """
                     MATCH (n:StoryNode {story_id: $story_id})
                     WHERE n.node_id STARTS WITH $prefix
+                       OR n.node_id IN $extra_ids
                     DETACH DELETE n
                     """,
                     story_id=story_id,
                     prefix=prefix,
+                    extra_ids=extra_ids,
                 )
 
         self._run_with_retry(operation)

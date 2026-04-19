@@ -1,0 +1,135 @@
+import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import { MacroPlanPanel } from "./MacroPlanPanel";
+import { putMacroPlan } from "../../api";
+
+vi.mock("../../api", () => ({
+  putMacroPlan: vi.fn().mockResolvedValue({
+    story_id: "s1",
+    bible: {},
+    volumes: [],
+    anchors: [],
+    cast: [],
+    cast_seed: [],
+    protagonist_character_id: "",
+    compiled: true,
+  }),
+}));
+
+describe("MacroPlanPanel", () => {
+  it("shows read mode by default and enters bible edit mode", async () => {
+    render(
+      <MacroPlanPanel
+        macroData={{
+          story_id: "s1",
+          bible: { story_genre: "奇幻", tone: "沉穩", world_rules: ["rule"], factions: ["f"], themes: ["t"], writing_note: ["w"] },
+          volumes: [{ volume_id: "v1", title: "卷一", summary: "摘要", chapter_start: 1, chapter_end: 3 }],
+          anchors: [{ anchor_id: "a1", volume_id: "v1", title: "錨點", description: "描述", chapter_target: 2, target_state: {}, priority: 2 }],
+          cast: [{ node_id: "char_1", canonical_name: "主角", role: "protagonist" }],
+        }}
+        storyId="s1"
+        configurationLocked={false}
+        onMacroDataUpdate={vi.fn()}
+        onBusy={vi.fn()}
+        onError={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "編輯世界觀總表" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "儲存" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "編輯世界觀總表" }));
+    expect(screen.getByRole("button", { name: "儲存" })).toBeInTheDocument();
+    expect(screen.getByDisplayValue("奇幻")).toBeInTheDocument();
+  });
+
+  it("shows validation error when required bible fields are empty", async () => {
+    render(
+      <MacroPlanPanel
+        macroData={{
+          story_id: "s1",
+          bible: {},
+          volumes: [{ volume_id: "v1", title: "卷一", summary: "摘要", chapter_start: 1, chapter_end: 3 }],
+          anchors: [
+            {
+              anchor_id: "a1",
+              volume_id: "v1",
+              title: "錨點",
+              description: "描述",
+              chapter_target: 2,
+              target_state: { goal: "前進" },
+              priority: 1,
+            },
+          ],
+          cast: [{ node_id: "char_1", canonical_name: "主角", role: "protagonist" }],
+        }}
+        storyId="s1"
+        configurationLocked={false}
+        onMacroDataUpdate={vi.fn()}
+        onBusy={vi.fn()}
+        onError={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "編輯世界觀總表" }));
+    fireEvent.click(screen.getByRole("button", { name: "儲存" }));
+    expect(await screen.findByText(/請填寫「故事類型」/)).toBeInTheDocument();
+  });
+
+  it("saves with extra list and optional empty target_state", async () => {
+    const onMacroDataUpdate = vi.fn();
+    render(
+      <MacroPlanPanel
+        macroData={{
+          story_id: "s1",
+          bible: { story_genre: "科幻", tone: "冷峻", world_rules: ["rule"], factions: ["f"], themes: ["t"], writing_note: ["w"], tags: ["A", "B"] },
+          volumes: [{ volume_id: "v1", title: "卷一", summary: "摘要", chapter_start: 1, chapter_end: 3, target_volume_words: 12000 }],
+          anchors: [{ anchor_id: "a1", volume_id: "v1", title: "錨點", description: "描述", chapter_target: 2, target_state: { ready: true }, priority: 2 }],
+          cast: [{ node_id: "char_1", canonical_name: "主角", role: "protagonist" }],
+        }}
+        storyId="s1"
+        configurationLocked={false}
+        onMacroDataUpdate={onMacroDataUpdate}
+        onBusy={vi.fn()}
+        onError={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "情節節點" }));
+    fireEvent.click(screen.getByRole("button", { name: "編輯" }));
+    const stateArea = screen.getByRole("textbox", { name: /本章敘事目標/ });
+    fireEvent.change(stateArea, { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "儲存" }));
+    await screen.findByRole("button", { name: "新增情節節點" });
+
+    expect(putMacroPlan).toHaveBeenCalled();
+    const calls = vi.mocked(putMacroPlan).mock.calls;
+    const payload = calls[calls.length - 1]?.[1];
+    expect(payload?.bible.genre).toBe("科幻");
+    expect((payload?.bible as { extra?: { tags?: string[] } }).extra?.tags).toEqual(["A", "B"]);
+    expect(payload?.anchors[0].target_state).toEqual({});
+  });
+
+  it("shows volume id as non-input readout in volume edit mode", () => {
+    render(
+      <MacroPlanPanel
+        macroData={{
+          story_id: "s1",
+          bible: { genre: "奇幻", tone: "沉穩", world_rules: ["rule"], factions: ["f"], themes: ["t"], writing_note: ["w"] },
+          volumes: [{ volume_id: "v1", title: "卷一", summary: "摘要", chapter_start: 1, chapter_end: 3 }],
+          anchors: [{ anchor_id: "a1", volume_id: "v1", title: "錨點", description: "描述", chapter_target: 2, target_state: {}, priority: 1 }],
+          cast: [{ node_id: "char_1", canonical_name: "主角", role: "protagonist" }],
+        }}
+        storyId="s1"
+        configurationLocked={false}
+        onMacroDataUpdate={vi.fn()}
+        onBusy={vi.fn()}
+        onError={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "分卷" }));
+    fireEvent.click(screen.getByRole("button", { name: "編輯" }));
+    expect(screen.getByText("v1")).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: /volume-id/ })).not.toBeInTheDocument();
+  });
+});

@@ -253,6 +253,41 @@ def test_anchor_service_can_use_structured_llm_output() -> None:
     assert cast[1].canonical_name == "灰鴉"
 
 
+def test_normalize_generated_bible_moves_themes_and_dedupes_extra_primary_fields() -> None:
+    service = AnchorService()
+    story_input = StoryInput(title="t", premise="p", target_total_words=12000)
+    output = MacroPlanOutput(
+        bible={
+            "themes": ["命運", "背叛"],
+            "extra": {
+                "theme": "should_remove",
+                "narrative_pov": "should_remove",
+                "writing_style": "should_remove",
+                "magic": "low",
+            },
+        }
+    )
+    out = service._normalize_generated_bible(story_input, output)
+    assert out.get("theme") == ["命運", "背叛"]
+    assert "themes" not in out
+    assert isinstance(out.get("extra"), dict)
+    assert out["extra"] == {"magic": "low"}
+
+
+def test_macro_prompt_requires_primary_fields_not_in_extra() -> None:
+    service = AnchorService()
+    prompt = service._build_macro_prompt(
+        StoryInput(title="王都疑雲", premise="測試 premise", target_total_words=45000),
+        fixed_total_chapters=18,
+        fixed_total_volumes=3,
+    )
+    data = json.loads(prompt)
+    requirements = data.get("requirements") or []
+    merged = "\n".join(str(x) for x in requirements)
+    assert "theme / narrative_pov / writing_style" in merged
+    assert "不要放進 extra" in merged
+
+
 def test_normalize_cast_merge_seed_keeps_missing_name() -> None:
     service = AnchorService()
     _, _, cast, _, _ = service.compile_macro_plan(

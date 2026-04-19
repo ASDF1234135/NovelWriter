@@ -8,6 +8,7 @@ import {
   fetchGraph,
   fetchMacroSnapshot,
   fetchStoryDetail,
+  fetchWritingPreamble,
   fetchWorkflow,
   macroCompile,
   putMacroPlan,
@@ -19,7 +20,6 @@ import {
   sendContextPrune,
   sendDirectorPatch,
   sendDraftEdit,
-  sendExtractionHints,
   sendExtractionRemap,
   sendHitlDecision,
   sendOutlineEdit,
@@ -34,6 +34,7 @@ import { StoryLibrary } from "../features/story-library/StoryLibrary";
 import { StorySetupForm } from "../features/story-setup/StorySetupForm";
 import { WorkflowMonitor } from "../features/workflow-monitor/WorkflowMonitor";
 import type {
+  AiFreedomLevel,
   ChapterContent,
   ChapterSummary,
   GraphSnapshot,
@@ -45,8 +46,13 @@ import type {
   StoryInput,
   StoryProjectBundlePayload,
   WorkflowPayload,
+  WritingPreambleResponse,
 } from "../types";
 import { AppShell, type AppView } from "./AppShell";
+import { mergeMacroBibles } from "../features/macro-plan/macroPlanHelpers";
+
+/** Same heuristic as backend OUTLINE_MIN_CHARS_FOR_FULL_BINDING — UX hint only. */
+const OUTLINE_FULL_BINDING_MIN_CHARS = 100;
 
 function storyDetailToInput(d: StoryDetailResponse): StoryInput {
   const bible = d.bible;
@@ -261,7 +267,10 @@ function mergeMacroPlan(current: MacroPlanPutBody, incoming: MacroPlanPutBody): 
     }
   }
   return {
-    bible: Object.keys(current.bible ?? {}).length ? current.bible : incoming.bible,
+    bible: mergeMacroBibles(
+      (current.bible ?? {}) as Record<string, unknown>,
+      (incoming.bible ?? {}) as Record<string, unknown>,
+    ) as MacroPlanPutBody["bible"],
     volumes,
     anchors,
     cast,
@@ -291,10 +300,25 @@ function namespaceMacroPlanIdsForStory(body: MacroPlanPutBody, storyId: string):
     const volume_id = volumeMap.get(rawVolumeId) ?? (rawVolumeId.startsWith(`${storyId}_`) ? rawVolumeId : `${storyId}_${rawVolumeId}`);
     return { ...a, anchor_id, volume_id };
   });
+  const castIdMap = new Map<string, string>();
+  const mappedCast = body.cast.map((c, idx) => {
+    const rawNodeId = String(c.node_id ?? "").trim();
+    const fallbackNodeId = `${storyId}_mc_${String(idx + 1).padStart(2, "0")}`;
+    const node_id = rawNodeId.startsWith(`${storyId}_`) ? rawNodeId : fallbackNodeId;
+    if (rawNodeId) castIdMap.set(rawNodeId, node_id);
+    castIdMap.set(node_id, node_id);
+    return { ...c, node_id };
+  });
+  const rawProtagonistId = String(body.protagonist_character_id ?? "").trim();
+  const protagonist_character_id =
+    castIdMap.get(rawProtagonistId) ??
+    (rawProtagonistId.startsWith(`${storyId}_`) ? rawProtagonistId : null);
   return {
     ...body,
     volumes: mappedVolumes,
     anchors: mappedAnchors,
+    cast: mappedCast,
+    protagonist_character_id,
   };
 }
 
@@ -326,6 +350,9 @@ export default function App() {
   const [configurationLocked, setConfigurationLocked] = useState(false);
   const [chapterOutline, setChapterOutline] = useState("");
   const [chapterHardRules, setChapterHardRules] = useState("");
+  const [aiFreedomLevel, setAiFreedomLevel] = useState<AiFreedomLevel>("balanced");
+  const [writingPreamble, setWritingPreamble] = useState<WritingPreambleResponse | null>(null);
+  const [preamblePanelOpen, setPreamblePanelOpen] = useState(true);
   const [configVersion, setConfigVersion] = useState(0);
   const workflowEventsUnsubRef = useRef<(() => void) | null>(null);
   const storyIdRef = useRef(storyId);
@@ -393,6 +420,26 @@ export default function App() {
     };
   }, [storyId, chapterId]);
 
+  useEffect(() => {
+    if (!storyId || chapterId < 1) {
+      setWritingPreamble(null);
+      return;
+    }
+    let cancelled = false;
+    setWritingPreamble(null);
+    void (async () => {
+      try {
+        const p = await fetchWritingPreamble(storyId, chapterId);
+        if (!cancelled) setWritingPreamble(p);
+      } catch {
+        if (!cancelled) setWritingPreamble(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [storyId, chapterId]);
+
   const latestChapterId = useMemo(() => {
     if (!chapters.length) return 1;
     return Math.max(...chapters.map((c) => c.chapter_id));
@@ -434,6 +481,7 @@ export default function App() {
       setGraph(null);
       setChapters([]);
       setSelectedChapter(null);
+      setWritingPreamble(null);
       setView("setup");
     } catch (err) {
       setError(err instanceof Error ? err.message : "無法建立故事");
@@ -454,6 +502,7 @@ export default function App() {
     setSelectedChapter(null);
     setChapterId(1);
     setChapterAlreadyCompleted(false);
+    setWritingPreamble(null);
     setStoryConfigSnapshot(null);
     setConfigurationLocked(false);
     setConfigVersion((v) => v + 1);
@@ -474,6 +523,7 @@ export default function App() {
     setSelectedChapter(null);
     setChapterId(1);
     setChapterAlreadyCompleted(false);
+    setWritingPreamble(null);
     setStoryConfigSnapshot(null);
     setConfigurationLocked(false);
     setConfigVersion((v) => v + 1);
@@ -680,7 +730,11 @@ export default function App() {
     workflowEventsUnsubRef.current = null;
     setBusy(true);
     try {
-      const initial = await runChapter(storyId, chapterId, { chapterOutline, chapterHardRules });
+      const initial = await runChapter(storyId, chapterId, {
+        chapterOutline,
+        chapterHardRules,
+        aiFreedomLevel,
+      });
       setWorkflow(initial);
       try {
         const detail = await fetchStoryDetail(storyId);
@@ -741,14 +795,15 @@ export default function App() {
         plan_retry_limit: 3,
         draft_loop_retry_limit: 3,
       } satisfies StoryInput);
+    const vols = macroData?.volumes ?? [];
+    const ancs = macroData?.anchors ?? [];
+    const includeMacro = vols.length > 0 && ancs.length > 0 && macroData;
     const payload: StoryProjectBundlePayload = {
       kind: "story_project_bundle",
       version: 1,
-      story,
+      story: includeMacro ? { ...story, bible: {} } : story,
     };
-    const vols = macroData?.volumes ?? [];
-    const ancs = macroData?.anchors ?? [];
-    if (vols.length > 0 && ancs.length > 0 && macroData) {
+    if (includeMacro && macroData) {
       payload.macro_plan = buildMacroPutBody(macroData);
     }
     downloadJsonFile(`${storyId}-project.json`, payload);
@@ -759,9 +814,7 @@ export default function App() {
     const { story: parsedStory, macro_plan: parsedMacroRaw } = parseProjectBundleJson(jsonText);
     const parsedMacro = parsedMacroRaw ? namespaceMacroPlanIdsForStory(parsedMacroRaw, storyId) : undefined;
     const modeLabel = mode === "replace" ? "覆蓋" : "合併";
-    const storySummary = parsedStory
-      ? `故事：${parsedStory.title} · 核心角色 ${parsedStory.cast_seed?.length ?? 0} 位`
-      : "（無故事區塊）";
+    const storySummary = parsedStory ? `故事：${parsedStory.title}` : "（無故事區塊）";
     const macroSummary = parsedMacro
       ? `宏觀：分卷 ${parsedMacro.volumes.length} · 里程碑 ${parsedMacro.anchors.length} · 人物 ${parsedMacro.cast.length}`
       : "（無宏觀區塊）";
@@ -782,6 +835,9 @@ export default function App() {
           draft_loop_retry_limit: 3,
         } satisfies StoryInput);
       const merged = mode === "replace" ? parsedStory : mergeStorySettings(current, parsedStory);
+      if (parsedMacro && (!merged.bible || Object.keys(merged.bible).length === 0) && isObjectRecord(parsedMacro.bible)) {
+        merged.bible = parsedMacro.bible as Record<string, unknown>;
+      }
       await patchStory(storyId, {
         title: merged.title,
         premise: merged.premise,
@@ -875,17 +931,6 @@ export default function App() {
         applyHitlWorkflowResponse(await sendDirectorPatch(workflow.run.run_id, payload));
       } catch (err) {
         setError(err instanceof Error ? err.message : "無法套用章節方向調整");
-        setBusy(false);
-      }
-    },
-    onExtractionHints: async (payload: Parameters<typeof sendExtractionHints>[1]) => {
-      if (!workflow) return;
-      setBusy(true);
-      setError("");
-      try {
-        applyHitlWorkflowResponse(await sendExtractionHints(workflow.run.run_id, payload));
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "無法套用專名線索");
         setBusy(false);
       }
     },
@@ -1038,11 +1083,122 @@ export default function App() {
                 重新整理狀態
               </button>
             </div>
+
+            {storyId ? (
+              <div className="mb-3 overflow-hidden rounded-xl border border-outline-variant/15 bg-surface-container/90">
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-between gap-2 px-4 py-3 text-left hover:bg-surface-container-highest/50"
+                  onClick={() => setPreamblePanelOpen((o) => !o)}
+                >
+                  <span className="flex min-w-0 flex-1 items-center gap-2">
+                    <span className="font-label text-[11px] font-bold uppercase tracking-wider text-secondary">
+                      開寫前參考
+                    </span>
+                    <span className="truncate font-body text-sm text-on-surface-variant">
+                      劇情進度（至第 {Math.max(0, chapterId - 1)} 章）
+                    </span>
+                  </span>
+                  <span className="material-symbols-outlined shrink-0 text-on-surface-variant">
+                    {preamblePanelOpen ? "expand_less" : "expand_more"}
+                  </span>
+                </button>
+                {preamblePanelOpen && !writingPreamble ? (
+                  <div className="border-t border-outline-variant/10 px-4 py-3 font-body text-sm text-on-surface-variant">
+                    載入提示中…
+                  </div>
+                ) : null}
+                {preamblePanelOpen && writingPreamble ? (
+                  <div className="space-y-4 border-t border-outline-variant/10 px-4 py-3">
+                    <div>
+                      <p className="mb-2 font-label text-[10px] font-bold uppercase tracking-wider text-secondary">
+                        劇情進度
+                      </p>
+                      {chapterId <= 1 ? (
+                        <p className="font-body text-sm leading-relaxed text-on-surface">
+                          這是第 1 章開篇。
+                          {storyConfigSnapshot?.premise?.trim() ? (
+                            <>
+                              {" "}
+                              故事前提：
+                              <span className="text-on-surface-variant"> {storyConfigSnapshot.premise.trim()}</span>
+                            </>
+                          ) : (
+                            <span className="text-on-surface-variant"> 可先在大綱寫下開場要交代的世界與人物處境。</span>
+                          )}
+                        </p>
+                      ) : (
+                        <>
+                          {writingPreamble.plot_progress.previous_chapter.plot_summary ? (
+                            <p className="mb-2 font-body text-sm leading-relaxed text-on-surface">
+                              <span className="font-semibold text-on-surface">
+                                第 {writingPreamble.plot_progress.previous_chapter.chapter_id} 章摘要
+                              </span>
+                              {writingPreamble.plot_progress.previous_chapter.status ? (
+                                <span className="ml-2 text-xs text-on-surface-variant">
+                                  （{writingPreamble.plot_progress.previous_chapter.status}）
+                                </span>
+                              ) : null}
+                              ：{writingPreamble.plot_progress.previous_chapter.plot_summary}
+                            </p>
+                          ) : (
+                            <p className="mb-2 font-body text-sm text-on-surface-variant">
+                              尚無第 {chapterId - 1} 章的結構化摘要；完稿並跑過流程後會累積在此。
+                            </p>
+                          )}
+                          {writingPreamble.plot_progress.milestones.length > 0 ? (
+                            <ul className="mb-2 list-inside list-disc space-y-1 font-body text-sm text-on-surface-variant">
+                              {writingPreamble.plot_progress.milestones.map((m) => (
+                                <li key={`${m.chapter_start}-${m.chapter_end}`}>
+                                  第 {m.chapter_start}–{m.chapter_end} 章段：{m.milestone_summary}
+                                </li>
+                              ))}
+                            </ul>
+                          ) : null}
+                          {writingPreamble.plot_progress.recent_summaries.length > 0 ? (
+                            <ul className="list-inside list-disc space-y-1 font-body text-sm text-on-surface-variant">
+                              {writingPreamble.plot_progress.recent_summaries.map((r) => (
+                                <li key={r.chapter_id}>
+                                  第 {r.chapter_id} 章：{r.plot_summary || "（無摘要）"}
+                                </li>
+                              ))}
+                            </ul>
+                          ) : null}
+                          {writingPreamble.plot_progress.earlier_chapters_with_summary_count >
+                          writingPreamble.plot_progress.recent_summaries.length ? (
+                            <p className="mt-2 font-body text-xs text-on-surface-variant">
+                              更早章節另有 {writingPreamble.plot_progress.earlier_chapters_with_summary_count} 章已存摘要；
+                              長弧已收錄於上方里程碑，全文可於手稿檢視。
+                            </p>
+                          ) : null}
+                        </>
+                      )}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
             <div className="rounded-xl border border-outline-variant/15 bg-surface-container px-4 py-3">
+              <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+                <label className="font-body text-sm text-on-surface">
+                  <span className="mb-1 block font-label text-[10px] uppercase tracking-wider text-outline">創作自由度</span>
+                  <select
+                    value={aiFreedomLevel}
+                    onChange={(e) => setAiFreedomLevel(e.target.value as AiFreedomLevel)}
+                    disabled={!storyId || busy || workflowConflictLocked || chapterAlreadyCompleted}
+                    className="auteur-input w-full max-w-xs text-sm sm:w-auto"
+                  >
+                    <option value="strict">嚴格（已寫明處不可改；大綱需較具體才 FULL 綁定）</option>
+                    <option value="balanced">平衡（預設）</option>
+                    <option value="wild">狂野（留白腦補多，仍標 [AI_INVENTION]）</option>
+                  </select>
+                </label>
+              </div>
               <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <p className="font-label text-[10px] font-bold uppercase tracking-wider text-secondary">Chapter Direction</p>
-                  <p className="font-body text-sm text-on-surface">本章寫作大綱（可偏差）</p>
+                  <p className="font-body text-sm text-on-surface">本章寫作大綱</p>
                 </div>
                 {chapterAlreadyCompleted ? (
                   <span className="rounded-full border border-tertiary/30 bg-tertiary/10 px-2 py-1 text-xs text-tertiary">
@@ -1057,8 +1213,13 @@ export default function App() {
                 rows={3}
                 placeholder="例如：本章以對話推進謎底、避免打鬥場面…"
                 disabled={!storyId || busy || workflowConflictLocked || chapterAlreadyCompleted}
-                className="mb-3 w-full resize-y rounded-lg border border-outline-variant/20 bg-surface-container-highest px-3 py-2 font-body text-sm text-on-surface placeholder:text-on-surface-variant/50"
+                className="mb-2 w-full resize-y rounded-lg border border-outline-variant/20 bg-surface-container-highest px-3 py-2 font-body text-sm text-on-surface placeholder:text-on-surface-variant/50"
               />
+              {chapterOutline.trim().length > 0 && chapterOutline.trim().length < OUTLINE_FULL_BINDING_MIN_CHARS ? (
+                <p className="mb-3 font-body text-xs text-secondary">
+                  大綱較短（低於 {OUTLINE_FULL_BINDING_MIN_CHARS} 字）：流程會保留 AI 填坑權；strict 僅約束你已寫明的片段。
+                </p>
+              ) : null}
               <div className="mb-2">
                 <p className="font-body text-sm text-on-surface">本章硬性規則（需保真、嚴格遵守）</p>
               </div>

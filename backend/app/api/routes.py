@@ -30,6 +30,7 @@ from app.services.graph_store import GraphStore
 from app.services.llm import LLMProviderError
 from app.services.workflow.service import (
     ChapterAlreadyCompletedError,
+    HitlExtractionHintsDisabledError,
     HitlNotWaitingError,
     MacroCompileAlreadyRunningError,
     MacroPlanValidationError,
@@ -38,6 +39,7 @@ from app.services.workflow.service import (
 )
 from app.repositories.sqlite.story_repository import StoryRepository
 from app.repositories.sqlite.workflow_repository import WorkflowRepository
+from app.services.writing_preamble import build_writing_preamble
 
 router = APIRouter()
 
@@ -186,6 +188,9 @@ def run_chapter(
             author_chapter_plan=run_body.author_chapter_plan,
             chapter_outline=run_body.chapter_outline,
             chapter_hard_rules=run_body.chapter_hard_rules,
+            ai_freedom_level=run_body.ai_freedom_level,
+            extraction_surface_hints=run_body.extraction_surface_hints,
+            waive_mandatory_node_ids=run_body.waive_mandatory_node_ids,
         )
         run_id = payload["run"]["run_id"]
         background_tasks.add_task(workflow_service.execute_stored_run, run_id)
@@ -217,6 +222,20 @@ def get_chapter(
 ) -> dict:
     try:
         return workflow_service.get_chapter(story_id, chapter_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/stories/{story_id}/chapters/{chapter_id}/writing-preamble")
+def get_writing_preamble(
+    story_id: str,
+    chapter_id: int,
+    story_repository: StoryRepository = Depends(get_story_repository),
+) -> dict:
+    if chapter_id < 1:
+        raise HTTPException(status_code=400, detail="chapter_id must be >= 1")
+    try:
+        return build_writing_preamble(story_repository, story_id, chapter_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -366,6 +385,8 @@ def hitl_extraction_hints(
         workflow_service.apply_hitl_extraction_hints(run_id, request)
         background_tasks.add_task(workflow_service.execute_stored_run, run_id)
         return workflow_service.get_workflow(run_id)
+    except HitlExtractionHintsDisabledError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except HitlNotWaitingError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 

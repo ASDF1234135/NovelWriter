@@ -16,7 +16,7 @@ def coerce_new_elements_items(items: list[Any] | None) -> list[dict[str, Any]]:
     return out
 
 from app.core.config import get_settings
-from app.domain.schema import EventOutline
+from app.domain.schema import EventOutline, StoryCastMemberStored
 from app.domain.state import (
     SafeAuthorPayload,
     SafePlannerPayload,
@@ -98,6 +98,10 @@ def build_planner_payload(state: dict, story: dict | None = None, volumes: list[
         ending_vibe_cooldown_constraint=dict(state.get("ending_vibe_cooldown_constraint") or {}),
         writing_note=list(state.get("writing_note") or []),
         author_chapter_plan=str(state.get("chapter_outline") or state.get("author_chapter_plan") or ""),
+        ai_freedom_level=str(state.get("ai_freedom_level") or "balanced"),
+        outline_binding_mode=str(state.get("outline_binding_mode") or "ABSENT"),
+        director_state_brief=str(state.get("director_state_brief") or ""),
+        this_chapter_pacing_limit=str(state.get("this_chapter_pacing_limit") or ""),
     )
 
 
@@ -115,6 +119,12 @@ def build_author_payload(state: dict) -> SafeAuthorPayload:
         mandatory_entities=mandatory,
         forbidden_reveals=list(state.get("forbidden_reveals") or []),
         allowed_reveals=list(state.get("allowed_identity_reveals_this_chapter") or []),
+    )
+    active_profiles = _build_active_character_profiles(
+        int(state.get("chapter_id") or 0),
+        list(state.get("cast_slim_view") or []),
+        list(state.get("recent_entity_names") or []),
+        list(state.get("cast_full_view") or []),
     )
     return SafeAuthorPayload(
         narrative_script=state["narrative_script"],
@@ -139,13 +149,67 @@ def build_author_payload(state: dict) -> SafeAuthorPayload:
         local_enforced_rules_context=str(state.get("local_enforced_rules_context") or ""),
         author_safe_continuity_notes=sanitized["author_safe_continuity_notes"],
         recent_entity_names=sanitized["recent_entity_names"],
+        active_character_profiles=active_profiles,
         draft_feedback=state["draft_feedback"],
         reader_feedback=state["reader_feedback"],
         length_adjustment=state.get("length_adjustment", "NONE"),
         mandatory_new_entities=sanitized["mandatory_new_entities"],
         writing_note=list(state.get("writing_note") or []),
         safe_chapter_rules=str(state.get("safe_chapter_rules") or ""),
+        ai_freedom_level=str(state.get("ai_freedom_level") or "balanced"),
+        outline_binding_mode=str(state.get("outline_binding_mode") or "ABSENT"),
     )
+
+
+def _build_active_character_profiles(
+    current_chapter_id: int,
+    cast_slim_view: list[dict[str, Any]],
+    recent_entity_names: list[str],
+    cast_full_view: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    full_index: dict[str, StoryCastMemberStored] = {}
+    for raw in cast_full_view:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            member = StoryCastMemberStored.model_validate(raw)
+        except Exception:
+            continue
+        full_index[member.node_id] = member
+    recent_names = {str(name or "").strip() for name in recent_entity_names if str(name or "").strip()}
+    rows: list[dict[str, str]] = []
+    for raw in cast_slim_view:
+        if not isinstance(raw, dict):
+            continue
+        node_id = str(raw.get("node_id") or "").strip()
+        name = str(raw.get("name") or "").strip()
+        if not node_id or not name:
+            continue
+        if recent_names and name not in recent_names:
+            continue
+        member = full_index.get(node_id)
+        past_ref = ""
+        if member is not None and member.arc_history:
+            chunks: list[str] = []
+            for milestone in member.arc_history:
+                if int(milestone.chapter_id or 0) > current_chapter_id:
+                    continue
+                prev_tag = max(int(milestone.chapter_id or 0) - 1, 0)
+                after_tag = int(milestone.chapter_id or 0)
+                chunks.append(
+                    f"[第{prev_tag}章前]{milestone.old_personality or '未記錄'}; "
+                    f"[第{after_tag}章後]{milestone.new_personality or '未記錄'}"
+                )
+            past_ref = "；".join(chunks[:3])
+        rows.append(
+            {
+                "canonical_name": name,
+                "current_personality": str(raw.get("personality") or ""),
+                "current_speech_style": str(raw.get("speech_style") or ""),
+                "past_personality_reference": past_ref,
+            }
+        )
+    return rows[:8]
 
 
 def build_plan_supervisor_payload(state: dict) -> SafeSupervisorPayload:
@@ -190,6 +254,9 @@ def build_plan_supervisor_payload(state: dict) -> SafeSupervisorPayload:
         new_active_b_stories=list(state.get("new_active_b_stories") or []),
         request_new_b_story=state.get("request_new_b_story"),
         previous_chapter_tail_excerpt=state.get("previous_chapter_tail_excerpt", ""),
+        chapter_outline=str(state.get("chapter_outline") or state.get("author_chapter_plan") or ""),
+        ai_freedom_level=str(state.get("ai_freedom_level") or "balanced"),
+        outline_binding_mode=str(state.get("outline_binding_mode") or "ABSENT"),
     )
 
 
@@ -295,6 +362,9 @@ def compact_plan_supervisor_payload_for_prompt(payload: SafeSupervisorPayload) -
         "proposed_new_nodes": (payload.proposed_new_nodes or [])[:3],
         "new_active_b_stories": (getattr(payload, "new_active_b_stories", None) or [])[:2],
         "request_new_b_story": getattr(payload, "request_new_b_story", None),
+        "chapter_outline": (getattr(payload, "chapter_outline", None) or "")[:900],
+        "ai_freedom_level": getattr(payload, "ai_freedom_level", None) or "balanced",
+        "outline_binding_mode": getattr(payload, "outline_binding_mode", None) or "ABSENT",
     }
     return json.dumps(compact, ensure_ascii=False, indent=2)
 

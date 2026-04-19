@@ -1,4 +1,5 @@
 import type {
+  AiFreedomLevel,
   ChapterContent,
   ChapterSummary,
   GraphSnapshot,
@@ -10,6 +11,7 @@ import type {
   StoryListItem,
   StoryPatch,
   WorkflowPayload,
+  WritingPreambleResponse,
 } from "./types";
 
 const API_BASE = "http://localhost:8000/api";
@@ -126,10 +128,20 @@ export async function macroCompile(storyId: string): Promise<MacroCompileData> {
 export async function runChapter(
   storyId: string,
   chapterId: number,
-  options?: { chapterOutline?: string; chapterHardRules?: string; authorChapterPlan?: string },
+  options?: {
+    chapterOutline?: string;
+    chapterHardRules?: string;
+    authorChapterPlan?: string;
+    aiFreedomLevel?: AiFreedomLevel;
+    extractionSurfaceHints?: Array<{ node_id: string; surface_forms: string[] }>;
+    waiveMandatoryNodeIds?: string[];
+  },
 ): Promise<WorkflowPayload> {
   const chapterOutline = (options?.chapterOutline ?? options?.authorChapterPlan ?? "").trim();
   const chapterHardRules = (options?.chapterHardRules ?? "").trim();
+  const aiFreedomLevel = options?.aiFreedomLevel ?? "balanced";
+  const extraction_surface_hints = options?.extractionSurfaceHints ?? [];
+  const waive_mandatory_node_ids = options?.waiveMandatoryNodeIds ?? [];
   const response = await fetch(`${API_BASE}/stories/${storyId}/chapters/${chapterId}/run`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -139,6 +151,9 @@ export async function runChapter(
       // New dual-track inputs.
       chapter_outline: chapterOutline,
       chapter_hard_rules: chapterHardRules,
+      ai_freedom_level: aiFreedomLevel,
+      extraction_surface_hints,
+      waive_mandatory_node_ids,
     }),
   });
   return parseJson(response);
@@ -172,7 +187,16 @@ export async function sendOutlineEdit(
 
 export async function sendStateInjection(
   runId: string,
-  payload: { mutations: Array<Record<string, unknown>>; chapter_hard_rules?: string; resume_from?: string; reason?: string },
+  payload: {
+    mutations: Array<Record<string, unknown>>;
+    chapter_hard_rules?: string;
+    resume_from?: string;
+    reason?: string;
+    this_chapter_pacing_limit?: string;
+    future_anchor_title?: string;
+    future_anchor_description?: string;
+    chapters_to_delay?: number | null;
+  },
 ): Promise<WorkflowPayload> {
   const response = await fetch(`${API_BASE}/workflows/${runId}/hitl/state-injection`, {
     method: "POST",
@@ -219,21 +243,19 @@ export async function sendDirectorPatch(
   return parseJson(response);
 }
 
+/** Surface hints must be passed to {@link runChapter} before the workflow starts. */
 export async function sendExtractionHints(
-  runId: string,
-  payload: {
+  _runId: string,
+  _payload: {
     entries: Array<{ node_id: string; surface_forms: string[] }>;
     resume_from?: string;
     waive_mandatory_node_ids?: string[];
     reason?: string;
   },
 ): Promise<WorkflowPayload> {
-  const response = await fetch(`${API_BASE}/workflows/${runId}/hitl/extraction-hints`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  return parseJson(response);
+  throw new Error(
+    "專名線索請在「開始撰寫本章」時一併送出（runChapter 的 extractionSurfaceHints / waiveMandatoryNodeIds）；HITL 端點已停用。",
+  );
 }
 
 export async function sendExtractionRemap(
@@ -286,12 +308,7 @@ export async function sendAnchorDelay(
 export async function sendContextPrune(
   runId: string,
   payload: {
-    bible_context?: string;
-    graph_context?: string;
-    vector_context?: string;
-    recent_chapter_context?: string;
-    previous_chapter_summary?: string;
-    graph_rag_context_tier?: number;
+    graph_rag_context_tier: number;
     reason?: string;
   },
 ): Promise<WorkflowPayload> {
@@ -368,6 +385,13 @@ export async function fetchChapters(storyId: string): Promise<ChapterSummary[]> 
 
 export async function fetchChapter(storyId: string, chapterId: number): Promise<ChapterContent> {
   const response = await fetch(`${API_BASE}/stories/${storyId}/chapters/${chapterId}`);
+  return parseJson(response);
+}
+
+export async function fetchWritingPreamble(storyId: string, chapterId: number): Promise<WritingPreambleResponse> {
+  const response = await fetch(
+    `${API_BASE}/stories/${encodeURIComponent(storyId)}/chapters/${chapterId}/writing-preamble`,
+  );
   return parseJson(response);
 }
 

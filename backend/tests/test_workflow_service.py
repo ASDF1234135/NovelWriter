@@ -1,9 +1,13 @@
 import pytest
 
 from app.domain.schema import (
+    AuthorExtractionSurfaceHintEntry,
+    CharacterEvolutionRequest,
     EventOutline,
     HitlAnchorDelayRequest,
+    HitlContextPruneRequest,
     HitlDecisionRequest,
+    HitlExtractionHintsRequest,
     HitlOutlineEditRequest,
     HitlReason,
     HitlStateInjectionRequest,
@@ -19,7 +23,12 @@ from app.services.graph_store import InMemoryGraphStore
 from app.services.llm import MockLLMClient
 from app.services.vector_store import InMemoryVectorStore
 from app.services.workflow.graph import build_chapter_graph
-from app.services.workflow.service import ChapterAlreadyCompletedError, HitlNotWaitingError, WorkflowService
+from app.services.workflow.service import (
+    ChapterAlreadyCompletedError,
+    HitlExtractionHintsDisabledError,
+    HitlNotWaitingError,
+    WorkflowService,
+)
 
 
 def build_service(db_path: str) -> WorkflowService:
@@ -436,6 +445,34 @@ def test_alignment_hitl_state_injection_sets_rules_and_resumes_alignment(tmp_pat
     assert st["chapter_hard_rules"] == "每回合只能行動一次；失敗方失去全部籌碼。"
 
 
+def test_hitl_state_injection_appends_cast_evolutions_without_forcing_resume(tmp_path) -> None:
+    service = build_service(str(tmp_path / "workflow_hitl_cast_evo.sqlite3"))
+    story = service.create_story(StoryInput(title="T", premise="p", bible={}, target_total_words=12000))
+    base = build_initial_state(story["story_id"], 1, [], "trace-hitl-cast-evo")
+    base["requires_hitl"] = True
+    base["workflow_status"] = "WAITING_HITL"
+    base["hitl_reason"] = HitlReason.PLAN_LOOP_EXCEEDED
+    base["resume_from"] = "planner"
+    run = service.workflow_repository.create_run(story["story_id"], 1, base)
+
+    req = HitlStateInjectionRequest(
+        mutations=[],
+        cast_evolutions=[
+            CharacterEvolutionRequest(
+                node_id="char_hero",
+                trigger_event_summary="摯友陣亡",
+                new_personality="內斂",
+                source="HITL",
+            )
+        ],
+        resume_from="planner",
+    )
+    service.apply_hitl_state_injection(run.run_id, req)
+    st = service.workflow_repository.get_run_state(run.run_id)
+    assert st["resume_from"] == "planner"
+    assert len(st.get("pending_cast_evolutions") or []) == 1
+
+
 def test_logic_alignment_routes_to_hitl_when_rules_missing_and_draft_complex(tmp_path) -> None:
     service = build_service(str(tmp_path / "workflow_align_route.sqlite3"))
     story = service.create_story(StoryInput(title="T", premise="p", bible={}, target_total_words=12000))
@@ -709,3 +746,90 @@ def test_start_run_bootstraps_writing_note_from_bible(tmp_path) -> None:
     assert "避免過度抒情" in st["writing_note"]
     assert any("命名節制" in line for line in st["writing_note"])
     assert any("去標籤化" in line for line in st["writing_note"])
+
+
+def test_hitl_extraction_hints_disabled(tmp_path) -> None:
+    service = build_service(str(tmp_path / "workflow_hints_disabled.sqlite3"))
+    with pytest.raises(HitlExtractionHintsDisabledError):
+        service.apply_hitl_extraction_hints(
+            "no-such-run",
+            HitlExtractionHintsRequest(entries=[AuthorExtractionSurfaceHintEntry(node_id="a", surface_forms=["b"])]),
+        )
+
+
+def test_start_run_chapter_merges_extraction_surface_hints(tmp_path) -> None:
+    service = build_service(str(tmp_path / "workflow_run_surface_hints.sqlite3"))
+    story = service.create_story(
+        StoryInput(
+            title="測試故事",
+            premise="主角回到王都追查命案。",
+            bible={"rules": ["秘密不能無代價揭露"]},
+            target_total_words=30000,
+        )
+    )
+    service.macro_compile(story["story_id"])
+    wf = service.start_run_chapter(
+        story["story_id"],
+        1,
+        extraction_surface_hints=[AuthorExtractionSurfaceHintEntry(node_id="ghost_x", surface_forms=["小明"])],
+        waive_mandatory_node_ids=["mandatory_skip_1"],
+    )
+    hints = wf["state"].get("author_extraction_surface_hints") or []
+    assert any(h.get("node_id") == "ghost_x" for h in hints if isinstance(h, dict))
+    skips = wf["state"].get("mandatory_extraction_skips") or []
+    assert "mandatory_skip_1" in skips
+
+
+def test_get_workflow_includes_hitl_context_when_waiting(tmp_path) -> None:
+    service = build_service(str(tmp_path / "workflow_hitl_ctx.sqlite3"))
+    story = service.create_story(
+        StoryInput(title="T", premise="p", bible={}, target_total_words=12000),
+    )
+    base = build_initial_state(story["story_id"], 1, [], "trace-ctx")
+    base["requires_hitl"] = True
+    base["workflow_status"] = "WAITING_HITL"
+    base["hitl_reason"] = HitlReason.CONTEXT_LENGTH_EXCEEDED
+    base["resume_from"] = "graph_rag"
+    base["current_draft"] = "x" * 3000
+    run = service.workflow_repository.create_run(story["story_id"], 1, base)
+    wf = service.get_workflow(run.run_id)
+    assert wf["run"]["hitl_context"] is not None
+    assert wf["run"]["hitl_context"]["context_metadata"]["payload_type"] == "context_prune"
+
+
+def test_abort_and_restart_clears_draft(tmp_path) -> None:
+    service = build_service(str(tmp_path / "workflow_abort.sqlite3"))
+    story = service.create_story(
+        StoryInput(title="T", premise="p", bible={}, target_total_words=12000),
+    )
+    base = build_initial_state(story["story_id"], 1, [], "trace-abort")
+    base["chapter_outline"] = "人類保留大綱"
+    base["chapter_hard_rules"] = "硬性"
+    base["requires_hitl"] = True
+    base["workflow_status"] = "WAITING_HITL"
+    base["hitl_reason"] = HitlReason.DRAFT_LOOP_EXCEEDED
+    base["current_draft"] = "草稿內容"
+    base["narrative_script"] = "AI 腳本"
+    run = service.workflow_repository.create_run(story["story_id"], 1, base)
+    service.apply_hitl_decision(run.run_id, HitlDecisionRequest(option_id="ABORT_AND_RESTART"))
+    st = service.workflow_repository.get_run_state(run.run_id)
+    assert st["current_draft"] == ""
+    assert st["narrative_script"] == ""
+    assert st["chapter_outline"] == "人類保留大綱"
+    assert st["chapter_hard_rules"] == "硬性"
+    assert st["resume_from"] == "planner"
+
+
+def test_context_prune_maps_product_tier(tmp_path) -> None:
+    service = build_service(str(tmp_path / "workflow_prune_map.sqlite3"))
+    story = service.create_story(
+        StoryInput(title="T", premise="p", bible={}, target_total_words=12000),
+    )
+    base = build_initial_state(story["story_id"], 1, [], "trace-prune")
+    base["requires_hitl"] = True
+    base["workflow_status"] = "WAITING_HITL"
+    base["hitl_reason"] = HitlReason.CONTEXT_LENGTH_EXCEEDED
+    run = service.workflow_repository.create_run(story["story_id"], 1, base)
+    service.apply_hitl_context_prune(run.run_id, HitlContextPruneRequest(graph_rag_context_tier=2))
+    st = service.workflow_repository.get_run_state(run.run_id)
+    assert st["graph_rag_context_tier"] == 0

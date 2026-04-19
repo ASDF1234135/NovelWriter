@@ -7,6 +7,7 @@ import sqlite3
 from uuid import uuid4
 
 from app.domain.schema import (
+    AuthorExtractionSurfaceHintEntry,
     BStoryResolutionOutput,
     HitlAnchorDelayRequest,
     HitlBStoryJudgementRequest,
@@ -41,8 +42,16 @@ from app.services.bible_service import BibleService
 from app.services.graph_store import GraphStore
 from app.services.llm import LLMClient
 from app.services.vector_store import VectorStore
+from app.services.workflow.bible_writing_notes import normalize_writing_note
+from app.services.workflow.chapter_pacing import (
+    build_ending_vibe_cooldown_constraint,
+    build_resolution_cooldown_constraint,
+    chapter_distance_to_anchor,
+)
 from app.services.workflow.context import WorkflowContext
 from app.services.workflow.graph import build_chapter_graph
+from app.services.workflow.hitl_payload import build_hitl_context_payload
+from app.services.workflow.outline_binding import compute_outline_binding_mode
 
 _ALLOWED_HITL_RESUME_NODES = frozenset(
     {
@@ -56,6 +65,7 @@ _ALLOWED_HITL_RESUME_NODES = frozenset(
         "extraction_gate",
         "copyeditor",
         "b_story_resolve",
+        "profile_expander",
         "state_updater",
     }
 )
@@ -68,7 +78,7 @@ def _refresh_unachieved_anchors(story_repository: StoryRepository, state: dict) 
     unachieved = [a for a in raw if int(a["chapter_target"]) >= chapter_id]
     state["unachieved_anchors"] = unachieved
     state["target_anchor_id"] = str(unachieved[0]["anchor_id"]) if unachieved else None
-    state["distance_to_anchor"] = _chapter_distance_to_anchor(chapter_id, unachieved)
+    state["distance_to_anchor"] = chapter_distance_to_anchor(chapter_id, unachieved)
 
 
 def _merge_surface_hints(state: dict, entries: list) -> None:
@@ -92,8 +102,139 @@ def _merge_surface_hints(state: dict, entries: list) -> None:
     state["author_extraction_surface_hints"] = [{"node_id": k, "surface_forms": v} for k, v in by_id.items()]
 
 
+def _internal_graph_rag_tier_from_product(product_tier: int) -> int:
+    """Map UI tier 0=full .. 2=aggressive to graph_rag internal (higher = wider caps)."""
+    return max(0, min(2, 2 - int(product_tier)))
+
+
+def _pick_volume_id_for_chapter(story_repository: StoryRepository, story_id: str, chapter_id: int) -> str:
+    vols = story_repository.list_volumes(story_id)
+    for v in vols:
+        cs, ce = int(v["chapter_start"]), int(v["chapter_end"])
+        if cs <= chapter_id <= ce:
+            return str(v["volume_id"])
+    return str(vols[0]["volume_id"]) if vols else "vol_unknown"
+
+
+def _merge_hitl_future_anchor(
+    story_repository: StoryRepository,
+    story_id: str,
+    chapter_id: int,
+    title: str,
+    description: str,
+    chapters_to_delay: int | None,
+) -> None:
+    if not (title or "").strip() and not (description or "").strip():
+        return
+    delay = 0 if chapters_to_delay is None else int(chapters_to_delay)
+    target_chapter = chapter_id + delay
+    t = (title or "").strip() or (description or "").strip()[:120] or "未命名錨點"
+    d = (description or "").strip()
+    anchor_id = f"{story_id}_hitl_anchor_{uuid4().hex[:10]}"
+    volume_id = _pick_volume_id_for_chapter(story_repository, story_id, chapter_id)
+    rows = story_repository.list_anchors(story_id)
+    anchors: list[StateAnchor] = []
+    for row in rows:
+        ts = row.get("target_state_json")
+        if not isinstance(ts, dict):
+            ts = {}
+        vid = str(row.get("volume_id") or volume_id).strip() or volume_id
+        anchors.append(
+            StateAnchor(
+                anchor_id=str(row["anchor_id"]),
+                story_id=story_id,
+                volume_id=vid,
+                title=str(row.get("title") or ""),
+                description=str(row.get("description") or ""),
+                target_state=ts,
+                chapter_target=int(row["chapter_target"]),
+                priority=int(row.get("priority") or 1),
+            )
+        )
+    anchors.append(
+        StateAnchor(
+            anchor_id=anchor_id,
+            story_id=story_id,
+            volume_id=volume_id,
+            title=t,
+            description=d,
+            target_state={"source": "hitl_future_anchor"},
+            chapter_target=target_chapter,
+            priority=1,
+        )
+    )
+    story_repository.store_anchors(story_id, anchors)
+
+
+def _apply_abort_and_restart_chapter_state(story_repository: StoryRepository, state: dict) -> None:
+    """Discard AI chapter progress and restart planning; keep human outline/hard rules."""
+    outline = str(state.get("chapter_outline") or state.get("author_chapter_plan") or "").strip()
+    hard = str(state.get("chapter_hard_rules") or "").strip()
+    freedom = str(state.get("ai_freedom_level") or "balanced").strip().lower()
+    if freedom not in ("strict", "balanced", "wild"):
+        freedom = "balanced"
+    binding = str(state.get("outline_binding_mode") or "ABSENT").strip() or "ABSENT"
+
+    story_id = str(state["story_id"])
+    chapter_id = int(state["chapter_id"])
+    trace_id = str(state.get("trace_id") or uuid4())
+    story = story_repository.get_story(story_id) or {}
+    pov_raw = (story.get("protagonist_character_id") or "").strip()
+    pov_character_id = pov_raw if pov_raw else "char_public_observer"
+
+    unachieved = [
+        a
+        for a in story_repository.list_anchors(story_id)
+        if int(a["chapter_target"]) >= chapter_id
+    ]
+    fresh = build_initial_state(
+        story_id=story_id,
+        chapter_id=chapter_id,
+        unachieved_anchors=unachieved,
+        trace_id=trace_id,
+        plan_retry_limit=int(story.get("plan_retry_limit", 3)),
+        draft_loop_retry_limit=int(story.get("draft_loop_retry_limit", 3)),
+        pov_character_id=pov_character_id,
+        author_chapter_plan=outline[:AUTHOR_CHAPTER_PLAN_MAX_CHARS],
+        chapter_outline=outline[:AUTHOR_CHAPTER_PLAN_MAX_CHARS],
+        chapter_hard_rules=hard[:CHAPTER_HARD_RULES_MAX_CHARS],
+        ai_freedom_level=freedom,
+        outline_binding_mode=binding,
+    )
+    # Carry over run bootstrap context that start_run_chapter would recompute.
+    for key in (
+        "previous_chapter_tail_excerpt",
+        "recent_b_story_types",
+        "all_milestone_summaries",
+        "recent_chapter_summaries",
+        "global_conflict_type_top3",
+        "global_resolution_method_top3",
+        "resolution_cooldown_constraint",
+        "ending_vibe_cooldown_constraint",
+        "narrative_directive",
+        "tone_direction",
+        "target_word_count",
+    ):
+        if key in state and state[key] not in (None, "", [], {}):
+            fresh[key] = deepcopy(state[key]) if isinstance(state[key], (dict, list)) else state[key]
+
+    bible = story.get("bible_json") or {}
+    fresh["active_b_stories"] = list(bible.get("active_b_stories") or [])
+    fresh["lore_mysteries_progression"] = list(bible.get("lore_mysteries_progression") or [])
+    fresh["writing_note"] = normalize_writing_note(bible.get("writing_note"))
+    fresh["distance_to_anchor"] = chapter_distance_to_anchor(chapter_id, unachieved)
+    normalize_workflow_state(fresh)
+    apply_length_bounds_to_state(fresh)
+    state.clear()
+    state.update(fresh)
+
+
 class HitlNotWaitingError(RuntimeError):
     """Raised when HITL APIs are called but the run is not paused for human input."""
+
+
+class HitlExtractionHintsDisabledError(RuntimeError):
+    """Surface hints must be sent on chapter run (ChapterRunRequest); /hitl/extraction-hints is disabled."""
 
 
 class ChapterAlreadyCompletedError(RuntimeError):
@@ -114,10 +255,16 @@ class MacroPlanValidationError(ValueError):
 
 logger = logging.getLogger(__name__)
 
-_NAMING_DISCIPLINE_WRITING_NOTES: tuple[str, ...] = (
-    "命名節制：新名詞只在必要時使用；若不影響後文辨識與決策，優先不用命名。",
-    "去標籤化：遇到陌生現象或物件，先用可觀察的感官與行為結果描述，不要先貼術語標籤。",
-)
+
+def _existing_cast_node_ids(story: dict) -> list[str]:
+    out: list[str] = []
+    for raw in story.get("cast_json") or []:
+        if not isinstance(raw, dict):
+            continue
+        node_id = str(raw.get("node_id") or "").strip()
+        if node_id:
+            out.append(node_id)
+    return out
 
 
 def _validate_macro_plan_put(body: MacroPlanPut) -> None:
@@ -157,11 +304,11 @@ def _cast_graph_description(member: StoryCastMemberStored) -> str:
         lines.append(f"【故事身分】{member.short_bio.strip()}")
     if (member.age or "").strip():
         lines.append(f"【年齡】{member.age.strip()}")
-    core = (member.core_motivation or "").strip() or (member.motivation or "").strip()
+    core = (member.core_motivation or "").strip()
     if core:
         lines.append(f"【核心動機】{core}")
-    elif (member.motivation or "").strip():
-        lines.append(f"【動機】{member.motivation.strip()}")
+    if (member.personality or "").strip():
+        lines.append(f"【個性】{member.personality.strip()}")
     if (member.core_value or "").strip():
         lines.append(f"【核心價值】{member.core_value.strip()}")
     if (member.speech_style or "").strip():
@@ -171,73 +318,6 @@ def _cast_graph_description(member: StoryCastMemberStored) -> str:
     if (member.quirks_and_habits or "").strip():
         lines.append(f"【小習慣】{member.quirks_and_habits.strip()}")
     return "\n".join(lines) if lines else member.canonical_name
-
-
-def _chapter_distance_to_anchor(chapter_id: int, unachieved_anchors: list[dict]) -> int | None:
-    if not unachieved_anchors:
-        return None
-    ct = unachieved_anchors[0].get("chapter_target")
-    if ct is None:
-        return None
-    try:
-        return int(ct) - int(chapter_id)
-    except (TypeError, ValueError):
-        return None
-
-
-def _build_resolution_cooldown_constraint(recent_summaries: list[dict]) -> dict:
-    methods = [str((row or {}).get("resolution_method") or "").strip().upper() for row in recent_summaries if row]
-    methods = [m for m in methods if m]
-    if len(methods) < 3:
-        return {"active": False, "forbidden_methods": [], "mandatory_methods": []}
-    forbidden_pool = {"DISCOVERY", "REVELATION", "DECEPTION"}
-    if len(set(methods[-3:])) == 1 and methods[-1] in forbidden_pool:
-        return {
-            "active": True,
-            "forbidden_methods": list(sorted(forbidden_pool)),
-            "mandatory_methods": ["NEGOTIATION", "VIOLENCE", "ESCAPE", "ALLIANCE"],
-            "ban_text": (
-                "偵測到連續章節重複使用精神/資訊直取式破局手段。"
-                "本章嚴禁再次使用精神連結、神經駭入、純資訊直讀。"
-                "本章衝突解決必須改用物理潛行、環境機關利用、談判欺詐或暴力奪取。"
-            ),
-        }
-    return {"active": False, "forbidden_methods": [], "mandatory_methods": []}
-
-
-def _build_ending_vibe_cooldown_constraint(recent_summaries: list[dict]) -> dict:
-    vibes = [str((row or {}).get("ending_vibe") or "").strip().upper() for row in recent_summaries if row]
-    vibes = [v for v in vibes if v]
-    if not vibes:
-        return {"active": False, "forbidden_vibes": [], "required_vibe": None}
-    if vibes[-1] == "SAFE_ROOM_EXPOSITION":
-        return {
-            "active": True,
-            "forbidden_vibes": ["SAFE_ROOM_EXPOSITION"],
-            "required_vibe": "ACTION_CLIFFHANGER",
-            "interrupt_text": (
-                "不要讓角色再次進入安全密室做總結對話。"
-                "本章結尾必須是 ACTION_CLIFFHANGER，並在門關上後立刻出現新威脅。"
-            ),
-        }
-    return {"active": False, "forbidden_vibes": [], "required_vibe": None}
-
-
-def _normalize_writing_note(raw: object) -> list[str]:
-    src = raw if isinstance(raw, list) else []
-    out: list[str] = []
-    for item in src:
-        if not isinstance(item, str):
-            continue
-        text = item.strip()
-        if not text:
-            continue
-        if text not in out:
-            out.append(text)
-    for text in _NAMING_DISCIPLINE_WRITING_NOTES:
-        if text not in out:
-            out.append(text)
-    return out[:24]
 
 
 def _trim_to_sentence_boundary(text: str, max_chars: int) -> str:
@@ -364,6 +444,7 @@ class WorkflowService:
         story = self.story_repository.get_story(story_id)
         if not story:
             raise KeyError(f"Story not found: {story_id}")
+        stale_cast_ids = _existing_cast_node_ids(story)
         story_input = StoryInput(
             title=story["title"],
             premise=story["premise"],
@@ -383,7 +464,7 @@ class WorkflowService:
         self.story_repository.store_anchors(story_id, anchors)
         protagonist_id = next((c.node_id for c in cast if c.role == "protagonist"), "")
         self.story_repository.update_story_cast(story_id, cast, protagonist_id)
-        self.graph_store.clear_macro_cast_characters(story_id)
+        self.graph_store.clear_macro_cast_characters(story_id, include_node_ids=stale_cast_ids)
         cast_mutations = [
             NodeMutation(
                 action="CREATE_NODE",
@@ -474,12 +555,14 @@ class WorkflowService:
         }
 
     def put_macro_plan(self, story_id: str, body: MacroPlanPut) -> dict:
-        if not self.story_repository.get_story(story_id):
+        story = self.story_repository.get_story(story_id)
+        if not story:
             raise KeyError(f"Story not found: {story_id}")
         if self.workflow_repository.count_workflow_runs_for_story(story_id) > 0:
             raise StoryConfigurationLockedError(
                 "故事已有章節工作流程紀錄，無法再修改宏觀規劃；請在未執行 run_chapter 前調整。"
             )
+        stale_cast_ids = _existing_cast_node_ids(story)
         _validate_macro_plan_put(body)
         try:
             self.story_repository.update_story_bible_json(story_id, dict(body.bible or {}))
@@ -502,7 +585,7 @@ class WorkflowService:
             if not protagonist_id:
                 protagonist_id = next((c.node_id for c in body.cast if c.role == "protagonist"), "")
             self.story_repository.update_story_cast(story_id, list(body.cast), protagonist_id)
-            self.graph_store.clear_macro_cast_characters(story_id)
+            self.graph_store.clear_macro_cast_characters(story_id, include_node_ids=stale_cast_ids)
             cast_mutations = [
                 NodeMutation(
                     action="CREATE_NODE",
@@ -554,6 +637,9 @@ class WorkflowService:
         author_chapter_plan: str = "",
         chapter_outline: str = "",
         chapter_hard_rules: str = "",
+        ai_freedom_level: str = "balanced",
+        extraction_surface_hints: list[AuthorExtractionSurfaceHintEntry] | None = None,
+        waive_mandatory_node_ids: list[str] | None = None,
     ) -> dict:
         """Blocking: create run and execute graph to completion (tests / scripts)."""
         wf = self.start_run_chapter(
@@ -562,6 +648,9 @@ class WorkflowService:
             author_chapter_plan=author_chapter_plan,
             chapter_outline=chapter_outline,
             chapter_hard_rules=chapter_hard_rules,
+            ai_freedom_level=ai_freedom_level,
+            extraction_surface_hints=extraction_surface_hints,
+            waive_mandatory_node_ids=waive_mandatory_node_ids,
         )
         self.execute_stored_run(wf["run"]["run_id"])
         return self.get_workflow(wf["run"]["run_id"])
@@ -573,6 +662,9 @@ class WorkflowService:
         author_chapter_plan: str = "",
         chapter_outline: str = "",
         chapter_hard_rules: str = "",
+        ai_freedom_level: str = "balanced",
+        extraction_surface_hints: list[AuthorExtractionSurfaceHintEntry] | None = None,
+        waive_mandatory_node_ids: list[str] | None = None,
     ) -> dict:
         """Create workflow run and persist initial state only (graph not executed yet)."""
         story = self.story_repository.get_story(story_id)
@@ -596,6 +688,10 @@ class WorkflowService:
         outline = (chapter_outline or "").strip() or (author_chapter_plan or "").strip()
         outline = outline[:AUTHOR_CHAPTER_PLAN_MAX_CHARS]
         hard_rules = (chapter_hard_rules or "").strip()[:CHAPTER_HARD_RULES_MAX_CHARS]
+        freedom = str(ai_freedom_level or "balanced").strip().lower()
+        if freedom not in ("strict", "balanced", "wild"):
+            freedom = "balanced"
+        binding_mode = compute_outline_binding_mode(outline, outline)
         initial_state = build_initial_state(
             story_id=story_id,
             chapter_id=chapter_id,
@@ -607,6 +703,8 @@ class WorkflowService:
             author_chapter_plan=outline,
             chapter_outline=outline,
             chapter_hard_rules=hard_rules,
+            ai_freedom_level=freedom,
+            outline_binding_mode=binding_mode,
         )
 
         # Tail-End Context Injection: provide the previous chapter trailing excerpt to this run.
@@ -674,10 +772,10 @@ class WorkflowService:
             initial_state["global_resolution_method_top3"] = self.story_repository.global_top_resolution_method(
                 story_id, top_k=3
             )
-            initial_state["resolution_cooldown_constraint"] = _build_resolution_cooldown_constraint(
+            initial_state["resolution_cooldown_constraint"] = build_resolution_cooldown_constraint(
                 initial_state["recent_chapter_summaries"]
             )
-            initial_state["ending_vibe_cooldown_constraint"] = _build_ending_vibe_cooldown_constraint(
+            initial_state["ending_vibe_cooldown_constraint"] = build_ending_vibe_cooldown_constraint(
                 initial_state["recent_chapter_summaries"]
             )
         except Exception:
@@ -692,10 +790,16 @@ class WorkflowService:
         bible = story.get("bible_json") or {}
         initial_state["active_b_stories"] = list(bible.get("active_b_stories") or [])
         initial_state["lore_mysteries_progression"] = list(bible.get("lore_mysteries_progression") or [])
-        initial_state["writing_note"] = _normalize_writing_note(bible.get("writing_note"))
-        initial_state["distance_to_anchor"] = _chapter_distance_to_anchor(chapter_id, unachieved_anchors)
+        initial_state["writing_note"] = normalize_writing_note(bible.get("writing_note"))
+        initial_state["distance_to_anchor"] = chapter_distance_to_anchor(chapter_id, unachieved_anchors)
         normalize_workflow_state(initial_state)
         apply_length_bounds_to_state(initial_state)
+        if extraction_surface_hints:
+            _merge_surface_hints(initial_state, extraction_surface_hints)
+        if waive_mandatory_node_ids:
+            cur = {str(x).strip() for x in (initial_state.get("mandatory_extraction_skips") or []) if str(x).strip()}
+            cur.update(str(x).strip() for x in waive_mandatory_node_ids if str(x).strip())
+            initial_state["mandatory_extraction_skips"] = sorted(cur)
         run = self.workflow_repository.create_run(story_id, chapter_id, initial_state)
         return self.get_workflow(run.run_id)
 
@@ -727,9 +831,16 @@ class WorkflowService:
 
     def get_workflow(self, run_id: str) -> dict:
         run = self.workflow_repository.get_run(run_id)
+        state = normalize_workflow_state(self.workflow_repository.get_run_state(run_id))
+        run_payload = run.model_dump(mode="json")
+        if bool(state.get("requires_hitl")) and str(state.get("workflow_status") or "") == "WAITING_HITL":
+            hc = build_hitl_context_payload(state)
+            run_payload["hitl_context"] = hc.model_dump(mode="json") if hc else None
+        else:
+            run_payload["hitl_context"] = None
         return {
-            "run": run.model_dump(mode="json"),
-            "state": self.workflow_repository.get_run_state(run_id),
+            "run": run_payload,
+            "state": state,
             "steps": self.workflow_repository.list_steps(run_id),
         }
 
@@ -753,6 +864,17 @@ class WorkflowService:
         _ensure_hitl_waiting(state)
         prev_hitl_reason = str(state.get("hitl_reason", "") or "")
         self.workflow_repository.append_hitl_action(run_id, "decision", request.model_dump(mode="json"))
+
+        if request.option_id == "ABORT_AND_RESTART":
+            _apply_abort_and_restart_chapter_state(self.story_repository, state)
+            state["requires_hitl"] = False
+            state["hitl_reason"] = ""
+            state["hitl_decision_mode"] = "NONE"
+            state["pending_hitl_options"] = []
+            state["workflow_status"] = WorkflowStatus.RUNNING.value
+            state["resume_from"] = "planner"
+            self.workflow_repository.update_run(run_id, state)
+            return
 
         resume = str(state.get("resume_from") or "director")
 
@@ -826,6 +948,22 @@ class WorkflowService:
             resume = str(state.get("resume_from", "author") or "author")
         if request.mutations:
             self.graph_store.apply_mutations(state["story_id"], request.mutations)
+        if request.cast_evolutions:
+            pending = list(state.get("pending_cast_evolutions") or [])
+            pending.extend([row.model_dump(mode="json") for row in request.cast_evolutions])
+            state["pending_cast_evolutions"] = pending
+        pacing = (request.this_chapter_pacing_limit or "").strip()
+        state["this_chapter_pacing_limit"] = pacing[:2000] if pacing else ""
+        if (request.future_anchor_title or "").strip() or (request.future_anchor_description or "").strip():
+            _merge_hitl_future_anchor(
+                self.story_repository,
+                str(state["story_id"]),
+                int(state["chapter_id"]),
+                request.future_anchor_title,
+                request.future_anchor_description,
+                request.chapters_to_delay,
+            )
+            _refresh_unachieved_anchors(self.story_repository, state)
         patched_rules = (request.chapter_hard_rules or "").strip()
         if patched_rules:
             state["chapter_hard_rules"] = patched_rules[:8000]
@@ -916,24 +1054,10 @@ class WorkflowService:
         return self.get_workflow(run_id)
 
     def apply_hitl_extraction_hints(self, run_id: str, request: HitlExtractionHintsRequest) -> None:
-        state = normalize_workflow_state(self.workflow_repository.get_run_state(run_id))
-        _ensure_hitl_waiting(state)
-        _merge_surface_hints(state, request.entries)
-        if request.waive_mandatory_node_ids:
-            cur = {str(x).strip() for x in (state.get("mandatory_extraction_skips") or []) if str(x).strip()}
-            cur.update(str(x).strip() for x in request.waive_mandatory_node_ids if str(x).strip())
-            state["mandatory_extraction_skips"] = sorted(cur)
-        resume = (request.resume_from or "draft_supervisor").strip()
-        if resume not in _ALLOWED_HITL_RESUME_NODES:
-            resume = "draft_supervisor"
-        state["requires_hitl"] = False
-        state["hitl_reason"] = ""
-        state["hitl_decision_mode"] = "NONE"
-        state["pending_hitl_options"] = []
-        state["workflow_status"] = WorkflowStatus.RUNNING.value
-        state["resume_from"] = resume
-        self.workflow_repository.append_hitl_action(run_id, "extraction_hints", request.model_dump(mode="json"))
-        self.workflow_repository.update_run(run_id, state)
+        raise HitlExtractionHintsDisabledError(
+            "extraction_surface_hints and waive_mandatory_node_ids belong in POST /stories/{id}/chapters/{n}/run "
+            "(ChapterRunRequest), not /hitl/extraction-hints."
+        )
 
     def handle_hitl_extraction_hints(self, run_id: str, request: HitlExtractionHintsRequest) -> dict:
         self.apply_hitl_extraction_hints(run_id, request)
@@ -1042,18 +1166,7 @@ class WorkflowService:
     def apply_hitl_context_prune(self, run_id: str, request: HitlContextPruneRequest) -> None:
         state = normalize_workflow_state(self.workflow_repository.get_run_state(run_id))
         _ensure_hitl_waiting(state)
-        if request.bible_context is not None:
-            state["bible_context"] = request.bible_context
-        if request.graph_context is not None:
-            state["graph_context"] = request.graph_context
-        if request.vector_context is not None:
-            state["vector_context"] = request.vector_context
-        if request.recent_chapter_context is not None:
-            state["recent_chapter_context"] = request.recent_chapter_context
-        if request.previous_chapter_summary is not None:
-            state["previous_chapter_summary"] = request.previous_chapter_summary
-        if request.graph_rag_context_tier is not None:
-            state["graph_rag_context_tier"] = int(request.graph_rag_context_tier)
+        state["graph_rag_context_tier"] = _internal_graph_rag_tier_from_product(int(request.graph_rag_context_tier))
         state["context_overflow_char_estimate"] = 0
         state["requires_hitl"] = False
         state["hitl_reason"] = ""

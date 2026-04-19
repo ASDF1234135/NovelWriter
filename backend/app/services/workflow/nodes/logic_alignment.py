@@ -9,6 +9,10 @@ from app.services.llm import MockLLMClient
 from app.services.workflow.context import WorkflowContext
 from app.services.workflow.profiles import get_profile
 
+LOGIC_ALIGN_BIBLE_CAP = 4500
+LOGIC_ALIGN_GRAPH_CAP = 3500
+LOGIC_ALIGN_VECTOR_CAP = 2500
+
 
 def _clip(text: str, max_chars: int) -> str:
     t = str(text or "")
@@ -25,73 +29,117 @@ def _looks_like_complex_mind_game(state: dict[str, Any]) -> bool:
     lowered = text.casefold()
 
     keyword_groups: list[list[str]] = [
-        # 具名智鬥遊戲 / 死亡博弈
         ["俄羅斯輪盤", "博弈", "賭局", "死亡遊戲", "生死遊戲", "規則牌局", "回合制對決"],
-        # 資源交易 / 籌碼談判 / 權力制衡
         ["籌碼", "押注", "代價", "交易條件", "交換條件", "談判桌", "制衡", "權力平衡"],
-        # exploit / 系統漏洞反殺
         ["漏洞", "exploit", "規則漏洞", "反殺", "逆轉機制", "系統機制", "條款漏洞", "判定漏洞"],
     ]
     if any(any(k.casefold() in lowered for k in group) for group in keyword_groups):
         return True
 
-    # Heuristic: explicit rule-like structures without provided hard rules.
     rule_signals = len(re.findall(r"(規則|條件|勝利條件|失敗條件|判定|回合|結算|懲罰)", text))
     return rule_signals >= 3
 
 
+def _should_run_canon_audit(state: dict[str, Any]) -> bool:
+    outline = str(state.get("chapter_outline") or state.get("author_chapter_plan") or "").strip()
+    if len(outline) >= 20:
+        return True
+    if len(str(state.get("graph_context") or "").strip()) > 80:
+        return True
+    if len(str(state.get("bible_context") or "").strip()) > 80:
+        return True
+    if len(str(state.get("vector_context") or "").strip()) > 80:
+        return True
+    return False
+
+
 def _build_logic_alignment_prompt(state: dict[str, Any]) -> str:
     hard_rules = str(state.get("chapter_hard_rules") or "")
+    has_hard = bool(hard_rules.strip())
     pov = str(state.get("pov_character_id") or "")
     draft_script = str(state.get("narrative_script") or "")
     draft_beats = list(state.get("must_include_beats") or [])
     draft_events = list(state.get("ground_truth_events") or [])
     boundary = str(state.get("ending_boundary_rule") or "")
     forbidden = list(state.get("forbidden_reveals") or [])
+    human_outline = str(state.get("chapter_outline") or state.get("author_chapter_plan") or "").strip()
+    bible = _clip(str(state.get("bible_context") or ""), LOGIC_ALIGN_BIBLE_CAP)
+    graph = _clip(str(state.get("graph_context") or ""), LOGIC_ALIGN_GRAPH_CAP)
+    vector = _clip(str(state.get("vector_context") or ""), LOGIC_ALIGN_VECTOR_CAP)
+
+    hard_block = (
+        "## 本章硬性規則原文（必須保真；若有 POV 暴雷需遮蔽後輸出）\n"
+        f"{_clip(hard_rules, 8000)}\n\n"
+        if has_hard
+        else (
+            "## 本章硬性規則原文\n"
+            "（作者未提供 chapter_hard_rules；請勿臆造規則。safe_chapter_rules 可輸出空字串。）\n\n"
+        )
+    )
+
+    rules_priority = (
+        "## 絕對優先權（硬性規則存在時）\n"
+        "1) 『硬性規則』優先於草稿。\n"
+        "2) 若草稿違反硬性規則，修改 final_* 使其符合規則。\n"
+        "3) 若根本性衝突無法修補：捨棄違規動作，依規則重推演合理行動。\n\n"
+        if has_hard
+        else (
+            "## 無硬性規則時\n"
+            "- 預設 final_ground_truth_events / final_narrative_script / final_must_include_beats 與草稿一致，"
+            "除非與下方 bible／graph／vector 或人類大綱存在**硬衝突**且你能給出**最小必要修正**。\n"
+            "- 仍必須填寫 human_outline_conflict_notes：列出人類大綱或草稿與設定證據的牴觸（無則 []）。\n"
+            "- 區分：純 Planner 腦補問題 vs 人類原文即與 canon 衝突；後者須在 hitl_reason 或衝突條目中寫清。\n"
+            "- 無法調和的核心世界規則衝突：requires_hitl=true。\n\n"
+        )
+    )
+
+    pov_block = (
+        "## POV 資訊安全（硬性規則存在時）\n"
+        f"- 當前 POV：{pov}\n"
+        "- 檢查硬性規則原文：若含 POV 不可知的上帝視角，請用 [系統遮蔽：POV未知] 替換並寫入 safe_chapter_rules。\n\n"
+        if has_hard
+        else ""
+    )
+
+    weave_block = (
+        "## 無縫編織（硬性規則存在時）\n"
+        "- 把規則執行細節轉成可寫作提示，安插進 final_must_include_beats。\n\n"
+        if has_hard
+        else ""
+    )
 
     return (
-        "你是邏輯對齊與修補代理（Logic_Alignment_Agent）。\n"
-        "你會收到一份『草稿大綱』與一份『本章硬性規則原文』。\n\n"
-        "## 絕對優先權（硬性）\n"
-        "1) 任何時候『硬性規則』優先於草稿。\n"
-        "2) 若草稿行為/破局方式違反硬性規則，你必須修改草稿，使其符合規則。\n"
-        "3) 若草稿與規則存在不可修補的根本性衝突：請捨棄草稿中違規的動作，"
-        "直接依據規則重新推演一個合理的破局行動，寫入 final_narrative_script。\n\n"
-        "## POV 資訊安全（硬性）\n"
-        f"- 當前 POV：{pov}\n"
-        "- 檢查硬性規則原文：若包含當前 POV 絕對無法知道的上帝視角底牌、真相答案、或內幕，\n"
-        "  請用 [系統遮蔽：POV未知] 替換該字眼（保留句子可讀性），並輸出到 safe_chapter_rules。\n\n"
-        "## 無縫編織（硬性）\n"
-        "- 你必須把規則執行細節『轉成可寫作提示』，安插進 final_must_include_beats，\n"
-        "  讓 Author 知道在何時該描寫哪一條規則（例如判定、結算、勝負條件觸發）。\n\n"
-        "## 輸出要求（JSON schema）\n"
-        "- 請只輸出 AlignmentOutput 所需 JSON。\n"
-        "- final_ground_truth_events / final_narrative_script / final_must_include_beats 必須是對齊後可直接交付 Author 的版本。\n"
-        "- alignment_log 請用短段落列出你改了哪些地方、因為哪條規則。\n\n"
-        "## 🚨 HITL（人類介入）觸發協議：敘事與邏輯守門員\n"
-        "請嚴格審視草稿。若草稿的推演跨越了以下「必須由作者親自裁定」的紅線，你必須輸出 requires_hitl=true，"
-        "並在 hitl_reason 具體說明你需要作者補充什麼設定。若無以下情況，則 requires_hitl=false 正常放行。\n\n"
-        "1) 【機制與權力博弈的黑箱 (Systemic Opaque)】\n"
-        "   - 觸發條件：草稿涉及具名的死亡博弈、複雜的資源交易、或利用環境/漏洞（Exploit）進行反殺，但 `chapter_hard_rules` 中未提供支撐此行動的明確勝負條件或物理限制。\n"
-        "   - 判斷標準：「如果我不介入，Author 是否會被迫自行編造遊戲規則？」\n\n"
-        "2) 【解謎手法的邏輯斷層 (Resolution Logic Gap)】\n"
-        "   - 觸發條件：草稿試圖收束一個長線伏筆或解開重大謎團，但主角破解該謎題的「手法」，依賴了本章未定義的機制或現場發明的新設定。\n"
-        "   - 行動要求：拒絕「降神式解謎」，要求作者提供主角破解該謎題的具體邏輯或物理限制。\n\n"
-        "3) 【機械降神與突兀設定 (Deus Ex Machina Defense)】\n"
-        "   - 觸發條件：角色在絕境中突然獲得新能力、新物品，或突然出現背景不明的強大援軍，且在過往劇情中毫無鋪陳。\n\n"
-        "4) 【情感與道德的極端臨界點 (Ethical Extremes)】\n"
-        "   - 觸發條件：涉及核心角色的死亡、不可挽回的背叛、或極端道德困境。\n"
-        "   - 判斷標準：確認這是否是作者的本意，防止 AI 擅自用「廉價的和解」稀釋劇情張力。\n\n"
+        "你是邏輯對齊與修補代理（Logic_Alignment_Agent）：吃書稽核員與降神攔截器。\n"
+        "比對『人類大綱 + Planner 草稿』與 bible／graph／vector 記憶；違反聖經、邏輯死結、未解釋機械降神 → 要求 HITL 或修正。\n"
+        "無論大綱是人類寫的還是 Planner 補充的，只要違反已建立的設定證據，須列入 human_outline_conflict_notes，不得略過不報。\n\n"
+        f"{rules_priority}"
+        f"{pov_block}"
+        f"{weave_block}"
+        "## 設定與檢索記憶（強制比對）\n"
+        f"- bible_context:\n{bible}\n\n"
+        f"- graph_context:\n{graph}\n\n"
+        f"- vector_context:\n{vector}\n\n"
+        "## 人類本章大綱（原文）\n"
+        f"{_clip(human_outline, 2000) if human_outline else '（無）'}\n\n"
         "## 草稿大綱（待對齊）\n"
         f"- draft_ground_truth_events: {json.dumps(draft_events, ensure_ascii=False)[:6000]}\n"
         f"- draft_narrative_script:\n{_clip(draft_script, 8000)}\n\n"
         f"- draft_must_include_beats: {json.dumps(draft_beats, ensure_ascii=False)[:2000]}\n\n"
-        "## 本章硬性規則原文（必須保真；若有 POV 暴雷需遮蔽後輸出）\n"
-        f"{_clip(hard_rules, 8000)}\n\n"
+        f"{hard_block}"
         "## 章末邊界（參考）\n"
         f"{_clip(boundary, 800)}\n\n"
         "## 禁止揭露（參考）\n"
-        f"{json.dumps(forbidden, ensure_ascii=False)[:1200]}\n"
+        f"{json.dumps(forbidden, ensure_ascii=False)[:1200]}\n\n"
+        "## 輸出要求（JSON / AlignmentOutput）\n"
+        "- human_outline_conflict_notes：字串陣列，逐條說明衝突（人類主張 vs 證據來源）。軟張力可列在此；硬衝突應 requires_hitl。\n"
+        "- alignment_log：簡述修改與原因；若未改草稿，說明已審核無需修正。\n"
+        "- final_* 必須是可交付 Author 的版本。\n\n"
+        "## HITL 紅線（與硬性規則並列；有則 requires_hitl）\n"
+        "1) 複雜智鬥／博弈但無可執行硬性規則支撐。\n"
+        "2) 解謎依賴本章未定義機制。\n"
+        "3) 機械降神：新能力／援軍無鋪墊且與圖譜記憶牴觸。\n"
+        "4) 人類大綱**原文**與 bible／graph 決定性矛盾且無法自動調和。\n"
+        "5) 極端道德／核心死亡等需作者確認。\n"
     )
 
 
@@ -101,30 +149,31 @@ def run_logic_alignment(
 ) -> tuple[dict[str, Any], dict[str, Any], int, int]:
     hard_rules = str(state.get("chapter_hard_rules") or "").strip()
 
-    # Short-circuit: no hard rules.
     if not hard_rules:
-        requires_hitl = _looks_like_complex_mind_game(state)
-        reason = None
-        log = "Skipped: No hard rules provided."
-        if requires_hitl:
-            reason = (
-                "草稿包含高複雜智鬥元素，但缺少可執行硬性規則。"
-                "請補充勝負條件、回合/判定流程、籌碼/代價與可用策略邊界。"
-            )
-            log = "Paused: Missing hard rules for complex mind-game draft."
-        out: dict[str, Any] = {
-            "safe_chapter_rules": "",
-            "alignment_log": log,
-            "requires_hitl": requires_hitl,
-            "hitl_reason": reason,
-        }
-        payload: dict[str, Any] = {
-            "chapter_id": state.get("chapter_id"),
-            "pov_character_id": state.get("pov_character_id"),
-            "skipped": True,
-            "complex_draft_detected": requires_hitl,
-        }
-        return out, payload, 0, 0
+        if not _should_run_canon_audit(state):
+            requires_hitl = _looks_like_complex_mind_game(state)
+            reason = None
+            log = "Skipped: No hard rules and no canon-audit context."
+            if requires_hitl:
+                reason = (
+                    "草稿包含高複雜智鬥元素，但缺少可執行硬性規則。"
+                    "請補充勝負條件、回合/判定流程、籌碼/代價與可用策略邊界。"
+                )
+                log = "Paused: Missing hard rules for complex mind-game draft."
+            out: dict[str, Any] = {
+                "safe_chapter_rules": "",
+                "alignment_log": log,
+                "human_outline_conflict_notes": [],
+                "requires_hitl": requires_hitl,
+                "hitl_reason": reason,
+            }
+            payload: dict[str, Any] = {
+                "chapter_id": state.get("chapter_id"),
+                "pov_character_id": state.get("pov_character_id"),
+                "skipped": True,
+                "complex_draft_detected": requires_hitl,
+            }
+            return out, payload, 0, 0
 
     payload = {
         "chapter_id": state.get("chapter_id"),
@@ -133,6 +182,7 @@ def run_logic_alignment(
         "draft_narrative_script": str(state.get("narrative_script") or ""),
         "draft_must_include_beats": list(state.get("must_include_beats") or []),
         "chapter_hard_rules": _clip(hard_rules, 8000),
+        "chapter_outline": _clip(str(state.get("chapter_outline") or ""), 2000),
     }
     prompt = _build_logic_alignment_prompt(state)
 
@@ -143,6 +193,7 @@ def run_logic_alignment(
             final_must_include_beats=list(state.get("must_include_beats") or []),
             safe_chapter_rules=hard_rules,
             alignment_log="Mock: passthrough (no rule enforcement).",
+            human_outline_conflict_notes=[],
             requires_hitl=False,
             hitl_reason=None,
         ).model_dump(mode="json")
@@ -154,4 +205,3 @@ def run_logic_alignment(
     if dumped.get("requires_hitl") and not dumped.get("hitl_reason"):
         dumped["hitl_reason"] = HitlReason.ALIGNMENT_RULES_REQUIRED
     return dumped, payload, res.token_usage, res.latency_ms
-

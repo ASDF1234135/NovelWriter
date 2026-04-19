@@ -33,7 +33,7 @@ from app.services.workflow.constants import (
     PLANNER_VOLUME_SUMMARY_CAP,
 )
 from app.services.workflow.masking import build_planner_payload
-from app.services.workflow.profiles import get_profile
+from app.services.workflow.profiles import freedom_adjusted_profile, get_profile
 
 
 def _mock_author_safe_continuity_notes(raw: list[str]) -> list[str]:
@@ -84,7 +84,11 @@ def run_planner(state: dict, context: WorkflowContext) -> tuple[dict, dict, int,
     payload = build_planner_payload(state, story=story, volumes=volumes)
     prompt = _build_planner_prompt(payload)
     if not isinstance(context.llm_client, MockLLMClient):
-        profile = get_profile("planner")
+        profile = freedom_adjusted_profile(
+            "planner",
+            ai_freedom_level=str(state.get("ai_freedom_level") or "balanced"),
+            outline_binding_mode=str(state.get("outline_binding_mode") or "ABSENT"),
+        )
         structured_output, llm_result = context.llm_client.invoke_json(prompt, PlannerOutput, profile)
         clamped = clamp_chapter_word_count(
             structured_output.target_word_count,
@@ -227,11 +231,43 @@ def _build_planner_prompt(payload: SafePlannerPayload) -> str:
         else ""
     )
     ap = (payload.author_chapter_plan or "").strip()
+    bind = (payload.outline_binding_mode or "ABSENT").strip().upper()
+    freedom = (payload.ai_freedom_level or "balanced").strip().lower()
     author_plan_block = ""
     if ap:
-        author_plan_block = (
-            "## 作者本章寫作計畫（可選參考；非強制；與錨點或硬性約束衝突時以後者為準）\n"
-            f"{_clip(ap, 1600)}\n\n"
+        if bind == "FULL":
+            author_plan_block = (
+                "## 本章人類大綱（outline_binding_mode=FULL）\n"
+                "- 在 ai_freedom_level=strict 時：下列已寫明處為**硬性**，禁止篡改；僅可結構化為 ground_truth_events／must_include_beats。\n"
+                "- 在 wild／balanced：仍不可刪改人類已寫情節；留白處可腦補並以 [AI_INVENTION] 標記。\n"
+                f"{_clip(ap, 1600)}\n\n"
+            )
+        elif bind == "PARTIAL":
+            author_plan_block = (
+                "## 本章人類大綱（outline_binding_mode=PARTIAL）\n"
+                "- 作者只提供片段；請保留已寫內容並補齊可執行大綱；所有非人類明示的腦補以 [AI_INVENTION] 前綴標於 beats 或事件描述。\n"
+                f"{_clip(ap, 1600)}\n\n"
+            )
+        else:
+            author_plan_block = f"## 本章人類大綱\n{_clip(ap, 1600)}\n\n"
+    brief = (payload.director_state_brief or "").strip()
+    brief_block = ""
+    if brief:
+        brief_block = f"## Director 狀態簡報（state_operational_brief）\n{_clip(brief, 1200)}\n\n"
+    mode_block = (
+        "## 規劃模式\n"
+        f"- ai_freedom_level: {freedom}\n"
+        f"- outline_binding_mode: {bind}\n"
+        "- 若人類大綱與 bible／graph 明顯矛盾：在敘事中優先服從世界觀證據，並可在內心標記供 Logic_Alignment 回報（不要默默吃書）。\n\n"
+    )
+    pace = (payload.this_chapter_pacing_limit or "").strip()
+    pacing_block = ""
+    if pace:
+        pacing_block = (
+            "## 【硬性】本章節奏煞車（人工指定）\n"
+            f"{_clip(pace, 800)}\n"
+            "- 若已列出節奏限制：**絕對不可**在本章的 narrative_script、ground_truth_events 或 must_include_beats 中寫出「全書／主弧的最終結局」"
+            "或一次性解開核心主謎；必須留在懸念、試探、局部轉折或危機升級；違反視為本任務失敗。\n\n"
         )
     loc_rules = (payload.local_enforced_rules_context or "").strip()
     local_rules_block = ""
@@ -242,6 +278,9 @@ def _build_planner_prompt(payload: SafePlannerPayload) -> str:
         )
     return (
         "請依照以下安全載荷產出底層真實大綱與表層敘事劇本。\n\n"
+        f"{mode_block}"
+        f"{pacing_block}"
+        f"{brief_block}"
         f"{author_plan_block}"
         f"{local_rules_block}"
         "## 字數與本章內容（必做）\n"

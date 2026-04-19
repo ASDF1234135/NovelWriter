@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import type { WorkflowPayload } from "../../types";
+import type { HitlContextPayload, WorkflowPayload } from "../../types";
 import { HitlFlowStrip } from "./HitlFlowStrip";
 import { hitlDecisionModeLabel } from "../ui-copy/workflowDisplay";
 import {
@@ -9,7 +9,6 @@ import {
   defaultSolutionForReason,
   formatBStoryCandidateForDisplay,
   getSituationCopy,
-  HINTS_RESUME_OPTIONS,
   HITL_REASON,
   type HitlSolutionId,
   isDirectorPatchReason,
@@ -32,6 +31,10 @@ type Props = {
     chapter_hard_rules?: string;
     resume_from?: string;
     reason?: string;
+    this_chapter_pacing_limit?: string;
+    future_anchor_title?: string;
+    future_anchor_description?: string;
+    chapters_to_delay?: number | null;
   }) => Promise<void>;
   onDraftEdit: (payload: {
     chapter_content: string;
@@ -44,12 +47,6 @@ type Props = {
     b_story_type?: string | null;
     new_elements_to_introduce?: string[];
     narrative_directive?: string;
-    reason?: string;
-  }) => Promise<void>;
-  onExtractionHints?: (payload: {
-    entries: Array<{ node_id: string; surface_forms: string[] }>;
-    resume_from?: string;
-    waive_mandatory_node_ids?: string[];
     reason?: string;
   }) => Promise<void>;
   onExtractionRemap?: (payload: {
@@ -66,15 +63,7 @@ type Props = {
     reason?: string;
   }) => Promise<void>;
   onAnchorDelay?: (payload: { anchor_id: string; new_chapter_target: number; reason?: string }) => Promise<void>;
-  onContextPrune?: (payload: {
-    bible_context?: string;
-    graph_context?: string;
-    vector_context?: string;
-    recent_chapter_context?: string;
-    previous_chapter_summary?: string;
-    graph_rag_context_tier?: number;
-    reason?: string;
-  }) => Promise<void>;
+  onContextPrune?: (payload: { graph_rag_context_tier: number; reason?: string }) => Promise<void>;
 };
 
 function isHitlActive(workflow: WorkflowPayload | null): boolean {
@@ -97,7 +86,6 @@ export function HitlPanel({
   onStateInjection,
   onDraftEdit,
   onDirectorPatch = asyncNoop,
-  onExtractionHints = asyncNoop,
   onExtractionRemap = asyncNoop,
   onBStoryJudgement = asyncNoop,
   onAnchorDelay = asyncNoop,
@@ -109,6 +97,10 @@ export function HitlPanel({
     '[{"action":"CREATE_NODE","node_id":"item_backup_relic","node_type":"ITEM","properties":{"canonical_name":"備用道具","description":"HITL 強制注入"}}]',
   );
   const [alignmentRulesInput, setAlignmentRulesInput] = useState("");
+  const [pacingLimitInput, setPacingLimitInput] = useState("");
+  const [futureAnchorTitle, setFutureAnchorTitle] = useState("");
+  const [futureAnchorDesc, setFutureAnchorDesc] = useState("");
+  const [futureAnchorDelay, setFutureAnchorDelay] = useState("");
   const [draftText, setDraftText] = useState("");
   const [resumeFrom, setResumeFrom] = useState("reader");
   const [mergeHintsOnDraft, setMergeHintsOnDraft] = useState(false);
@@ -119,8 +111,6 @@ export function HitlPanel({
   const [narrativeDirective, setNarrativeDirective] = useState("");
   const [anchorId, setAnchorId] = useState("");
   const [anchorNewChapter, setAnchorNewChapter] = useState(1);
-  const [hintsJson, setHintsJson] = useState('[{"node_id":"char_x","surface_forms":["精確子字串"]}]');
-  const [hintsResume, setHintsResume] = useState("draft_supervisor");
   const [waiveIdsComma, setWaiveIdsComma] = useState("");
   const [remapJson, setRemapJson] = useState('[{"from_node_id":"ghost_01","to_node_id":"planned_01"}]');
   const [remapHintsView, setRemapHintsView] = useState("[]");
@@ -128,17 +118,12 @@ export function HitlPanel({
   const [bEvidenceCsv, setBEvidenceCsv] = useState("");
   const [bAnalysis, setBAnalysis] = useState("");
   const [bRejectResume, setBRejectResume] = useState("extraction_gate");
-  const [pruneBible, setPruneBible] = useState("");
-  const [pruneGraph, setPruneGraph] = useState("");
-  const [pruneVector, setPruneVector] = useState("");
-  const [pruneRecent, setPruneRecent] = useState("");
-  const [prunePrevSummary, setPrunePrevSummary] = useState("");
-  const [pruneTier, setPruneTier] = useState(1);
+  const [pruneProductTier, setPruneProductTier] = useState(0);
   const [selectedSolution, setSelectedSolution] = useState<HitlSolutionId | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [contextFieldNamesOpen, setContextFieldNamesOpen] = useState(false);
 
   const hitlActive = isHitlActive(workflow);
+  const hitlContext = (workflow?.run.hitl_context ?? null) as HitlContextPayload | null;
   const rawOptions = (workflow?.state.pending_hitl_options as Array<{ id: string; label: string }> | undefined) ?? [];
   const options = useMemo(
     () => rawOptions.filter((o) => o.id !== "b_story_wait_judgement"),
@@ -184,12 +169,6 @@ export function HitlPanel({
       const cid = Number(st.chapter_id ?? 1);
       setAnchorNewChapter(cid + 1);
     }
-    if (reason === HITL_REASON.DRAFT_LOOP) {
-      const hints = st.author_extraction_surface_hints;
-      if (Array.isArray(hints) && hints.length > 0) {
-        setHintsJson(JSON.stringify(hints, null, 2));
-      }
-    }
     if (reason === HITL_REASON.EXTRACTION_GATE) {
       const h = st.hitl_extraction_remap_hints;
       setRemapHintsView(JSON.stringify(h ?? [], null, 2));
@@ -201,17 +180,18 @@ export function HitlPanel({
       }
     }
     if (reason === HITL_REASON.CONTEXT) {
-      setPruneBible(String(st.bible_context ?? ""));
-      setPruneGraph(String(st.graph_context ?? ""));
-      setPruneVector(String(st.vector_context ?? ""));
-      setPruneRecent(String(st.recent_chapter_context ?? ""));
-      setPrunePrevSummary(String(st.previous_chapter_summary ?? ""));
-      setPruneTier(Number(st.graph_rag_context_tier ?? 1));
+      const meta = workflow?.run.hitl_context?.context_metadata;
+      const suggested = meta?.graph_rag_context_tier;
+      if (typeof suggested === "number" && suggested >= 0 && suggested <= 2) {
+        setPruneProductTier(suggested);
+      } else {
+        setPruneProductTier(0);
+      }
     }
     if (reason === HITL_REASON.ALIGNMENT_RULES_REQUIRED) {
       setAlignmentRulesInput(String(st.chapter_hard_rules ?? ""));
     }
-  }, [hitlActive, reason, workflow?.run.run_id, workflow?.state]);
+  }, [hitlActive, reason, workflow?.run.run_id, workflow?.run.hitl_context, workflow?.state]);
 
   const shell = compact
     ? "glass-panel rounded-xl border border-outline-variant/15 p-4 shadow-glow"
@@ -230,7 +210,19 @@ export function HitlPanel({
 
   return (
     <section className={shell}>
-      <h2 className="mb-1 font-headline text-sm font-bold uppercase tracking-wider text-tertiary">需要您協助</h2>
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <h2 className="font-headline text-sm font-bold uppercase tracking-wider text-tertiary">需要您協助</h2>
+        {hitlActive ? (
+          <button
+            type="button"
+            className="shrink-0 rounded-md border border-error/50 bg-error/15 px-2 py-1 font-label text-[11px] font-semibold text-error hover:bg-error/25 disabled:opacity-40"
+            disabled={!hitlActive}
+            onClick={() => onDecision("ABORT_AND_RESTART")}
+          >
+            放棄本章草稿，打掉重練
+          </button>
+        ) : null}
+      </div>
       <p className="mb-3 font-body text-sm text-on-surface-variant">
         {hitlActive ? (
           <>
@@ -250,6 +242,9 @@ export function HitlPanel({
           <div className="mb-4 rounded-lg border border-tertiary/20 bg-tertiary/5 px-3 py-3">
             <h3 className="font-headline text-sm font-bold text-on-surface">{situation.title}</h3>
             <p className="mt-2 font-body text-sm leading-relaxed text-on-surface-variant">{situation.why}</p>
+            {hitlContext?.primary_issue ? (
+              <p className="mt-2 rounded-md bg-surface-container-highest/60 px-2 py-2 font-body text-xs text-on-surface">{hitlContext.primary_issue}</p>
+            ) : null}
             {reason === HITL_REASON.CONTEXT ? (
               <p className="mt-2 font-label text-xs text-on-surface-variant">
                 目前估算參考內容約 {String(workflow?.state.context_overflow_char_estimate ?? "—")} 字，請視情況刪減。
@@ -295,18 +290,60 @@ export function HitlPanel({
                 disabled={!hitlActive}
                 placeholder="補充本章硬性規則：勝負條件、回合流程、籌碼/代價、可用策略邊界"
               />
+              <label className="auteur-label mt-2">本章節奏煞車（可選；禁止本章寫出最終結局）</label>
+              <textarea
+                className={inputClass}
+                value={pacingLimitInput}
+                rows={2}
+                onChange={(e) => setPacingLimitInput(e.target.value)}
+                disabled={!hitlActive}
+                placeholder="例：本章只允許試探與懸念，不得揭露真凶身分。"
+              />
+              <p className="mt-2 font-label text-[10px] uppercase tracking-wider text-on-surface-variant">未來結局錨點（可選）</p>
+              <input
+                className={inputClass}
+                value={futureAnchorTitle}
+                onChange={(e) => setFutureAnchorTitle(e.target.value)}
+                disabled={!hitlActive}
+                placeholder="錨點標題"
+              />
+              <textarea
+                className={inputClass}
+                value={futureAnchorDesc}
+                rows={2}
+                onChange={(e) => setFutureAnchorDesc(e.target.value)}
+                disabled={!hitlActive}
+                placeholder="錨點描述（可空）"
+              />
+              <label className="auteur-label mt-1">延遲幾章後觸發（空白表示 0）</label>
+              <input
+                type="number"
+                min={0}
+                className={inputClass}
+                value={futureAnchorDelay}
+                onChange={(e) => setFutureAnchorDelay(e.target.value)}
+                disabled={!hitlActive}
+                placeholder="0"
+              />
               <button
                 type="button"
                 className={btnClass}
                 disabled={!hitlActive}
-                onClick={() =>
+                onClick={() => {
+                  const raw = futureAnchorDelay.trim();
+                  const parsed = raw === "" ? null : Number.parseInt(raw, 10);
+                  const chapters_to_delay = parsed != null && Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
                   onStateInjection({
                     mutations: [],
                     chapter_hard_rules: alignmentRulesInput,
                     resume_from: "logic_alignment",
                     reason: "alignment_rules_patch",
-                  })
-                }
+                    this_chapter_pacing_limit: pacingLimitInput.trim(),
+                    future_anchor_title: futureAnchorTitle.trim(),
+                    future_anchor_description: futureAnchorDesc.trim(),
+                    chapters_to_delay,
+                  });
+                }}
               >
                 套用硬性規則並繼續
               </button>
@@ -466,6 +503,9 @@ export function HitlPanel({
             {selectedSolution === "draft" && reason === HITL_REASON.DRAFT_LOOP ? (
               <>
                 <h3 className="mb-2 font-headline text-xs font-bold text-on-surface">修改章節內文</h3>
+                <p className="mb-2 font-body text-xs text-on-surface-variant">
+                  專名對照線索請在下次「開始撰寫本章」時，於章節執行請求一併送出（無法在此 HITL 面板補送）。
+                </p>
                 <label className="flex items-center gap-2 font-label text-xs text-on-surface-variant">
                   <input type="checkbox" checked={mergeHintsOnDraft} onChange={(e) => setMergeHintsOnDraft(e.target.checked)} disabled={!hitlActive} />
                   保留已蒐集的專名線索
@@ -492,40 +532,6 @@ export function HitlPanel({
                   }
                 >
                   提交內文並繼續
-                </button>
-              </>
-            ) : null}
-
-            {selectedSolution === "hints" && reason === HITL_REASON.DRAFT_LOOP ? (
-              <>
-                <h3 className="mb-2 font-headline text-xs font-bold text-on-surface">補上稱呼與專名線索</h3>
-                <p className="mb-2 font-body text-xs text-on-surface-variant">
-                  以結構化清單列出設定代號與文中應出現的說法；若不熟悉格式，可先略過並改以「修改內文」處理。
-                </p>
-                <textarea className={inputClass} value={hintsJson} rows={taRows(6)} onChange={(e) => setHintsJson(e.target.value)} disabled={!hitlActive} />
-                <label className="auteur-label mt-2">送交哪一步驗證</label>
-                <select className={inputClass} value={hintsResume} onChange={(e) => setHintsResume(e.target.value)} disabled={!hitlActive}>
-                  {HINTS_RESUME_OPTIONS.map((o) => (
-                    <option key={o.value} value={o.value}>
-                      {o.label}
-                    </option>
-                  ))}
-                </select>
-                <label className="auteur-label mt-2">可略過的必填項目代號（逗號分隔，進階）</label>
-                <input className={inputClass} value={waiveIdsComma} onChange={(e) => setWaiveIdsComma(e.target.value)} disabled={!hitlActive} />
-                <button
-                  type="button"
-                  className={btnClass}
-                  disabled={!hitlActive}
-                  onClick={() =>
-                    onExtractionHints({
-                      entries: JSON.parse(hintsJson) as Array<{ node_id: string; surface_forms: string[] }>,
-                      resume_from: hintsResume,
-                      waive_mandatory_node_ids: waiveList(),
-                    })
-                  }
-                >
-                  套用線索並繼續
                 </button>
               </>
             ) : null}
@@ -655,60 +661,37 @@ export function HitlPanel({
             {selectedSolution === "prune" && reason === HITL_REASON.CONTEXT ? (
               <>
                 <h3 className="mb-2 font-headline text-xs font-bold text-on-surface">精簡參考資料</h3>
-                <p className="mb-2 font-body text-xs text-on-surface-variant">請刪短各區文字；不必全清空，重點是降低總量。</p>
-                <div className="grid gap-2 lg:grid-cols-2">
-                  <div>
-                    <label className="auteur-label">世界觀摘要</label>
-                    <textarea className={inputClass} value={pruneBible} rows={taRows(4)} onChange={(e) => setPruneBible(e.target.value)} disabled={!hitlActive} />
-                  </div>
-                  <div>
-                    <label className="auteur-label">人物與事件關係摘要</label>
-                    <textarea className={inputClass} value={pruneGraph} rows={taRows(4)} onChange={(e) => setPruneGraph(e.target.value)} disabled={!hitlActive} />
-                  </div>
-                  <div>
-                    <label className="auteur-label">相關段落摘錄</label>
-                    <textarea className={inputClass} value={pruneVector} rows={taRows(4)} onChange={(e) => setPruneVector(e.target.value)} disabled={!hitlActive} />
-                  </div>
-                  <div>
-                    <label className="auteur-label">近期章節摘要</label>
-                    <textarea className={inputClass} value={pruneRecent} rows={taRows(4)} onChange={(e) => setPruneRecent(e.target.value)} disabled={!hitlActive} />
-                  </div>
+                <p className="mb-2 font-body text-xs text-on-surface-variant">
+                  選擇組裝層級：後端會依層級自動縮減圖譜與向量脈絡（0=最完整，2=最精簡）。
+                </p>
+                <div className="flex flex-col gap-2">
+                  {(
+                    [
+                      { v: 0, label: "層級 0 — 盡量完整" },
+                      { v: 1, label: "層級 1 — 中度瘦身" },
+                      { v: 2, label: "層級 2 — 積極瘦身" },
+                    ] as const
+                  ).map((row) => (
+                    <label key={row.v} className="flex cursor-pointer items-center gap-2 font-body text-sm text-on-surface">
+                      <input
+                        type="radio"
+                        name="prune-tier"
+                        checked={pruneProductTier === row.v}
+                        onChange={() => setPruneProductTier(row.v)}
+                        disabled={!hitlActive}
+                      />
+                      {row.label}
+                    </label>
+                  ))}
                 </div>
-                <label className="auteur-label mt-2">上一章精簡回顧</label>
-                <textarea className={inputClass} value={prunePrevSummary} rows={taRows(2)} onChange={(e) => setPrunePrevSummary(e.target.value)} disabled={!hitlActive} />
-                <label className="auteur-label mt-2">關係網詳盡度（0 最精簡—2 最細）</label>
-                <input
-                  type="number"
-                  min={0}
-                  max={2}
-                  className={inputClass}
-                  value={pruneTier}
-                  onChange={(e) => setPruneTier(Number(e.target.value))}
-                  disabled={!hitlActive}
-                />
                 <button
                   type="button"
                   className={btnClass}
                   disabled={!hitlActive}
-                  onClick={() =>
-                    onContextPrune({
-                      bible_context: pruneBible,
-                      graph_context: pruneGraph,
-                      vector_context: pruneVector,
-                      recent_chapter_context: pruneRecent,
-                      previous_chapter_summary: prunePrevSummary,
-                      graph_rag_context_tier: pruneTier,
-                    })
-                  }
+                  onClick={() => onContextPrune?.({ graph_rag_context_tier: pruneProductTier, reason: "author_context_prune" })}
                 >
-                  套用精簡並重新整理背景
+                  套用並重新整理背景
                 </button>
-                <details className="mt-3" open={contextFieldNamesOpen} onToggle={(e) => setContextFieldNamesOpen((e.target as HTMLDetailsElement).open)}>
-                  <summary className="cursor-pointer font-label text-xs text-on-surface-variant">進階：對應系統欄位名稱</summary>
-                  <p className="mt-1 font-mono text-[10px] text-on-surface-variant">
-                    bible_context · graph_context · vector_context · recent_chapter_context · previous_chapter_summary · graph_rag_context_tier
-                  </p>
-                </details>
               </>
             ) : null}
 

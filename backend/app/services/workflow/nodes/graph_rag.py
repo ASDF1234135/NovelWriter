@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.domain.schema import GraphQueryRequest
+from app.domain.schema import GraphQueryRequest, NodeType, StoryCastMemberStored
 from app.services.workflow.continuity import (
     build_continuity_packet,
     format_local_enforced_rules_block,
@@ -81,8 +81,41 @@ def run_graph_rag(state: dict, context: WorkflowContext) -> dict:
             (story.get("bible_json") or {}) if story else {},
             macro_author_notes=str(story.get("macro_author_notes") or "") if story else "",
         )
+        cast_index: dict[str, dict] = {}
+        cast_full: dict[str, dict] = {}
+        for raw in (story.get("cast_json") or []) if story else []:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                member = StoryCastMemberStored.model_validate(raw)
+            except Exception:
+                continue
+            cast_index[member.node_id] = {
+                "name": member.canonical_name,
+                "personality": member.personality,
+                "speech_style": member.speech_style,
+                "fatal_flaw": member.fatal_flaw,
+                "habit": member.quirks_and_habits,
+            }
+            cast_full[member.node_id] = member.model_dump(mode="json")
+        slim_cards = [
+            {"node_id": node.node_id, **cast_index[node.node_id]}
+            for node in graph_snapshot.nodes
+            if node.node_type in {NodeType.CHARACTER, NodeType.PERSONA} and node.node_id in cast_index
+        ]
+        full_cards = [
+            cast_full[node.node_id]
+            for node in graph_snapshot.nodes
+            if node.node_type in {NodeType.CHARACTER, NodeType.PERSONA} and node.node_id in cast_full
+        ]
         gc_max, vc_max = _tier_truncate_limits(tier)
-        graph_context = truncate_json_payload(graph_snapshot.model_dump(mode="json"), max_chars=gc_max)
+        graph_context = truncate_json_payload(
+            {
+                "graph_snapshot": graph_snapshot.model_dump(mode="json"),
+                "cast_slim_view": slim_cards,
+            },
+            max_chars=gc_max,
+        )
         vector_context = truncate_json_payload(
             {
                 "hits": [hit.model_dump() for hit in vector_hits],
@@ -107,6 +140,8 @@ def run_graph_rag(state: dict, context: WorkflowContext) -> dict:
             "graph_rag_context_tier": tier,
             "context_overflow_char_estimate": total,
             "context_hitl_required": False,
+            "cast_slim_view": slim_cards,
+            "cast_full_view": full_cards,
             **continuity,
         }
         if total <= _CONTEXT_CHAR_BUDGET:

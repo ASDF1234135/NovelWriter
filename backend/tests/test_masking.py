@@ -225,3 +225,66 @@ def test_draft_supervisor_payload_includes_normalized_length() -> None:
     assert payload.ending_boundary_rule == "本章最遠只能停在舊鐘樓。"
     assert payload.previous_chapter_summary == "上一章主角潛入王都。"
     assert payload.allowed_identity_reveals_this_chapter == ["灰鴉"]
+
+
+def test_author_payload_includes_temporal_active_character_profiles() -> None:
+    state = {
+        "chapter_id": 5,
+        "narrative_script": "x",
+        "tone_direction": "懸疑",
+        "target_word_count": 1500,
+        "draft_feedback": [],
+        "reader_feedback": [],
+        "cast_slim_view": [
+            {
+                "node_id": "char_hero",
+                "name": "英雄",
+                "personality": "沉穩",
+                "speech_style": "短句",
+                "fatal_flaw": "固執",
+                "habit": "敲桌",
+            }
+        ],
+        "cast_full_view": [
+            {
+                "node_id": "char_hero",
+                "canonical_name": "英雄",
+                "role": "protagonist",
+                "personality": "沉穩",
+                "speech_style": "短句",
+                "arc_history": [
+                    {
+                        "trigger_event_id": "",
+                        "trigger_event_summary": "first loss",
+                        "chapter_id": 3,
+                        "old_personality": "傲慢",
+                        "new_personality": "沉穩",
+                        "old_speech_style": "鋒利",
+                        "new_speech_style": "短句",
+                        "source": "PLANNER",
+                        "reason": "loss",
+                        "updated_at": "2026-04-18T00:00:00+00:00",
+                    },
+                    {
+                        "trigger_event_id": "",
+                        "trigger_event_summary": "future",
+                        "chapter_id": 8,
+                        "old_personality": "沉穩",
+                        "new_personality": "冷酷",
+                        "old_speech_style": "短句",
+                        "new_speech_style": "冷淡",
+                        "source": "PLANNER",
+                        "reason": "future",
+                        "updated_at": "2026-04-18T00:00:00+00:00",
+                    },
+                ],
+            }
+        ],
+        "recent_entity_names": ["英雄"],
+    }
+    payload = build_author_payload(state).model_dump()
+    profiles = payload["active_character_profiles"]
+    assert len(profiles) == 1
+    assert profiles[0]["canonical_name"] == "英雄"
+    assert "第2章前" in profiles[0]["past_personality_reference"]
+    assert "第8章後" not in profiles[0]["past_personality_reference"]

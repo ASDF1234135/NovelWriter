@@ -186,7 +186,21 @@ export function buildFeedbackSummary(state: Record<string, unknown>, reason: str
     }
   }
 
-  return lines.slice(0, 6);
+  if (reason === HITL_REASON.ALIGNMENT_RULES_REQUIRED) {
+    const al = String(state.alignment_log ?? "").trim();
+    if (al) lines.push(`對齊日誌：${al.length > 420 ? `${al.slice(0, 420)}…` : al}`);
+    const cn = state.human_outline_conflict_notes;
+    if (Array.isArray(cn)) {
+      for (const x of cn.slice(0, 5)) {
+        const s = String(x).trim();
+        if (s) lines.push(`設定衝突：${s}`);
+      }
+    }
+    const co = String(state.chapter_outline ?? "").trim();
+    if (co) lines.push(`你的人類大綱（節錄）：${co.length > 180 ? `${co.slice(0, 180)}…` : co}`);
+  }
+
+  return lines.slice(0, 8);
 }
 
 export type RemapHintRow = Record<string, unknown>;
@@ -251,7 +265,7 @@ export function isDirectorPatchReason(reason: string): boolean {
   );
 }
 
-export type HitlSolutionId = "outline" | "anchor" | "director" | "draft" | "hints" | "remap" | "b_story" | "prune";
+export type HitlSolutionId = "outline" | "anchor" | "director" | "draft" | "remap" | "b_story" | "prune";
 
 export function solutionsForReason(reason: string): { id: HitlSolutionId; title: string; blurb: string }[] {
   if (reason === HITL_REASON.PLAN_LOOP) {
@@ -271,10 +285,7 @@ export function solutionsForReason(reason: string): { id: HitlSolutionId; title:
     return [{ id: "director", title: "調整副線與章節方向", blurb: "換一種副線類型或寫法，避免與前幾章撞題。" }];
   }
   if (reason === HITL_REASON.DRAFT_LOOP) {
-    return [
-      { id: "draft", title: "直接修改章節內文", blurb: "在下方編輯正文，再從適當步驟續跑。" },
-      { id: "hints", title: "補上稱呼與專名線索", blurb: "告訴系統文中應出現哪些用詞，協助後續審核與歸檔。" },
-    ];
+    return [{ id: "draft", title: "直接修改章節內文", blurb: "在下方編輯正文，再從適當步驟續跑。" }];
   }
   if (reason === HITL_REASON.EXTRACTION_GATE) {
     return [{ id: "remap", title: "對照角色與道具名稱", blurb: "依系統猜測修正「文中說法」對應到「設定表」的哪一筆。" }];

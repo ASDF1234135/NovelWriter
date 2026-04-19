@@ -22,10 +22,11 @@ from app.services.workflow.constants import MAX_ANCHORS_PER_VOLUME, MIN_ANCHORS_
 from app.services.workflow.profiles import get_profile
 
 logger = logging.getLogger(__name__)
+_BIBLE_PRIMARY_OPTIONAL_KEYS = frozenset({"theme", "narrative_pov", "writing_style"})
 
 MACRO_AUTHOR_NOTES_MAX = 8192
 CAST_SHORT_BIO_MAX = 500
-CAST_MOTIVATION_MAX = 600
+CAST_PERSONALITY_MAX = 600
 CAST_SPEECH_STYLE_MAX = 240
 CAST_FATAL_FLAW_MAX = 400
 CAST_AGE_MAX = 48
@@ -117,7 +118,7 @@ def _merge_cast_llm_with_seed(raw: list[MacroCastMember], seeds: list[StoryCastS
                 role=role,
                 short_bio=(seed.short_hint or "").strip(),
                 core_motivation="",
-                motivation="",
+                personality="",
             )
         )
     for i, m in enumerate(pool):
@@ -278,7 +279,15 @@ class AnchorService:
     def _normalize_generated_bible(self, story_input: StoryInput, output: MacroPlanOutput) -> dict[str, Any]:
         raw = output.bible
         if isinstance(raw, dict) and raw:
-            return dict(raw)
+            out = dict(raw)
+            if "theme" not in out and "themes" in out:
+                out["theme"] = out.get("themes")
+            out.pop("themes", None)
+            extra_raw = out.get("extra")
+            if isinstance(extra_raw, dict):
+                extra_clean = {k: v for k, v in extra_raw.items() if k not in _BIBLE_PRIMARY_OPTIONAL_KEYS}
+                out["extra"] = extra_clean
+            return out
         return self._fallback_bible_from_premise(story_input)
 
     def _default_nested_anchors_for_range(
@@ -359,7 +368,7 @@ class AnchorService:
                         "writing_note": "string[]",
                         "world_rules": "string[]",
                         "factions": "string[]",
-                        "extra": "optional object — you may add consistent keys (magic, tech_level, themes, ...)",
+                        "extra": "optional object — custom world metadata only; do not duplicate theme / narrative_pov / writing_style here",
                     },
                     "cast": [
                         {
@@ -368,7 +377,7 @@ class AnchorService:
                             "short_bio": "string",
                             "aliases": "string[] optional",
                             "age": "string optional",
-                            "motivation": "string optional (legacy)",
+                            "personality": "string optional",
                             "core_motivation": "string — primary drive across the series",
                             "core_value": "string optional — guiding principle / core value",
                             "notes_links": "string[] optional — select from notes_keypoints ids (e.g. KP1, KP2) when macro_author_notes is non-empty",
@@ -414,6 +423,8 @@ class AnchorService:
                     f"**每個 volume 的 anchors 陣列必須含 {MIN_ANCHORS_PER_VOLUME}-{MAX_ANCHORS_PER_VOLUME} 個元素**；"
                     "每個 anchor 的 chapter_target 必須落在該 volume 的 chapter_start 與 chapter_end 之間（含）。",
                     "你必須輸出 bible：具體、可執行，並與 volumes、anchors、cast 一致；可在 bible 內合理擴充額外鍵。",
+                    "theme / narrative_pov / writing_style 是 bible 主欄位（可選）；若要提供，請直接放在 bible 頂層，不要放進 extra。",
+                    "extra 只能放其他補充鍵；禁止重複 theme、narrative_pov、writing_style（若重複，後端會忽略 extra 同名鍵）。",
                     "若 macro_author_notes 非空，bible 與劇情規劃必須尊重其中設定。",
                     "若 macro_author_notes 非空：每個 cast 成員 notes_links 必須為非空陣列，且內容只能選自 notes_keypoints 的 id（如 KP1, KP2）；"
                     "每個 volume anchor notes_links 亦必須為非空陣列，且同樣只能選自 notes_keypoints 的 id。",
@@ -434,7 +445,7 @@ class AnchorService:
                 canonical_name=lead,
                 role="protagonist",
                 short_bio=(story_input.premise or "")[:240],
-                motivation="在當前處境中求存並改變局面。",
+                personality="在壓力下保持克制但執著。",
                 core_motivation="在當前處境中求存並改變局面。",
                 core_value="在當下活下去並主動改變局勢。",
             ),
@@ -442,7 +453,7 @@ class AnchorService:
                 canonical_name="主要反派",
                 role="antagonist",
                 short_bio="與主角目標對立的核心對手。",
-                motivation="鞏固自身秩序並壓制主角。",
+                personality="冷靜、控制慾強，擅長操控局勢。",
                 core_motivation="鞏固自身秩序並壓制主角。",
                 core_value="維持既定秩序並消滅威脅。",
             ),
@@ -450,7 +461,7 @@ class AnchorService:
                 canonical_name="重要配角",
                 role="supporting",
                 short_bio="與主線密切相關的核心人物。",
-                motivation="協助或阻擾主角，推動衝突。",
+                personality="務實但情緒敏銳，容易被信念牽動。",
                 core_motivation="協助或阻擾主角，推動衝突。",
                 core_value="在風險與選擇間維持自我立場。",
             ),
@@ -469,9 +480,9 @@ class AnchorService:
 
         coerced_pre: list[MacroCastMember] = []
         for m in members:
-            core = (m.core_motivation or "").strip() or (m.motivation or "").strip()
-            mot = (m.motivation or "").strip() or core
-            coerced_pre.append(m.model_copy(update={"core_motivation": core, "motivation": mot}))
+            core = (m.core_motivation or "").strip()
+            personality = (m.personality or "").strip()
+            coerced_pre.append(m.model_copy(update={"core_motivation": core, "personality": personality}))
         members = coerced_pre
 
         if not any(m.role == "protagonist" for m in members):
@@ -513,7 +524,7 @@ class AnchorService:
         for idx, m in enumerate(members, start=1):
             node_id = f"{story_id}_mc_{idx:02d}"
             name = m.canonical_name.strip()
-            core = (m.core_motivation or "").strip() or (m.motivation or "").strip()
+            core = (m.core_motivation or "").strip()
             core_value = (m.core_value or "").strip() or core
             stored.append(
                 StoryCastMemberStored(
@@ -523,7 +534,7 @@ class AnchorService:
                     short_bio=(m.short_bio or "")[:CAST_SHORT_BIO_MAX],
                     aliases=[a.strip() for a in m.aliases if str(a).strip()][:8],
                     age=_age_str(m.age),
-                    motivation=(m.motivation or "")[:CAST_MOTIVATION_MAX] or core[:CAST_MOTIVATION_MAX],
+                    personality=(m.personality or "")[:CAST_PERSONALITY_MAX],
                     core_motivation=core[:CAST_CORE_MOTIVATION_MAX],
                     core_value=core_value[:CAST_CORE_MOTIVATION_MAX],
                     speech_style=(m.speech_style or "")[:CAST_SPEECH_STYLE_MAX],

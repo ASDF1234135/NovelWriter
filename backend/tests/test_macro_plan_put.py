@@ -85,6 +85,28 @@ def test_put_macro_plan_validates_anchor_volume(tmp_path) -> None:
         svc.put_macro_plan(sid, bad_body)
 
 
+def test_macro_compile_clears_imported_foreign_cast_ids(tmp_path) -> None:
+    svc = _service(str(tmp_path / "foreign_cast.sqlite3"))
+    sid = svc.create_story(
+        StoryInput(title="T", premise="p", bible={}, target_total_words=30_000),
+    )["story_id"]
+    macro = svc.macro_compile(sid)
+    body = _macro_to_put(macro)
+    foreign_cast = body.cast[0].model_copy(update={"node_id": "story_old_mc_77", "canonical_name": "舊主角"})
+    put_body = body.model_copy(
+        update={
+            "cast": [foreign_cast, *body.cast[1:]],
+            "protagonist_character_id": "story_old_mc_77",
+        }
+    )
+    svc.put_macro_plan(sid, put_body)
+
+    assert "story_old_mc_77" in svc.graph_store.story_nodes[sid]
+    svc.macro_compile(sid)
+
+    assert "story_old_mc_77" not in svc.graph_store.story_nodes[sid]
+
+
 def test_start_run_chapter_author_plan_in_state(tmp_path) -> None:
     svc = _service(str(tmp_path / "plan.sqlite3"))
     sid = svc.create_story(
@@ -106,3 +128,28 @@ def test_start_run_chapter_author_plan_truncated(tmp_path) -> None:
     wf = svc.start_run_chapter(sid, 1, author_chapter_plan=long_text)
     assert len(wf["state"]["author_chapter_plan"]) == 2000
     assert len(wf["state"]["chapter_outline"]) == 2000
+
+
+def test_start_run_chapter_ai_freedom_and_outline_binding(tmp_path) -> None:
+    svc = _service(str(tmp_path / "freedom.sqlite3"))
+    sid = svc.create_story(
+        StoryInput(title="T", premise="p", bible={}, target_total_words=30_000),
+    )["story_id"]
+    svc.macro_compile(sid)
+    wf = svc.start_run_chapter(
+        sid,
+        1,
+        chapter_outline="短",
+        ai_freedom_level="strict",
+    )
+    assert wf["state"]["ai_freedom_level"] == "strict"
+    assert wf["state"]["outline_binding_mode"] == "PARTIAL"
+    assert wf["state"].get("director_state_brief") == ""
+
+    long_outline = "章" * 100
+    wf2 = svc.start_run_chapter(sid, 1, chapter_outline=long_outline, ai_freedom_level="wild")
+    assert wf2["state"]["ai_freedom_level"] == "wild"
+    assert wf2["state"]["outline_binding_mode"] == "FULL"
+
+    wf3 = svc.start_run_chapter(sid, 1, ai_freedom_level="not_a_level")
+    assert wf3["state"]["ai_freedom_level"] == "balanced"

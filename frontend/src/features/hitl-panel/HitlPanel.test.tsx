@@ -138,7 +138,38 @@ describe("HitlPanel", () => {
         mutations: [],
         chapter_hard_rules: "舊規則",
         resume_from: "logic_alignment",
+        this_chapter_pacing_limit: "",
+        future_anchor_title: "",
+        future_anchor_description: "",
+        chapters_to_delay: null,
       }),
     );
+  });
+
+  it("panic button sends ABORT_AND_RESTART decision", async () => {
+    const onDecision = vi.fn().mockResolvedValue(undefined);
+    render(
+      <HitlPanel
+        workflow={{
+          run: {
+            run_id: "run-panic",
+            story_id: "story-1",
+            chapter_id: 1,
+            status: "WAITING_HITL",
+            requires_hitl: true,
+            hitl_reason: "Plan_Loop_Exceeded",
+            hitl_decision_mode: "MANUAL_EDIT",
+          },
+          state: { pending_hitl_options: [], resume_from: "planner" },
+          steps: [],
+        }}
+        onDecision={onDecision}
+        onOutlineEdit={noopAsync}
+        onStateInjection={noopAsync}
+        onDraftEdit={noopAsync}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "放棄本章草稿，打掉重練" }));
+    expect(onDecision).toHaveBeenCalledWith("ABORT_AND_RESTART");
   });
 });

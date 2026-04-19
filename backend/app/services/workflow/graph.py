@@ -29,6 +29,7 @@ from app.services.workflow.nodes.graph_rag import run_graph_rag
 from app.services.workflow.nodes.logic_alignment import run_logic_alignment
 from app.services.workflow.nodes.plan_supervisor import run_plan_supervisor
 from app.services.workflow.nodes.planner import run_planner
+from app.services.workflow.nodes.profile_expander import run_profile_expander
 from app.services.workflow.nodes.reader import run_reader
 from app.services.workflow.nodes.state_updater import run_state_updater
 from app.services.workflow.chapter_pipeline import extraction_substantiated_event_ids, validate_b_story_resolution
@@ -48,6 +49,7 @@ def _promote_planned_characters_to_cast(story_repository: Any, story_id: str, pl
         if not node_id:
             continue
         core = str(prof.get("core_motivation") or "")[:600]
+        personality = str(prof.get("personality") or "")[:600]
         core_value = str(prof.get("core_value") or "")[:600] or core
         member = StoryCastMemberStored(
             node_id=node_id,
@@ -56,14 +58,14 @@ def _promote_planned_characters_to_cast(story_repository: Any, story_id: str, pl
             short_bio=str(prof.get("short_bio") or "")[:500],
             aliases=[],
             age=str(prof.get("age") or "")[:48],
-            motivation=core or str(prof.get("motivation") or "")[:600],
+            personality=personality,
             core_motivation=core,
             core_value=core_value,
             speech_style=str(prof.get("speech_style") or "")[:240],
             fatal_flaw=str(prof.get("fatal_flaw") or "")[:400],
             quirks_and_habits=str(prof.get("quirks_and_habits") or "")[:400],
         )
-        story_repository.append_story_cast_member_if_absent(story_id, member)
+        story_repository.soft_upsert_story_cast_member(story_id, member)
 
 
 def _has_forbidden_resolution_keywords(text: str) -> bool:
@@ -192,6 +194,11 @@ def build_chapter_graph(context: WorkflowContext):
         output = {**output, "manual_plan_force_approve": False}
         planned_nodes = list(output.get("proposed_new_nodes") or [])
         merged_planner = {**output, "planned_graph_nodes": planned_nodes}
+        pending_evolutions = list(state.get("pending_cast_evolutions") or [])
+        for row in list(merged_planner.get("character_evolution_requests") or []):
+            if isinstance(row, dict):
+                pending_evolutions.append(row)
+        merged_planner["pending_cast_evolutions"] = pending_evolutions
         adds_raw = merged_planner.get("new_active_b_stories") or []
         pending_b: list[dict] = []
         for row in adds_raw[:2]:
@@ -241,6 +248,20 @@ def build_chapter_graph(context: WorkflowContext):
         apply_length_bounds_to_state(tmp_state)
         merged_planner["normalized_length_min"] = tmp_state["normalized_length_min"]
         merged_planner["normalized_length_max"] = tmp_state["normalized_length_max"]
+        pw_hint = list(merged_planner.get("plan_warnings") or [])
+        bind = str(state.get("outline_binding_mode") or "ABSENT")
+        if str(state.get("ai_freedom_level") or "") == "strict" and bind != "FULL":
+            tag = (
+                "[大綱模式] 作者大綱未達「具體」長度閾值：AI 可主導補齊結構；"
+                "人類已寫片段仍須遵守；腦補請標 [AI_INVENTION]。"
+            )
+            if tag not in pw_hint:
+                pw_hint.append(tag)
+        elif bind == "FULL":
+            tag2 = "[大綱模式] outline_binding_mode=FULL：strict 下已寫明情節具約束力。"
+            if tag2 not in pw_hint:
+                pw_hint.append(tag2)
+        merged_planner["plan_warnings"] = pw_hint
         updated = {**state, **merged_planner, "last_agent": "planner"}
         recorder.record_and_update_run(
             "planner",
@@ -266,15 +287,24 @@ def build_chapter_graph(context: WorkflowContext):
         max_hitl_retry = 1
 
         # State hygiene: always overwrite HITL flags from this node's fresh decision.
+        conflicts = [str(x).strip() for x in (output.get("human_outline_conflict_notes") or []) if str(x).strip()]
         updates: dict[str, Any] = {
             "safe_chapter_rules": str(output.get("safe_chapter_rules") or ""),
             "alignment_log": str(output.get("alignment_log") or ""),
+            "human_outline_conflict_notes": conflicts,
             "requires_hitl": False,
             "hitl_reason": "",
             "hitl_decision_mode": "NONE",
             "pending_hitl_options": [],
             "workflow_status": WorkflowStatus.RUNNING.value,
         }
+        if conflicts:
+            plan_warnings = list(state.get("plan_warnings") or [])
+            for c in conflicts:
+                line = f"[設定衝突] {c}"
+                if line not in plan_warnings:
+                    plan_warnings.append(line)
+            updates["plan_warnings"] = plan_warnings
         wants_hitl = bool(output.get("requires_hitl"))
         if wants_hitl:
             retry_count = int(state.get("alignment_hitl_retry_count") or 0) + 1
@@ -285,7 +315,7 @@ def build_chapter_graph(context: WorkflowContext):
                     "Alignment HITL exceeded retry limit; force-pass without hard rules. "
                     "Please review chapter_hard_rules quality."
                 )
-                plan_warnings = list(state.get("plan_warnings") or [])
+                plan_warnings = list(updates.get("plan_warnings") or state.get("plan_warnings") or [])
                 if warn not in plan_warnings:
                     plan_warnings.append(warn)
                 updates["plan_warnings"] = plan_warnings
@@ -655,7 +685,7 @@ def build_chapter_graph(context: WorkflowContext):
     def b_story_resolve_node(state: AgentWorkflowState) -> dict:
         start = timed()
         out = run_b_story_resolve(state, context)
-        route = "state_updater"
+        route = "profile_expander"
         base = {**out, "last_agent": "b_story_resolve"}
         if out.get("b_story_hitl_required"):
             route = "hitl"
@@ -672,7 +702,7 @@ def build_chapter_graph(context: WorkflowContext):
                 "b_story_route": "hitl",
             }
         else:
-            merged = {**base, "resume_from": "state_updater", "b_story_route": "state_updater"}
+            merged = {**base, "resume_from": "profile_expander", "b_story_route": "profile_expander"}
         recorder.record_and_update_run(
             "b_story_resolve",
             dict(state),
@@ -767,11 +797,10 @@ def build_chapter_graph(context: WorkflowContext):
                 bible = dict(story.get("bible_json") or {})
                 bible["lore_mysteries_progression"] = lore
                 context.story_repository.update_story_bible_json(state["story_id"], bible)
-            _promote_planned_characters_to_cast(
-                context.story_repository,
-                state["story_id"],
-                list(state.get("planned_graph_nodes") or []),
-            )
+            for raw in list(state.get("pending_cast_updates") or []):
+                if not isinstance(raw, dict):
+                    continue
+                context.story_repository.apply_cast_update(state["story_id"], raw)
             workflow_repository.update_state_transaction(
                 transaction.transaction_id,
                 status=type(transaction.status).COMMITTED,
@@ -790,6 +819,8 @@ def build_chapter_graph(context: WorkflowContext):
             "last_agent": "state_updater",
             "state_transaction_id": transaction.transaction_id,
             "pending_b_story_additions": [],
+            "pending_cast_updates": [],
+            "pending_cast_evolutions": [],
         }
         recorder.record_and_update_run(
             "state_updater",
@@ -797,6 +828,20 @@ def build_chapter_graph(context: WorkflowContext):
             merged,
             {**state, **merged},
             latency_ms=elapsed_ms(start),
+        )
+        return merged
+
+    def profile_expander_node(state: AgentWorkflowState) -> dict:
+        start = timed()
+        output = run_profile_expander(state, context)
+        merged = {**output, "last_agent": "profile_expander", "resume_from": "state_updater"}
+        recorder.record_and_update_run(
+            "profile_expander",
+            dict(state),
+            merged,
+            {**state, **merged},
+            latency_ms=elapsed_ms(start),
+            route_decision="state_updater",
         )
         return merged
 
@@ -835,7 +880,10 @@ def build_chapter_graph(context: WorkflowContext):
         return "hitl" if state.get("requires_hitl") else "graph_rag"
 
     def route_b_story(state: AgentWorkflowState) -> str:
-        return state.get("b_story_route", "state_updater")
+        return state.get("b_story_route", "profile_expander")
+
+    def route_profile_expander(state: AgentWorkflowState) -> str:
+        return "state_updater"
 
     def route_logic_alignment(state: AgentWorkflowState) -> str:
         return "hitl" if state.get("requires_hitl") else "author"
@@ -856,6 +904,7 @@ def build_chapter_graph(context: WorkflowContext):
     graph.add_node("copyeditor", copyeditor_node)
     graph.add_node("chapter_summarizer", chapter_summarizer_node)
     graph.add_node("b_story_resolve", b_story_resolve_node)
+    graph.add_node("profile_expander", profile_expander_node)
     graph.add_node("state_updater", state_updater_node)
     graph.add_node("hitl", hitl_node)
 
@@ -870,6 +919,7 @@ def build_chapter_graph(context: WorkflowContext):
             "graph_rag": "graph_rag",
             "draft_supervisor": "draft_supervisor",
             "reader": "reader",
+            "profile_expander": "profile_expander",
             "state_updater": "state_updater",
             "extraction_gate": "extraction_gate",
             "copyeditor": "copyeditor",
@@ -920,7 +970,12 @@ def build_chapter_graph(context: WorkflowContext):
     graph.add_conditional_edges(
         "b_story_resolve",
         route_b_story,
-        {"state_updater": "state_updater", "hitl": "hitl"},
+        {"profile_expander": "profile_expander", "hitl": "hitl"},
+    )
+    graph.add_conditional_edges(
+        "profile_expander",
+        route_profile_expander,
+        {"state_updater": "state_updater"},
     )
     graph.add_edge("hitl", END)
     graph.add_edge("state_updater", END)

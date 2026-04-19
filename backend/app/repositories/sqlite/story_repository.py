@@ -5,6 +5,7 @@ from datetime import datetime, UTC
 from typing import Any
 
 from app.domain.schema import (
+    CharacterArcMilestone,
     ConflictType,
     EndingVibe,
     ResolutionMethod,
@@ -19,6 +20,21 @@ from app.repositories.sqlite.database import SQLiteDatabase
 
 
 class StoryRepository:
+    @staticmethod
+    def _sanitize_cast_row(raw: dict[str, Any]) -> dict[str, Any]:
+        row = dict(raw)
+        if not str(row.get("personality") or "").strip() and str(row.get("motivation") or "").strip():
+            row["personality"] = str(row.get("motivation") or "")
+        row.pop("motivation", None)
+        try:
+            return StoryCastMemberStored.model_validate(row).model_dump(mode="json")
+        except Exception:
+            return StoryCastMemberStored(
+                node_id=str(row.get("node_id") or "").strip(),
+                canonical_name=str(row.get("canonical_name") or "").strip() or str(row.get("node_id") or "").strip(),
+                role="supporting",
+            ).model_dump(mode="json")
+
     def __init__(self, db: SQLiteDatabase) -> None:
         self.db = db
 
@@ -181,7 +197,7 @@ class StoryRepository:
     def update_story_cast(
         self, story_id: str, cast: list[StoryCastMemberStored], protagonist_character_id: str
     ) -> None:
-        payload = [member.model_dump(mode="json") for member in cast]
+        payload = [self._sanitize_cast_row(member.model_dump(mode="json")) for member in cast]
         with self.db.connection() as conn:
             conn.execute(
                 """
@@ -193,22 +209,107 @@ class StoryRepository:
             )
 
     def append_story_cast_member_if_absent(self, story_id: str, member: StoryCastMemberStored) -> None:
-        """Append one cast row to cast_json if node_id is not already present."""
+        """Backward-compatible wrapper; prefer soft_upsert_story_cast_member."""
+        self.soft_upsert_story_cast_member(story_id, member)
+
+    def soft_upsert_story_cast_member(self, story_id: str, member: StoryCastMemberStored) -> None:
+        """Upsert cast row by node_id in fill-empty mode; never overwrite non-empty existing fields."""
         story = self.get_story(story_id)
         if not story:
             raise KeyError(f"Story not found: {story_id}")
         raw = story.get("cast_json") or []
         if not isinstance(raw, list):
             raw = []
-        seen = {str(x.get("node_id")) for x in raw if isinstance(x, dict) and x.get("node_id")}
-        if str(member.node_id).strip() in seen:
+        incoming = self._sanitize_cast_row(member.model_dump(mode="json"))
+        node_id = str(incoming.get("node_id") or "").strip()
+        if not node_id:
             return
-        payload = list(raw)
-        payload.append(member.model_dump(mode="json"))
+
+        payload: list[dict[str, Any]] = []
+        matched = False
+        for row in raw:
+            if not isinstance(row, dict):
+                continue
+            current = self._sanitize_cast_row(row)
+            if str(current.get("node_id") or "").strip() != node_id:
+                payload.append(current)
+                continue
+            merged = dict(current)
+            for key, val in incoming.items():
+                cur_val = merged.get(key)
+                is_empty = cur_val is None or cur_val == "" or cur_val == []
+                if is_empty:
+                    merged[key] = val
+            payload.append(self._sanitize_cast_row(merged))
+            matched = True
+
+        if not matched:
+            payload.append(incoming)
         with self.db.connection() as conn:
             conn.execute(
                 "UPDATE stories SET cast_json = ? WHERE story_id = ?",
                 (self.db.dumps(payload), story_id),
+            )
+
+    def apply_cast_update(self, story_id: str, payload: dict[str, Any]) -> None:
+        mode = str(payload.get("update_mode") or "fill_empty").strip().lower()
+        member_raw = payload.get("member")
+        if not isinstance(member_raw, dict):
+            return
+        incoming = StoryCastMemberStored.model_validate(member_raw)
+        if mode != "evolution":
+            self.soft_upsert_story_cast_member(story_id, incoming)
+            return
+        story = self.get_story(story_id)
+        if not story:
+            raise KeyError(f"Story not found: {story_id}")
+        raw = story.get("cast_json") or []
+        if not isinstance(raw, list):
+            raw = []
+        milestone_raw = payload.get("milestone")
+        milestone = CharacterArcMilestone.model_validate(milestone_raw or {})
+        dedupe_key = (
+            str(milestone.trigger_event_id or "").strip(),
+            int(milestone.chapter_id or 0),
+            str(incoming.node_id).strip(),
+        )
+        updated_rows: list[dict[str, Any]] = []
+        matched = False
+        for row in raw:
+            if not isinstance(row, dict):
+                continue
+            current = StoryCastMemberStored.model_validate(self._sanitize_cast_row(row))
+            if current.node_id != incoming.node_id:
+                updated_rows.append(self._sanitize_cast_row(current.model_dump(mode="json")))
+                continue
+            matched = True
+            existing = list(current.arc_history or [])
+            already = any(
+                (
+                    str(item.trigger_event_id or "").strip(),
+                    int(item.chapter_id or 0),
+                    str(current.node_id).strip(),
+                )
+                == dedupe_key
+                for item in existing
+            )
+            if not already:
+                existing.append(milestone)
+            merged = current.model_copy(
+                update={
+                    "personality": incoming.personality,
+                    "speech_style": incoming.speech_style,
+                    "arc_history": existing,
+                }
+            )
+            updated_rows.append(self._sanitize_cast_row(merged.model_dump(mode="json")))
+        if not matched:
+            base = incoming.model_copy(update={"arc_history": [milestone]})
+            updated_rows.append(self._sanitize_cast_row(base.model_dump(mode="json")))
+        with self.db.connection() as conn:
+            conn.execute(
+                "UPDATE stories SET cast_json = ? WHERE story_id = ?",
+                (self.db.dumps(updated_rows), story_id),
             )
 
     def store_volumes(self, story_id: str, volumes: list[VolumePlan]) -> None:
@@ -427,6 +528,18 @@ class StoryRepository:
         rows = list(rows)
         rows.reverse()
         return [dict(r) for r in rows]
+
+    def count_chapter_summaries_before(self, story_id: str, before_chapter_id: int) -> int:
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS c
+                FROM chapter_summaries
+                WHERE story_id = ? AND chapter_id < ?
+                """,
+                (story_id, int(before_chapter_id)),
+            ).fetchone()
+        return int(row["c"]) if row else 0
 
     def upsert_milestone_summary(
         self,

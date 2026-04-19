@@ -58,6 +58,7 @@ def normalize_director_output(state: dict, raw: dict) -> dict:
             }
         ]
     out["new_elements_to_introduce"] = neo
+    out["director_state_brief"] = str(out.get("state_operational_brief") or "").strip()
     return out
 
 
@@ -110,6 +111,7 @@ def run_director(state: dict, context: WorkflowContext) -> dict:
             else []
         ),
         request_new_b_story=None,
+        state_operational_brief="（Mock）大綱資訊不足時的簡報：依錨點、副線池與 distance_to_anchor 推進。",
     )
     return normalize_director_output(state, output.model_dump(mode="json"))
 
@@ -188,12 +190,28 @@ def _build_director_prompt(
     vibe_block = (vibe_cooldown.get("interrupt_text") or "無")
 
     ap = (state.get("chapter_outline") or state.get("author_chapter_plan") or "").strip()
+    freedom = str(state.get("ai_freedom_level") or "balanced")
+    bind = str(state.get("outline_binding_mode") or "ABSENT")
     author_plan_block = ""
     if ap:
-        author_plan_block = (
-            "## 作者本章寫作計畫（可選參考；非強制；若與錨點、一致性或下方系統強制約束衝突，以錨點與約束為準）\n"
-            f"{ap[:1600]}\n\n"
-        )
+        if bind == "FULL":
+            author_plan_block = (
+                "## 本章人類大綱（outline_binding_mode=FULL；在 ai_freedom_level=strict 時已寫明處具約束力）\n"
+                "請勿在 narrative_directive 中發明與下列內容衝突的主線轉折；僅重述／結構化。\n"
+                f"{ap[:1600]}\n\n"
+            )
+        elif bind == "PARTIAL":
+            author_plan_block = (
+                "## 本章人類大綱（outline_binding_mode=PARTIAL；片段，留白處交 Planner 補齊）\n"
+                f"{ap[:1600]}\n\n"
+            )
+        else:
+            author_plan_block = f"## 本章人類大綱\n{ap[:1600]}\n\n"
+    mode_block = (
+        "## 執行模式（系統欄位）\n"
+        f"- ai_freedom_level: {freedom}\n"
+        f"- outline_binding_mode: {bind}\n\n"
+    )
 
     return (
         "## 章節定位\n"
@@ -232,11 +250,13 @@ def _build_director_prompt(
         f"{lore_block}\n\n"
         "## Writing Notes（全域寫作規定）\n"
         f"{writing_note_block}\n\n"
+        f"{mode_block}"
         f"{author_plan_block}"
         "## 系統強制約束（不可違反）\n"
         f"- resolution_tactic_cooldown: {cooldown_block}\n"
         f"- ending_vibe_cooldown: {vibe_block}\n\n"
         "## 你的輸出要求\n"
+        "- 必須輸出 state_operational_brief（繁中，條列短句）：錨點距離、副線未解要點、連續性／空間狀態、對 Planner 的執行提醒。\n"
         "- 請決定 chapter_type（PLOT_DRIVEN / CHARACTER_DRIVEN / WORLD_BUILDING）、POV、Epoch、tone、narrative_directive。\n"
         "- 若 distance_to_anchor >= 2：chapter_type 必須為 CHARACTER_DRIVEN 或 WORLD_BUILDING，"
         "並從 active_b_stories 指定一條副線寫入 b_story_directive；同時輸出 b_story_type（必須對應該副線 type）。"

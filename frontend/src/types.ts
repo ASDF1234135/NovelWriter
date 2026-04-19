@@ -62,7 +62,7 @@ export type CastMember = {
   short_bio?: string;
   aliases?: string[];
   age?: string;
-  motivation?: string;
+  personality?: string;
   core_motivation?: string;
   core_value?: string;
   speech_style?: string;
@@ -139,6 +139,77 @@ export type StoryDetailResponse = StoryInput & {
   macro_compile_error?: string;
 };
 
+/** GET /stories/:id/chapters/:n/writing-preamble */
+export type WritingPreambleChapterSummaryRow = {
+  chapter_id: number;
+  plot_summary: string;
+  conflict_type: string;
+  resolution_method: string;
+  ending_vibe: string;
+};
+
+export type WritingPreambleMilestone = {
+  chapter_start: number;
+  chapter_end: number;
+  milestone_summary: string;
+};
+
+export type WritingPreamblePreviousChapter = {
+  chapter_id: number | null;
+  plot_summary: string;
+  status: string;
+};
+
+export type WritingPreambleNextAnchor = {
+  anchor_id: string;
+  volume_id: string;
+  title: string;
+  description: string;
+  chapter_target: number;
+  priority: number;
+};
+
+export type WritingPreambleResponse = {
+  chapter_id: number;
+  plot_progress: {
+    previous_chapter: WritingPreamblePreviousChapter;
+    recent_summaries: WritingPreambleChapterSummaryRow[];
+    milestones: WritingPreambleMilestone[];
+    earlier_chapters_with_summary_count: number;
+  };
+  writing_hints: {
+    writing_notes: string[];
+    macro_author_notes: string;
+    next_focus_anchor: WritingPreambleNextAnchor | null;
+    chapters_until_next_anchor: number | null;
+    pacing_hints: string[];
+  };
+};
+
+/** POST /chapters/{n}/run — matches backend AiFreedomLevel. */
+export type AiFreedomLevel = "strict" | "balanced" | "wild";
+
+export type HitlContextPayloadType =
+  | "alignment"
+  | "extraction_remap"
+  | "draft_loop"
+  | "context_prune"
+  | "generic";
+
+export type HitlContextMetadata = {
+  payload_type: HitlContextPayloadType;
+  unknown_entities?: Array<Record<string, unknown>>;
+  graph_rag_context_tier?: number | null;
+};
+
+export type HitlContextPayload = {
+  primary_issue: string;
+  supervisor_feedbacks: string[];
+  conflict_notes: string[];
+  problematic_draft_snippet: string;
+  context_metadata: HitlContextMetadata;
+};
+
 export type WorkflowRun = {
   run_id: string;
   story_id: string;
@@ -148,6 +219,7 @@ export type WorkflowRun = {
   requires_hitl: boolean;
   hitl_reason: string;
   hitl_decision_mode: string;
+  hitl_context?: HitlContextPayload | null;
 };
 
 export type WorkflowStep = {

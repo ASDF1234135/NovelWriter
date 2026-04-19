@@ -87,6 +87,8 @@ class AgentWorkflowState(TypedDict):
     b_story_resolution: NotRequired[dict[str, Any]]
     post_polish_route: NotRequired[str]
     pending_b_story_additions: NotRequired[list[dict[str, Any]]]
+    pending_cast_updates: NotRequired[list[dict[str, Any]]]
+    pending_cast_evolutions: NotRequired[list[dict[str, Any]]]
     extraction_gate_failure_streak: NotRequired[int]
     extraction_hitl_limit: NotRequired[int]
     manual_entity_remap: NotRequired[list[dict[str, Any]]]
@@ -97,6 +99,8 @@ class AgentWorkflowState(TypedDict):
     b_story_resolution_hitl_candidate: NotRequired[dict[str, Any]]
     b_story_route: NotRequired[str]
     context_overflow_char_estimate: NotRequired[int]
+    cast_slim_view: NotRequired[list[dict[str, Any]]]
+    cast_full_view: NotRequired[list[dict[str, Any]]]
     all_milestone_summaries: NotRequired[list[dict[str, Any]]]
     recent_chapter_summaries: NotRequired[list[dict[str, Any]]]
     global_conflict_type_top3: NotRequired[list[dict[str, Any]]]
@@ -115,6 +119,11 @@ class AgentWorkflowState(TypedDict):
     original_draft_must_include_beats: NotRequired[list[str]]
     original_draft_ground_truth_events: NotRequired[list[dict[str, Any]]]
     allowed_identity_reveals_this_chapter: NotRequired[list[str]]
+    ai_freedom_level: NotRequired[str]
+    outline_binding_mode: NotRequired[str]
+    director_state_brief: NotRequired[str]
+    human_outline_conflict_notes: NotRequired[list[str]]
+    this_chapter_pacing_limit: NotRequired[str]
 
 
 class SafeAuthorPayload(BaseModel):
@@ -140,12 +149,15 @@ class SafeAuthorPayload(BaseModel):
     local_enforced_rules_context: str = ""
     author_safe_continuity_notes: list[str] = Field(default_factory=list)
     recent_entity_names: list[str] = Field(default_factory=list)
+    active_character_profiles: list[dict[str, str]] = Field(default_factory=list)
     draft_feedback: list[dict[str, Any]] = Field(default_factory=list)
     reader_feedback: list[dict[str, Any]] = Field(default_factory=list)
     length_adjustment: LengthAdjustment = LengthAdjustment.NONE
     mandatory_new_entities: list[MandatoryNewEntity] = Field(default_factory=list)
     writing_note: list[str] = Field(default_factory=list)
     safe_chapter_rules: str = ""
+    ai_freedom_level: str = "balanced"
+    outline_binding_mode: str = "ABSENT"
 
 
 class SafePlannerPayload(BaseModel):
@@ -188,6 +200,10 @@ class SafePlannerPayload(BaseModel):
     ending_vibe_cooldown_constraint: dict[str, Any] = Field(default_factory=dict)
     writing_note: list[str] = Field(default_factory=list)
     author_chapter_plan: str = ""
+    ai_freedom_level: str = "balanced"
+    outline_binding_mode: str = "ABSENT"
+    director_state_brief: str = ""
+    this_chapter_pacing_limit: str = ""
 
 
 class SafeSupervisorPayload(BaseModel):
@@ -232,6 +248,9 @@ class SafeSupervisorPayload(BaseModel):
     resolution_cooldown_constraint: dict[str, Any] = Field(default_factory=dict)
     ending_vibe_cooldown_constraint: dict[str, Any] = Field(default_factory=dict)
     allowed_identity_reveals_this_chapter: list[str] = Field(default_factory=list)
+    chapter_outline: str = ""
+    ai_freedom_level: str = "balanced"
+    outline_binding_mode: str = "ABSENT"
 
 
 class WorkflowBootstrapState(BaseModel):
@@ -253,6 +272,8 @@ def build_initial_state(
     author_chapter_plan: str = "",
     chapter_outline: str = "",
     chapter_hard_rules: str = "",
+    ai_freedom_level: str = "balanced",
+    outline_binding_mode: str = "ABSENT",
 ) -> AgentWorkflowState:
     return AgentWorkflowState(
         story_id=story_id,
@@ -334,7 +355,9 @@ def build_initial_state(
         manual_plan_force_approve=False,
         graph_rag_context_tier=2,
         hitl_extraction_remap_hints=[],
-        b_story_route="state_updater",
+        b_story_route="profile_expander",
+        pending_cast_updates=[],
+        pending_cast_evolutions=[],
         context_overflow_char_estimate=0,
         all_milestone_summaries=[],
         recent_chapter_summaries=[],
@@ -354,6 +377,11 @@ def build_initial_state(
         original_draft_must_include_beats=[],
         original_draft_ground_truth_events=[],
         allowed_identity_reveals_this_chapter=[],
+        ai_freedom_level=ai_freedom_level,
+        outline_binding_mode=outline_binding_mode,
+        director_state_brief="",
+        human_outline_conflict_notes=[],
+        this_chapter_pacing_limit="",
     )
 
 
@@ -374,6 +402,8 @@ def normalize_workflow_state(state: dict[str, Any]) -> dict[str, Any]:
         "plan_warnings": [],
         "post_polish_route": "resolve_subplots",
         "pending_b_story_additions": [],
+        "pending_cast_updates": [],
+        "pending_cast_evolutions": [],
         "previous_chapter_tail_excerpt": "",
         "author_extraction_surface_hints": [],
         "extraction_gate_failure_streak": 0,
@@ -383,7 +413,7 @@ def normalize_workflow_state(state: dict[str, Any]) -> dict[str, Any]:
         "manual_plan_force_approve": False,
         "graph_rag_context_tier": 2,
         "hitl_extraction_remap_hints": [],
-        "b_story_route": "state_updater",
+        "b_story_route": "profile_expander",
         "context_overflow_char_estimate": 0,
         "all_milestone_summaries": [],
         "recent_chapter_summaries": [],
@@ -401,6 +431,11 @@ def normalize_workflow_state(state: dict[str, Any]) -> dict[str, Any]:
         "alignment_hitl_retry_count": 0,
         "allowed_identity_reveals_this_chapter": [],
         "local_enforced_rules_context": "",
+        "ai_freedom_level": "balanced",
+        "outline_binding_mode": "ABSENT",
+        "director_state_brief": "",
+        "human_outline_conflict_notes": [],
+        "this_chapter_pacing_limit": "",
     }
     for key, val in defaults.items():
         if key not in state:

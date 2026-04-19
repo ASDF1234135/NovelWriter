@@ -172,6 +172,9 @@ def _build_plan_supervisor_prompt(payload) -> str:
         "應否決（is_approved=false）、suggestion_type=MODIFY，violation_type 宜用 INCONSISTENCY（大綱自相矛盾）或 PHYSICAL_CONFLICT（空間／時序上不可能在邊界前落地）。"
         "feedback_to_agent 須具體點名 node_id 或 beat、說明與哪條邊界衝突，並要求 Planner 將該實體延到下一章，或後移／放寬 ending_boundary_rule（二擇一或並陳）。"
         "若 Payload 未含 proposed_new_nodes 或無必選項，則勿臆造檢查項目。\n"
+        "14. 當 ai_freedom_level=strict 且 outline_binding_mode=FULL 且 chapter_outline 有具體內容："
+        "若 narrative_script／ground_truth_events **明顯背離**人類大綱已寫明的情節，標 Hard（INCONSISTENCY）；"
+        "大綱極短或僅關鍵詞時改為 soft_warnings 提醒即可，避免過度否決。\n"
         f"\nPayload:\n{compact_json}"
     )
 

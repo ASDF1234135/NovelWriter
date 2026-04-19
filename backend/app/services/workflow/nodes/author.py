@@ -7,7 +7,7 @@ from app.services.llm import MockLLMClient
 from app.services.workflow.constants import LOCAL_ENFORCED_RULES_CONTEXT_CAP
 from app.services.workflow.context import WorkflowContext
 from app.services.workflow.masking import build_author_payload
-from app.services.workflow.profiles import get_profile
+from app.services.workflow.profiles import freedom_adjusted_profile, get_profile
 from app.services.workflow.utils import normalized_text_length
 
 _MAX_HINTS_CHAPTER_CHARS = 28000
@@ -68,7 +68,11 @@ def run_author(state: dict, context: WorkflowContext) -> tuple[dict, dict, int, 
     payload = build_author_payload(state)
     prompt = _build_author_prompt(payload)
     if not isinstance(context.llm_client, MockLLMClient):
-        profile = get_profile("author")
+        profile = freedom_adjusted_profile(
+            "author",
+            ai_freedom_level=str(state.get("ai_freedom_level") or "balanced"),
+            outline_binding_mode=str(state.get("outline_binding_mode") or "ABSENT"),
+        )
         llm_result = context.llm_client.invoke_text(prompt, profile)
         chapter_content = _ensure_chapter_heading(state["chapter_id"], llm_result.content)
         token_usage = llm_result.token_usage
@@ -209,6 +213,25 @@ def _format_writing_note(payload) -> str:
     return "\n".join(f"- {x}" for x in rows[:12])
 
 
+def _format_active_character_profiles(payload) -> str:
+    rows = list(getattr(payload, "active_character_profiles", None) or [])
+    if not rows:
+        return "無"
+    lines: list[str] = []
+    for row in rows[:8]:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("canonical_name") or "").strip() or "（未命名）"
+        current_p = str(row.get("current_personality") or "").strip() or "（未填）"
+        current_s = str(row.get("current_speech_style") or "").strip() or "（未填）"
+        past = str(row.get("past_personality_reference") or "").strip() or "（無歷史）"
+        lines.append(
+            f"- {name} | current_personality={current_p} | current_speech_style={current_s}\n"
+            f"  past_personality_reference={past}"
+        )
+    return "\n".join(lines) if lines else "無"
+
+
 def _build_author_prompt(payload) -> str:
     draft_feedback_text = _format_feedback_entries(payload.draft_feedback, "draft")
     reader_feedback_text = _format_feedback_entries(payload.reader_feedback, "reader")
@@ -218,9 +241,16 @@ def _build_author_prompt(payload) -> str:
         if payload.previous_chapter_tail_excerpt
         else ""
     )
+    freedom = str(getattr(payload, "ai_freedom_level", None) or "balanced")
+    bind = str(getattr(payload, "outline_binding_mode", None) or "ABSENT")
     return f"""
-你是本章主筆作者。請只根據以下表層劇本寫作，不得猜測額外真相。
+你是本章幽靈代筆：只根據表層劇本與 beats 寫作，不得猜測額外真相。
+禁止新增 must_include_beats／narrative_script 未涵蓋的新人物、新轉折或新對白動機；含 [AI_INVENTION] 的節點僅可擴寫該範圍。
 請直接輸出小說正文，不要輸出 JSON、標題解釋、欄位名稱或額外註解。
+
+## 執行模式（系統）
+- ai_freedom_level: {freedom}
+- outline_binding_mode: {bind}
 
 ## 寫作目標
 節奏與情緒：{payload.tone_direction}
@@ -276,6 +306,12 @@ def _build_author_prompt(payload) -> str:
 
 近期重要實體：
 {payload.recent_entity_names}
+
+## 角色性格參照（延續性）
+{_format_active_character_profiles(payload)}
+規則：
+- 當前情節優先遵守 current_personality 與 current_speech_style。
+- 只有在回憶、追述或歷史對照場景，才可參考 past_personality_reference。
 
 ## 本章劇情發展方向
 表層劇本：

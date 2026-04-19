@@ -5,7 +5,9 @@ from typing import Any, Literal, Optional, Union
 
 MacroCastRole = Literal["protagonist", "supporting", "antagonist"]
 
-from pydantic import BaseModel, Field, field_validator
+AiFreedomLevel = Literal["strict", "balanced", "wild"]
+
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 def _coerce_tags_list(v: Any) -> list[str]:
@@ -232,6 +234,11 @@ class StoryPatch(BaseModel):
     cast_seed: list[StoryCastSeedEntry] | None = None
 
 
+class AuthorExtractionSurfaceHintEntry(BaseModel):
+    node_id: str
+    surface_forms: list[str] = Field(default_factory=list)
+
+
 class ChapterRunRequest(BaseModel):
     """Optional body for POST .../chapters/{n}/run."""
 
@@ -239,6 +246,28 @@ class ChapterRunRequest(BaseModel):
     # New dual-track inputs (prefer these over author_chapter_plan).
     chapter_outline: str = Field(default="", max_length=2000)
     chapter_hard_rules: str = Field(default="", max_length=8000)
+    ai_freedom_level: AiFreedomLevel = Field(
+        default="balanced",
+        description="strict: honor human outline where specified; wild: more invention on gaps.",
+    )
+    extraction_surface_hints: list[AuthorExtractionSurfaceHintEntry] = Field(
+        default_factory=list,
+        description="Optional surface-form hints merged into run state before the graph starts (not a HITL pause action).",
+    )
+    waive_mandatory_node_ids: list[str] = Field(
+        default_factory=list,
+        description="Optional mandatory node ids to waive for extraction gate (same merge as extraction hints).",
+    )
+
+    @field_validator("ai_freedom_level", mode="before")
+    @classmethod
+    def _coerce_ai_freedom_level(cls, v: Any) -> str:
+        if v is None or v == "":
+            return "balanced"
+        s = str(v).strip().lower()
+        if s in ("strict", "balanced", "wild"):
+            return s
+        return "balanced"
 
 
 class VolumePlan(BaseModel):
@@ -292,7 +321,7 @@ class MacroCastMember(BaseModel):
         default="",
         description="Age or rough life-stage (e.g. 28 or 約三十).",
     )
-    motivation: str = Field(default="", description="Core goals and drives (legacy; prefer core_motivation).")
+    personality: str = Field(default="", description="Core personality and temperament traits.")
     core_motivation: str = Field(default="", description="Primary drive across the series.")
     speech_style: str = Field(
         default="",
@@ -304,6 +333,17 @@ class MacroCastMember(BaseModel):
     # Selected keypoint IDs (e.g. ["KP1"]) referencing `macro_author_notes` for enforcement.
     notes_links: list[str] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_motivation_to_personality(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        v = dict(value)
+        if not str(v.get("personality") or "").strip() and str(v.get("motivation") or "").strip():
+            v["personality"] = str(v.get("motivation") or "")
+        v.pop("motivation", None)
+        return v
+
 
 class StoryCastMemberStored(BaseModel):
     """Persisted cast row + graph node id after macro compile."""
@@ -314,12 +354,47 @@ class StoryCastMemberStored(BaseModel):
     short_bio: str = ""
     aliases: list[str] = Field(default_factory=list)
     age: str = ""
-    motivation: str = ""
+    personality: str = ""
     core_motivation: str = ""
     speech_style: str = ""
     fatal_flaw: str = ""
     quirks_and_habits: str = ""
     core_value: str = ""
+    arc_history: list["CharacterArcMilestone"] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_motivation_to_personality(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        v = dict(value)
+        if not str(v.get("personality") or "").strip() and str(v.get("motivation") or "").strip():
+            v["personality"] = str(v.get("motivation") or "")
+        v.pop("motivation", None)
+        return v
+
+
+class CharacterArcMilestone(BaseModel):
+    trigger_event_id: str = ""
+    trigger_event_summary: str = ""
+    chapter_id: int = 0
+    old_personality: str = ""
+    new_personality: str = ""
+    old_speech_style: str = ""
+    new_speech_style: str = ""
+    source: Literal["HITL", "PLANNER", "SYSTEM"] = "SYSTEM"
+    reason: str = ""
+    updated_at: str = ""
+
+
+class CharacterEvolutionRequest(BaseModel):
+    node_id: str
+    trigger_event_id: str = ""
+    trigger_event_summary: str = ""
+    new_personality: str = ""
+    new_speech_style: str = ""
+    reason: str = ""
+    source: Literal["HITL", "PLANNER", "SYSTEM"] = "HITL"
 
 
 class StateAnchor(BaseModel):
@@ -477,6 +552,11 @@ class DirectorOutput(BaseModel):
     b_story_type: Optional[BStoryType] = None
     new_elements_to_introduce: list[DirectorNewElement] = Field(default_factory=list)
     request_new_b_story: Optional[DirectorNewBStoryRequest] = None
+    state_operational_brief: str = Field(
+        default="",
+        max_length=2400,
+        description="Status briefing for Planner: anchors distance, B-stories, continuity (not plot invention when outline is concrete).",
+    )
 
     @field_validator("new_elements_to_introduce", mode="before")
     @classmethod
@@ -520,6 +600,7 @@ class EventOutline(BaseModel):
 class ProposedCharacterProfile(BaseModel):
     """High-level character sheet for planned CHARACTER nodes (aligns with macro cast fields)."""
 
+    personality: str = Field(default="", max_length=600)
     core_motivation: str = Field(default="", max_length=600)
     fatal_flaw: str = Field(default="", max_length=400)
     speech_style: str = Field(default="", max_length=240)
@@ -591,6 +672,7 @@ class PlannerOutput(BaseModel):
         default_factory=list,
         description="本章若開啟全新副線（有獨立 id），最多 2 條；成功定稿後併入 bible。",
     )
+    character_evolution_requests: list[CharacterEvolutionRequest] = Field(default_factory=list)
 
 
 class AlignmentOutput(BaseModel):
@@ -604,6 +686,10 @@ class AlignmentOutput(BaseModel):
     alignment_log: str = Field(
         default="",
         description="內部審計日誌：記錄了哪些草稿內容因為違反規則而被修改。",
+    )
+    human_outline_conflict_notes: list[str] = Field(
+        default_factory=list,
+        description="Human outline or plan vs bible/graph/canon; surfaced to UI and plan_warnings.",
     )
     requires_hitl: bool = Field(
         default=False,
@@ -847,6 +933,10 @@ class WorkflowRun(BaseModel):
     requires_hitl: bool = False
     hitl_reason: str = ""
     hitl_decision_mode: HitlDecisionMode = HitlDecisionMode.NONE
+    hitl_context: Optional["HitlContextPayload"] = Field(
+        default=None,
+        description="BFF view when paused for HITL; null when not waiting.",
+    )
 
 
 class WorkflowStepLog(BaseModel):
@@ -909,6 +999,36 @@ class HitlReason:
     ALIGNMENT_RULES_REQUIRED = "Alignment_Rules_Required"
 
 
+HitlContextPayloadType = Literal[
+    "alignment",
+    "extraction_remap",
+    "draft_loop",
+    "context_prune",
+    "generic",
+]
+
+
+class HitlContextMetadata(BaseModel):
+    """Typed bag for frontend-specific HITL context (keeps payload extensible)."""
+
+    payload_type: HitlContextPayloadType = "generic"
+    unknown_entities: list[dict[str, Any]] = Field(default_factory=list)
+    graph_rag_context_tier: int | None = Field(
+        default=None,
+        description="Product-tier 0=full .. 2=aggressive when payload_type=context_prune.",
+    )
+
+
+class HitlContextPayload(BaseModel):
+    """BFF payload when workflow is WAITING_HITL (stable fields for dynamic forms)."""
+
+    primary_issue: str = ""
+    supervisor_feedbacks: list[str] = Field(default_factory=list)
+    conflict_notes: list[str] = Field(default_factory=list)
+    problematic_draft_snippet: str = ""
+    context_metadata: HitlContextMetadata = Field(default_factory=HitlContextMetadata)
+
+
 class HitlDecisionRequest(BaseModel):
     option_id: str
     rationale: str = ""
@@ -921,7 +1041,7 @@ class HitlOutlineEditRequest(BaseModel):
 
 
 class HitlStateInjectionRequest(BaseModel):
-    mutations: list[Union[NodeMutation, EdgeMutation]]
+    mutations: list[Union[NodeMutation, EdgeMutation]] = Field(default_factory=list)
     chapter_hard_rules: str = Field(
         default="",
         max_length=8000,
@@ -929,6 +1049,19 @@ class HitlStateInjectionRequest(BaseModel):
     )
     resume_from: str = ""
     reason: str = ""
+    this_chapter_pacing_limit: str = Field(
+        default="",
+        max_length=2000,
+        description="Human pacing brake text; planner must not resolve the chapter arc this chapter.",
+    )
+    future_anchor_title: str = Field(default="", max_length=500)
+    future_anchor_description: str = Field(default="", max_length=4000)
+    chapters_to_delay: int | None = Field(
+        default=None,
+        ge=0,
+        description="Chapters until future anchor triggers; None defaults to 0 at apply time.",
+    )
+    cast_evolutions: list[CharacterEvolutionRequest] = Field(default_factory=list)
 
 
 class HitlDraftEditRequest(BaseModel):
@@ -976,11 +1109,6 @@ class HitlDirectorPatchRequest(BaseModel):
         return out
 
 
-class AuthorExtractionSurfaceHintEntry(BaseModel):
-    node_id: str
-    surface_forms: list[str] = Field(default_factory=list)
-
-
 class HitlExtractionHintsRequest(BaseModel):
     """Merge surface hints for mandatory/planned entity alignment without rewriting the full draft."""
 
@@ -1019,12 +1147,12 @@ class HitlAnchorDelayRequest(BaseModel):
 
 
 class HitlContextPruneRequest(BaseModel):
-    """Overwrite assembled context slices after human trimming."""
+    """Human picks context assembly tier; backend re-assembles context on resume (no raw string overrides)."""
 
-    bible_context: Optional[str] = None
-    graph_context: Optional[str] = None
-    vector_context: Optional[str] = None
-    recent_chapter_context: Optional[str] = None
-    previous_chapter_summary: Optional[str] = None
-    graph_rag_context_tier: Optional[int] = Field(default=None, ge=0, le=2)
+    graph_rag_context_tier: int = Field(
+        ...,
+        ge=0,
+        le=2,
+        description="Product semantics: 0=full context, 1=medium trim, 2=aggressive trim (mapped in service).",
+    )
     reason: str = ""

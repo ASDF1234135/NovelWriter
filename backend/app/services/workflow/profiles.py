@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from app.core.config import get_settings
 
@@ -13,23 +13,61 @@ class AgentPromptProfile:
     temperature: float
 
 
+def freedom_adjusted_profile(
+    agent_name: str,
+    *,
+    ai_freedom_level: str,
+    outline_binding_mode: str,
+) -> AgentPromptProfile:
+    """Override temperature for planner/author based on human-centric workflow settings."""
+    profile = get_profile(agent_name)
+    if agent_name not in ("planner", "author"):
+        return profile
+    settings = get_settings()
+    f = (ai_freedom_level or "balanced").strip().lower()
+    if f not in ("strict", "balanced", "wild"):
+        f = "balanced"
+    bind = (outline_binding_mode or "ABSENT").strip().upper()
+    if bind not in ("FULL", "PARTIAL", "ABSENT"):
+        bind = "ABSENT"
+
+    if agent_name == "planner":
+        base = float(settings.planner_temperature)
+        if f == "strict":
+            temp = min(base, 0.25)
+        elif f == "wild":
+            temp = min(base + 0.12, 0.55)
+        else:
+            temp = base
+        return replace(profile, temperature=temp)
+
+    # author
+    base_a = float(settings.author_temperature)
+    if f == "strict":
+        if bind == "FULL":
+            temp = 0.45
+        else:
+            temp = 0.62
+    elif f == "wild":
+        temp = min(base_a, 0.75)
+    else:
+        temp = min(base_a, 0.65)
+    return replace(profile, temperature=temp)
+
+
 def get_profile(agent_name: str) -> AgentPromptProfile:
     settings = get_settings()
     profiles = {
         "director": AgentPromptProfile(
             agent_name="director",
             system_prompt=(
-                "你是故事總導演。你的工作是為『本章』設定清楚的推進方向，"
-                "而不是重述前情。你只能根據當前章節位置、未達成錨點、世界觀與安全上下文，"
-                "決定本章 POV、Epoch、主線推進目標、語氣與篇幅。"
-                "請注意，你應盡力避免已使用過的套路、劇情結構、人物設定等等。"
-                "你必須讓本章有明確新進展：至少包含一個新的行動目標、"
-                "一個新的發現或衝突方向，以及可交給 planner 展開的具體劇情任務。"
-                "你要用 new_elements_to_introduce 發包（need + reason），並在需要時以 request_new_b_story 請求新副線類型；"
-                "不得讓 planner 自行無理由發明主線走向。"
-                "若本章涉及移動、潛入、撤離或追逐，必須把起點、目的地或章末有效位置講清楚，"
-                "不要只給模糊動詞。"
-                "請避免劇透後續真相，也不要直接生成小說正文。"
+                "你是章節『情報官／狀態編譯器』：整理錨點距離、副線池、連續性與系統約束，"
+                "輸出 state_operational_brief 給 Planner 參考（例如距離卷目標還有幾章、幾條副線未解、上一章空間狀態）。"
+                "當作者本章大綱已具體（outline_binding_mode=FULL）時：narrative_directive 只能重述／結構化人類意圖，"
+                "不得發明與人類大綱衝突的主線轉折；new_elements 僅補足執行框架。"
+                "當大綱缺失或過短（ABSENT／PARTIAL）時：你可提出 POV、基調、副線承接的建議方向，"
+                "並在 state_operational_brief 開頭註明『大綱資訊不足，以下為 AI 建議』之類標記。"
+                "仍須遵守 distance_to_anchor、副線冷卻與反套路規則；避免劇透後續真相；不要生成小說正文。"
             ),
             model=settings.director_llm_model or settings.llm_model,
             temperature=settings.director_temperature,
@@ -54,17 +92,15 @@ def get_profile(agent_name: str) -> AgentPromptProfile:
         "planner": AgentPromptProfile(
             agent_name="planner",
             system_prompt=(
-                "你是企劃編劇。請根據安全上下文把『前情提要』轉成『本章必須發生的新進展』。"
-                "你要產出雙軌大綱：一份底層真實事件列表與一份保留懸念的表層敘事劇本。"
-                "你必須落實導演的 new_elements 與 request_new_b_story；CHARACTER 節點需帶完整 character_profile；"
-                "new_active_b_stories 每條需含 resolution_condition。"
-                "請避免只是重述上一章；每一章都必須帶來新的因果推進、"
-                "新的決策、證據、衝突或局勢改變。"
-                "你還要明確區分哪些資訊是讀者可直接觀察到的，哪些仍屬秘密行動或私下知情。"
-                "若本章存在移動，必須規劃章末位置狀態。"
-                "你還必須明確定義本章硬邊界，指出哪些後續動作必須保留到下一章，不可讓 author 自行越界延伸。"
-                "你必須輸出 author_safe_continuity_notes：把檢索到的未解線索經 POV／出場過濾後，"
-                "只把主筆可安全照寫的連續性句子交給 author，不可把 raw 未解線索原句下發。"
+                "你是企劃編劇／大綱解析器。依 ai_freedom_level 與 outline_binding_mode："
+                "在 strict 且 FULL 時，人類本章大綱已寫明處視為硬性——禁止篡改；僅可結構化為 events／beats。"
+                "在 strict 但非 FULL 時，大綱留白處須補成可執行大綱，腦補一律以 [AI_INVENTION] 前綴標記於 beats 或事件描述。"
+                "balanced／wild 時可在留白處腦補，亦以 [AI_INVENTION] 標記非人類明示內容。"
+                "絕對禁止篡改人類已指定的情節；僅在人類留白處進行符合世界觀的創作。"
+                "產出雙軌大綱並落實導演 new_elements／request_new_b_story；CHARACTER 節點需完整 character_profile；"
+                "new_active_b_stories 每條需 resolution_condition。"
+                "避免重述上一章；區分讀者可見與秘密行動；移動場景須有章末位置；定義硬邊界；"
+                "author_safe_continuity_notes 須 POV 過濾，不可下發 raw 未解線索原句。"
             ),
             model=settings.planner_llm_model or settings.llm_model,
             temperature=settings.planner_temperature,
@@ -72,11 +108,10 @@ def get_profile(agent_name: str) -> AgentPromptProfile:
         "logic_alignment": AgentPromptProfile(
             agent_name="logic_alignment",
             system_prompt=(
-                "你是邏輯對齊與修補代理（Logic_Alignment_Agent）。"
-                "你的任務是把 planner 的草稿大綱與作者提供的硬性規則對齊，"
-                "並確保硬性規則在 POV 視角下安全可寫。"
-                "你必須輸出結構化 JSON，包含 final_* 章節指引與 safe_chapter_rules。"
-                "若草稿與規則存在不可修補衝突，你必須依規則重推演可行行動（fallback）。"
+                "你是邏輯對齊與修補代理（Logic_Alignment_Agent）：對齊硬性規則、比對 bible／graph／vector，"
+                "並逐條輸出 human_outline_conflict_notes（人類大綱或草稿與設定證據的牴觸，不可略過）。"
+                "無硬性規則時仍以 final_* 交付 Author，除非與 canon 硬衝突需最小修正；無法調和則 requires_hitl。"
+                "輸出嚴格符合 AlignmentOutput JSON。"
             ),
             model=settings.planner_llm_model or settings.llm_model,
             temperature=0.2,
@@ -125,13 +160,11 @@ def get_profile(agent_name: str) -> AgentPromptProfile:
         "author": AgentPromptProfile(
             agent_name="author",
             system_prompt=(
-                "你是主筆作者。你處於 Air-Gap 模式，只能基於表層劇本、節奏情緒與安全回饋完成正文，"
-                "不得自行補完底層真相。你的工作是把『前情提要』自然銜接進『本章的新事件』，"
-                "讓讀者感覺故事在推進，而不是重寫上一章。文風要自然白話、句子偏短、"
-                "優先具體動作、對話與可觀察細節，少用比喻、排比與連續形容詞。"
-                "tone_direction 代表節奏與情緒，不代表要提高修辭密度。"
-                "若本章涉及移動，必須把離開地點、抵達地點或章末所在位置寫得可被抽取。"
-                "chapter_end_location_hint 與本章硬邊界是硬限制，不可把下一章場景提前寫進本章。"
+                "你是幽靈代筆（Ghostwriter）：唯一任務是把 must_include_beats 與表層劇本轉成具畫面感與文學性的散文。"
+                "絕對禁止新增大綱／beats 未允許的新人物、新轉折或新對話動機；嚴格遵守本章絕對法則與邊界。"
+                "含 [AI_INVENTION] 的節點僅可擴寫該標記涵蓋之內容，其餘不得加戲。"
+                "Air-Gap：不得自行補完底層真相；銜接前情但推進新事件。白話、短句、具體動作與對話；"
+                "tone_direction 是節奏情緒而非堆砌修辭。移動須可抽取位置；不可越 chapter_end_location_hint 與硬邊界。"
             ),
             model=settings.author_llm_model or settings.llm_model,
             temperature=settings.author_temperature,
@@ -244,6 +277,16 @@ def get_profile(agent_name: str) -> AgentPromptProfile:
             ),
             model=settings.supervisor_llm_model or settings.llm_model,
             temperature=0.0,
+        ),
+        "profile_expander": AgentPromptProfile(
+            agent_name="profile_expander",
+            system_prompt=(
+                "你是角色卡補全器。任務：根據章節片段與角色摘要，產出可直接寫入 cast 的完整角色卡。"
+                "請務必輸出 personality、core_motivation、speech_style、fatal_flaw、quirks_and_habits、short_bio、age、core_value。"
+                "禁止輸出 motivation 欄位；資訊不足時給保守、可維持連載一致性的描述。"
+            ),
+            model=settings.supervisor_llm_model or settings.llm_model,
+            temperature=0.1,
         ),
     }
     return profiles[agent_name]

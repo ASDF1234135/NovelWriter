@@ -44,14 +44,15 @@
 2. `graph_rag` — bible / graph / vector / 近章正文組上下文；依 **`graph_rag_context_tier`** 自動縮減 Neo4j hop 與 JSON 截斷；若組裝後字元仍超過預算 → **`WAITING_HITL`**（`Context_Length_Exceeded`）  
 3. `planner` — 底層事件 + 表層劇本 + **`proposed_new_nodes`（≤3）** + **`new_active_b_stories`（≤2，可選）** + `target_word_count`（並寫入字數 SSOT）  
 4. `plan_supervisor` — 大綱審核（**Hard / Soft** 分野；創世／B 線核心缺漏為 **Hard**）  
-5. `author` — 依安全任務卡寫正文；定稿後第二段 LLM 產出 **`author_extraction_surface_hints`**（`node_id` + 正文精確子字串）  
-6. `draft_supervisor` — 字數 SSOT；**必選實體**改由 **`author_extraction_surface_hints`**（正文精確子字串）決定性檢查  
-7. `reader` — 文學可讀性  
-8. **`extraction_gate`** — **抽取 + `apply_manual_entity_remap`（HITL）+ `remap_planned_entities`（R1/R5）+ `validate_mandatory_planned_nodes`（R6，支援 `mandatory_extraction_skips`）**（併用 Author 登記的 surface hints）  
+5. **`logic_alignment`** — 硬性規則／聖經圖譜對齊、**`human_outline_conflict_notes`**、必要時 **HITL**  
+6. `author` — 依安全任務卡寫正文；定稿後第二段 LLM 產出 **`author_extraction_surface_hints`**（`node_id` + 正文精確子字串）  
+7. `draft_supervisor` — 字數 SSOT；**必選實體**改由 **`author_extraction_surface_hints`**（正文精確子字串）決定性檢查  
+8. `reader` — 文學可讀性  
+9. **`extraction_gate`** — **抽取 + `apply_manual_entity_remap`（HITL）+ `remap_planned_entities`（R1/R5）+ `validate_mandatory_planned_nodes`（R6，支援 `mandatory_extraction_skips`）**（併用 Author 登記的 surface hints）  
    - 失敗 → 退回 **`author`**，並累積 **`extraction_gate_failure_streak`**；超過 **`extraction_hitl_limit`** → **`WAITING_HITL`**（`Extraction_Gate_Failed`），附 **`hitl_extraction_remap_hints`**  
    - 成功 → 寫入 **`pending_chapter_extraction`**，**streak 歸零**，前往副線核銷  
-9. **`b_story_resolve`** — LLM 輸出 `resolution_analysis`、`resolution_evidence_event_ids`、`resolved_b_stories`；證據 event id 須在 **抽取結果中可佐證**（R2c）。若模型意圖核銷但證據不成立 → **`WAITING_HITL`**（`B_Story_Resolution_Failed`），保留 **`b_story_resolution_hitl_candidate`**  
-10. **`state_updater`** — 以 `pending_chapter_extraction` 為主做 mutations + vector；SQLite 章節寫入後更新 bible：**剔除核銷副線**、**merge 本章新增副線種子**
+10. **`b_story_resolve`** — LLM 輸出 `resolution_analysis`、`resolution_evidence_event_ids`、`resolved_b_stories`；證據 event id 須在 **抽取結果中可佐證**（R2c）。若模型意圖核銷但證據不成立 → **`WAITING_HITL`**（`B_Story_Resolution_Failed`），保留 **`b_story_resolution_hitl_candidate`**  
+11. **`state_updater`** — 以 `pending_chapter_extraction` 為主做 mutations + vector；SQLite 章節寫入後更新 bible：**剔除核銷副線**、**merge 本章新增副線種子**
 
 `plan_supervisor`、`draft_supervisor`、`reader` 可將流程打回前一層；重試過多進入 HITL。`extraction_gate` 退回 author 亦會累積 `draft_feedback`。
 
@@ -63,14 +64,25 @@
 - **副線池**：`active_b_stories`（來自 bible）、**`pending_b_story_additions`**（planner 本輪擬新增，commit 時寫回）  
 - **距離與創世**：`distance_to_anchor`、`planned_graph_nodes`（通過 plan 後與 `proposed_new_nodes` 對齊）  
 - **字數 SSOT**：`target_word_count`、`normalized_length_min`、`normalized_length_max`  
-- **審核軌跡**：`plan_warnings`（含 plan_supervisor 的 soft_warnings 合併）  
+- **審核軌跡**：`plan_warnings`（含 plan_supervisor 的 soft_warnings 合併；以及 logic_alignment 匯入的 **`[設定衝突]`** 前綴列）  
+- **人類核心模式**：`ai_freedom_level`（`strict`／`balanced`／`wild`，由 `POST .../chapters/{n}/run` body 寫入）、**`outline_binding_mode`**（`FULL`／`PARTIAL`／`ABSENT`，依大綱字數閾值後端啟發式）  
+- **導演簡報**：`director_state_brief`（來自 Director 的 `state_operational_brief`）  
+- **對齊稽核**：`human_outline_conflict_notes`（Logic alignment 輸出；與聖經／圖譜牴觸條列）  
 - **定稿後抽取**：`author_extraction_surface_hints`、`pending_chapter_extraction`、`b_story_resolution`、`post_polish_route`、`extraction_gate_*` 回饋（失敗時）
+
+### 前端（章節開跑）
+
+- 同一請求可帶 **`chapter_outline`**、**`chapter_hard_rules`**、**`ai_freedom_level`**。  
+- **WorkflowMonitor** 顯示自由度、綁定模式、`plan_warnings`、`human_outline_conflict_notes`、可摺疊 **`alignment_log`**、**`director_state_brief`**。  
+- **HITL**（`Alignment_Rules_Required`）面板會摘要 **`alignment_log`**、衝突條列與大綱節錄。
 
 ## 各 agent 角色與 I/O（精要）
 
 ### Director
 
-決定 **POV、epoch、敘事方向、基調**；輸出 **`chapter_type`**、**`b_story_directive`**、**`new_elements_to_introduce`** 等。  
+**情報官／狀態編譯器**：輸出 **`state_operational_brief`**（寫入 state 為 **`director_state_brief`**），供 Planner 參考錨點距離、副線與連續性。  
+當 **`outline_binding_mode=FULL`** 時，`narrative_directive` 應重述人類大綱而非發明對立主線；大綱缺失／過短時可提出建議並在簡報標註「大綱資訊不足」。  
+仍輸出 **`chapter_type`**、**`b_story_directive`**、**`new_elements_to_introduce`** 等。  
 **`normalize_director_output`**：當離錨點較遠且副線池無有效 id 或副線指令為空時，降級為 **WORLD_BUILDING** 並補預設探索向副線描述。
 
 ### Graph RAG
@@ -79,17 +91,26 @@
 
 ### Planner
 
-將導演方向轉成可執行大綱：**`ground_truth_events`**、**`narrative_script`**、作者任務卡欄位、**`proposed_new_nodes`**、**`new_active_b_stories`**、**`target_word_count`**。  
-後端在 `planner` 節點將 **`planned_graph_nodes`** 與字數 SSOT 寫回 state。
+依 **`ai_freedom_level`** 與 **`outline_binding_mode`**：strict+FULL 時人類大綱已寫明處不可篡改；留白與 AI 腦補以 **`[AI_INVENTION]`** 標於 beats／事件描述。  
+將導演方向與簡報轉成可執行大綱：**`ground_truth_events`**、**`narrative_script`**、作者任務卡欄位、**`proposed_new_nodes`**、**`new_active_b_stories`**、**`target_word_count`**。  
+後端在 `planner` 節點將 **`planned_graph_nodes`** 與字數 SSOT 寫回 state，並可附加 **`plan_warnings`**（大綱模式提示）。
 
 ### Plan Supervisor
 
 審核大綱；**Hard** 包含：創世節點與 director 交代不一致、**B 線核心動作缺失**、時序／空間硬傷等。  
+當 **strict + FULL** 且人類大綱具體時，表層／底層**明顯背離**大綱已寫情節可判 **INCONSISTENCY**（大綱極短時改 soft）。  
 **Soft**（寫入 `soft_warnings` 再進 **`plan_warnings`**）：idle 節奏、超前解錨疑慮、字數微偏等——**不得**掩蓋會導致下游缺欄的 Hard 問題。
+
+### Logic alignment（`plan_supervisor` 與 `author` 之間）
+
+比對 **人類大綱 + Planner 草稿** 與 **`bible_context`／`graph_context`／`vector_context`**；輸出 **`human_outline_conflict_notes`**，並合併至 **`plan_warnings`**（`[設定衝突]`）。  
+有 **`chapter_hard_rules`** 時對齊規則與 POV 安全；無硬規則時若具大綱或足夠 RAG 上下文仍跑 **LLM 稽核**；否則僅保留智鬥 heuristic 短路。  
+不可修補衝突或紅線 → **`requires_hitl`**（`Alignment_Rules_Required`）。
 
 ### Author
 
-依表層劇本寫作；payload 含 **`mandatory_new_entities`**（由 `planned_graph_nodes` 衍生），提示須寫出可對齊 **role / canonical_name** 的辨識特徵。
+幽靈代筆：依表層劇本與 beats；**`ai_freedom_level`／`outline_binding_mode`** 影響 LLM **temperature**（strict 且 FULL 時較低）。  
+payload 含 **`mandatory_new_entities`**（由 `planned_graph_nodes` 衍生），提示須寫出可對齊 **role / canonical_name** 的辨識特徵。
 
 ### Draft Supervisor
 
