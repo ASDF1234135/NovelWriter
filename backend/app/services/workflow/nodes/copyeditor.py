@@ -7,7 +7,9 @@ from app.services.llm import MockLLMClient
 from app.services.workflow.continuity import chapter_content_tail_snippet
 from app.services.workflow.context import WorkflowContext
 from app.services.workflow.nodes.author import _ensure_chapter_heading
+from app.services.workflow.output_language import augment_profile_system_prompt
 from app.services.workflow.profiles import get_profile
+from app.services.workflow.utils import latin_word_boundary_sub, looks_like_latin_word
 
 
 def _completed_chapter_tail(
@@ -57,7 +59,7 @@ def _collapse_leading_noise(text: str) -> str:
     t = text.strip()
     for _ in range(4):
         lowered = t[:80].lower()
-        if lowered.startswith("好的") or lowered.startswith("以下是") or lowered.startswith("這是"):
+        if lowered.startswith(("好的", "以下是", "這是", "here is", "below is", "certainly")):
             lines = t.splitlines()
             t = "\n".join(lines[1:]).strip() if len(lines) > 1 else t
             continue
@@ -82,7 +84,20 @@ def _identity_tokens_to_block(state: dict) -> list[str]:
     for row in (state.get("forbidden_reveals") or []):
         if not isinstance(row, str) or not row.strip():
             continue
-        if not any(k in row for k in ("身分", "身份", "真名", "真相", "其實是", "真正是")):
+        if not any(
+            k in row
+            for k in (
+                "身分",
+                "身份",
+                "真名",
+                "真相",
+                "其實是",
+                "真正是",
+                "identity",
+                "true name",
+                "actually",
+            )
+        ):
             continue
         for token in re.findall(r"「([^」]{1,30})」", row):
             t = token.strip()
@@ -94,6 +109,13 @@ def _identity_tokens_to_block(state: dict) -> list[str]:
 def _redact_identity_terms(text: str, blocked_terms: list[str]) -> str:
     out = text
     for term in blocked_terms:
+        if looks_like_latin_word(term):
+            # Prefer Latin word-boundary redaction to avoid substring pollution (e.g. \"key\" in \"monkey\").
+            out = latin_word_boundary_sub(term, "[REDACTED_IDENTITY]", out)
+            # Light plural handling for single-word Latin tokens: redact \"key\" and \"keys\".
+            if " " not in term and term and not term.lower().endswith("s"):
+                out = latin_word_boundary_sub(f"{term}s", "[REDACTED_IDENTITY]", out)
+            continue
         out = re.sub(re.escape(term), "[REDACTED_IDENTITY]", out, flags=re.IGNORECASE)
     return out
 
@@ -109,37 +131,37 @@ def _build_copyeditor_prompt(
     read_only_blocks: list[str] = []
     if cid > 2:
         read_only_blocks.append(
-            f"## 唯讀：第 {cid - 2} 章結尾節錄（禁止改寫、禁止複製進輸出）\n"
-            f"{tail_n2 if tail_n2 else '（無）'}"
+            f"## Read-only: end excerpt from chapter {cid - 2} (do not rewrite; do not copy into output)\n"
+            f"{tail_n2 if tail_n2 else '(none)'}"
         )
     if cid > 1:
         read_only_blocks.append(
-            f"## 唯讀：第 {cid - 1} 章結尾節錄（禁止改寫、禁止複製進輸出）\n"
-            f"{tail_n1 if tail_n1 else '（無）'}"
+            f"## Read-only: end excerpt from chapter {cid - 1} (do not rewrite; do not copy into output)\n"
+            f"{tail_n1 if tail_n1 else '(none)'}"
         )
     read_only_section = (
         "\n\n".join(read_only_blocks)
         if read_only_blocks
-        else "## 唯讀參考\n（本章為第 1 章，尚無已完成之前章。）"
+        else "## Read-only reference\n(Chapter 1 - no prior completed chapters.)"
     )
-    return f"""你是校閱編輯。只允許修飾語句、刪除冗餘與 Markdown、整理標點與轉折，不得改寫事實與劇情資訊。
+    return f"""You are a line/copy editor. You may polish sentences, cut redundancy and Markdown, tune punctuation and transitions - do not change facts or plot information.
 
 {read_only_section}
 
-## 可編輯：第 {cid} 章全文草稿（你只能產出此章潤飾後的全文）
+## Editable: full draft text for chapter {cid} (output ONLY this chapter's polished full text)
 {chapter_draft}
 
-## 鐵律
-1. 資訊守恆（最高）：不得刪除道具、關鍵對白、地點或事件；不得新增情節；不得把具體指稱改成晦澀隱喻以致與必出實體表面脫鉤。
-2. 去重：若本章開頭與上章結尾在動作／感嘆上重複，刪本章冗餘句並無縫接續（不刪事件）。
-3. 版面：移除多餘 Markdown（粗體星號、裝飾符）；避免套話式總結尾聲。
-4. 除草任務（Jargon Pruning）：若草稿出現過於生硬、遊戲化、或做作引號式專有名詞（如「獵犬協同邏輯」「策略性緩衝節點」），請改寫成自然敘述。
-5. 除草原則：不改變劇情事實與因果，只把名詞包裝拆成角色可觀察的動作、感官、空間變化或系統反應。
-6. 必要命名可保留：若名稱屬核心辨識點且後文需要，可保留名稱；但請刪除裝飾性副標、過度引號與術語堆砌。
-7. 參考改寫示例：
-   - 原文：他看見了「虛空節點：坍塌區」。
-   - 修改：他看見了這片空間最脆弱的縫隙，光束在那裡發生了不穩定的扭曲。
-8. 輸出：只輸出第 {cid} 章潤飾後正文，禁止前言、禁止 JSON、禁止解釋。
+## Hard rules
+1. Information conservation (highest): do not delete props, key dialogue, locations, or events; do not invent new plot; do not replace concrete referents with vague metaphor in ways that break mandatory on-page entities.
+2. De-dupe: if this chapter's opening repeats the prior chapter's ending beat/sentiment, trim redundant lines here and stitch seamlessly (do not delete events).
+3. Layout: strip decorative Markdown (bold stars, ornaments); avoid boilerplate recap closers.
+4. Jargon pruning: if the draft uses stiff, gamified, or quote-stuffed proper nouns (e.g. "Hound Synergy Logic", "Strategic Buffer Node"), rewrite into natural narration.
+5. Pruning principle: keep causal facts identical - unpack label-naming into observable action, sensation, spatial change, or system response.
+6. Keep necessary names when they are core identifiers needed later; remove decorative subtitles, excess quotes, and term-stacking.
+7. Example rewrite:
+   - Before: He saw "Void Node: Collapse Zone".
+   - After: He saw the weakest seam in the space; light bent unstably there.
+8. Output: ONLY the polished chapter {cid} body - no preamble, no JSON, no commentary.
 """
 
 
@@ -158,18 +180,18 @@ def run_copyeditor(state: dict, context: WorkflowContext) -> dict[str, object]:
     )
 
     if isinstance(context.llm_client, MockLLMClient):
-        polished = _ensure_chapter_heading(cid, draft)
+        polished = _ensure_chapter_heading(cid, draft, context.output_language)
         polished = _redact_identity_terms(polished, _identity_tokens_to_block(state))
         return {"current_draft": polished, "best_draft_content": polished}
 
-    profile = get_profile("copyeditor")
+    profile = augment_profile_system_prompt(get_profile("copyeditor"), context.output_language)
     prompt = _build_copyeditor_prompt(state, tail_n2=tail_m2, tail_n1=tail_m1, chapter_draft=draft)
     result = context.llm_client.invoke_text(prompt, profile)
     body = _strip_markdown_fences(result.content)
     body = _collapse_leading_noise(body)
     body = _strip_stray_markdown(body)
-    polished = _ensure_chapter_heading(cid, body)
+    polished = _ensure_chapter_heading(cid, body, context.output_language)
     polished = _redact_identity_terms(polished, _identity_tokens_to_block(state))
     if not polished.strip():
-        polished = _ensure_chapter_heading(cid, draft)
+        polished = _ensure_chapter_heading(cid, draft, context.output_language)
     return {"current_draft": polished, "best_draft_content": polished}

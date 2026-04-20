@@ -5,6 +5,9 @@ export type StoryCastSeedEntry = {
   short_hint?: string;
 };
 
+/** Natural language for generated prose, outlines, feedback, and extractions. */
+export type StoryOutputLanguage = "en" | "zh-Hant" | "zh-Hans";
+
 export type StoryInput = {
   title: string;
   premise: string;
@@ -15,6 +18,7 @@ export type StoryInput = {
   target_total_words: number;
   plan_retry_limit: number;
   draft_loop_retry_limit: number;
+  output_language?: StoryOutputLanguage;
 };
 
 export type ImportMergeMode = "replace" | "merge";
@@ -33,6 +37,7 @@ export type StoryPatch = {
   draft_loop_retry_limit?: number;
   macro_author_notes?: string;
   cast_seed?: StoryCastSeedEntry[];
+  output_language?: StoryOutputLanguage;
 };
 
 export type VolumePlan = {
@@ -143,6 +148,8 @@ export type StoryDetailResponse = StoryInput & {
 export type WritingPreambleChapterSummaryRow = {
   chapter_id: number;
   plot_summary: string;
+  /** Provenance; CHAPTER_SUMMARIZER_LLM means structured LLM output. */
+  plot_summary_source: string;
   conflict_type: string;
   resolution_method: string;
   ending_vibe: string;
@@ -158,6 +165,8 @@ export type WritingPreamblePreviousChapter = {
   chapter_id: number | null;
   plot_summary: string;
   status: string;
+  /** Omitted when no chapter_summaries row exists for the previous chapter. */
+  plot_summary_source?: string;
 };
 
 export type WritingPreambleNextAnchor = {
@@ -167,6 +176,13 @@ export type WritingPreambleNextAnchor = {
   description: string;
   chapter_target: number;
   priority: number;
+};
+
+/** POST /stories/:id/chapters/:n/regenerate-summary */
+export type RegenerateChapterSummaryResponse = {
+  regenerated: boolean;
+  plot_summary: string;
+  plot_summary_source: string;
 };
 
 export type WritingPreambleResponse = {
@@ -194,12 +210,15 @@ export type HitlContextPayloadType =
   | "extraction_remap"
   | "draft_loop"
   | "context_prune"
+  | "output_language"
   | "generic";
 
 export type HitlContextMetadata = {
   payload_type: HitlContextPayloadType;
   unknown_entities?: Array<Record<string, unknown>>;
   graph_rag_context_tier?: number | null;
+  expected_output_language?: string | null;
+  language_detection_summary?: string | null;
 };
 
 export type HitlContextPayload = {

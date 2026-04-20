@@ -28,6 +28,7 @@ from app.domain.schema import (
     StateUpdaterOutput,
     StoryCastMemberStored,
     StoryInput,
+    StoryOutputLanguage,
     StoryPatch,
     VolumePlan,
     WorkflowStatus,
@@ -49,8 +50,17 @@ from app.services.workflow.chapter_pacing import (
     chapter_distance_to_anchor,
 )
 from app.services.workflow.context import WorkflowContext
+from app.services.workflow.nodes.chapter_summarizer import (
+    build_minimal_state_for_regenerate,
+    persist_chapter_summary,
+)
+from app.services.workflow.output_language import (
+    default_chapter_target_words,
+    normalize_output_language,
+    strip_leading_chapter_heading_line,
+)
 from app.services.workflow.graph import build_chapter_graph
-from app.services.workflow.hitl_payload import build_hitl_context_payload
+from app.services.workflow.hitl_payload import build_hitl_context_payload, should_expose_hitl_context
 from app.services.workflow.outline_binding import compute_outline_binding_mode
 
 _ALLOWED_HITL_RESUME_NODES = frozenset(
@@ -64,6 +74,7 @@ _ALLOWED_HITL_RESUME_NODES = frozenset(
         "graph_rag",
         "extraction_gate",
         "copyeditor",
+        "output_language_gate",
         "b_story_resolve",
         "profile_expander",
         "state_updater",
@@ -224,6 +235,7 @@ def _apply_abort_and_restart_chapter_state(story_repository: StoryRepository, st
     fresh["writing_note"] = normalize_writing_note(bible.get("writing_note"))
     fresh["distance_to_anchor"] = chapter_distance_to_anchor(chapter_id, unachieved)
     normalize_workflow_state(fresh)
+    fresh["story_output_language"] = normalize_output_language(str(story.get("output_language") or ""))
     apply_length_bounds_to_state(fresh)
     state.clear()
     state.update(fresh)
@@ -251,6 +263,10 @@ class MacroCompileAlreadyRunningError(RuntimeError):
 
 class MacroPlanValidationError(ValueError):
     """Raised when manual macro plan payload fails structural checks."""
+
+
+class ChapterSummaryRegenerateFailed(RuntimeError):
+    """Raised when POST regenerate-summary cannot persist an LLM-backed chapter summary."""
 
 
 logger = logging.getLogger(__name__)
@@ -350,11 +366,7 @@ def _extract_tail_excerpt(
     if not content:
         return ""
 
-    cleaned = content.strip()
-    # Drop "第X章" heading line if present.
-    lines = cleaned.splitlines()
-    if lines and lines[0].strip().startswith("第") and "章" in lines[0]:
-        cleaned = "\n".join(lines[1:]).lstrip()
+    cleaned = strip_leading_chapter_heading_line(content)
     if not cleaned:
         return ""
 
@@ -376,8 +388,17 @@ def _extract_tail_excerpt(
 
 
 def _ensure_hitl_waiting(state: dict) -> None:
-    if not state.get("requires_hitl") or state.get("workflow_status") != WorkflowStatus.WAITING_HITL.value:
-        raise HitlNotWaitingError("Workflow is not waiting for HITL")
+    """Normalize minor drift between requires_hitl and workflow_status before applying HITL input."""
+    ws = str(state.get("workflow_status") or "")
+    req = bool(state.get("requires_hitl"))
+    if ws == WorkflowStatus.WAITING_HITL.value:
+        if not req:
+            state["requires_hitl"] = True
+        return
+    if req:
+        state["workflow_status"] = WorkflowStatus.WAITING_HITL.value
+        return
+    raise HitlNotWaitingError("Workflow is not waiting for HITL")
 
 
 class WorkflowService:
@@ -400,6 +421,9 @@ class WorkflowService:
         self.llm_client = llm_client
 
     def _build_context(self, run_id: str) -> WorkflowContext:
+        wf_run = self.workflow_repository.get_run(run_id)
+        story_row = self.story_repository.get_story(wf_run.story_id)
+        ol = normalize_output_language(str(story_row.get("output_language") or "") if story_row else None)
         return WorkflowContext(
             story_repository=self.story_repository,
             workflow_repository=self.workflow_repository,
@@ -409,6 +433,7 @@ class WorkflowService:
             vector_store=self.vector_store,
             llm_client=self.llm_client,
             run_id=run_id,
+            output_language=ol,
         )
 
     def _execute_workflow(self, run_id: str, state: dict) -> dict:
@@ -445,6 +470,8 @@ class WorkflowService:
         if not story:
             raise KeyError(f"Story not found: {story_id}")
         stale_cast_ids = _existing_cast_node_ids(story)
+        raw_lang = str(story.get("output_language") or "").strip()
+        ol: StoryOutputLanguage = normalize_output_language(raw_lang)
         story_input = StoryInput(
             title=story["title"],
             premise=story["premise"],
@@ -454,6 +481,7 @@ class WorkflowService:
             target_total_words=story["target_total_words"],
             plan_retry_limit=int(story.get("plan_retry_limit", 3)),
             draft_loop_retry_limit=int(story.get("draft_loop_retry_limit", 3)),
+            output_language=ol,
         )
         volumes, anchors, cast, b_seed, bible_generated = self.anchor_service.compile_macro_plan(
             story_id, story_input, self.llm_client
@@ -706,6 +734,9 @@ class WorkflowService:
             ai_freedom_level=freedom,
             outline_binding_mode=binding_mode,
         )
+        _ol = normalize_output_language(str(story.get("output_language") or ""))
+        initial_state["story_output_language"] = _ol
+        initial_state["target_word_count"] = default_chapter_target_words(_ol)
 
         # Tail-End Context Injection: provide the previous chapter trailing excerpt to this run.
         previous_tail = ""
@@ -833,7 +864,7 @@ class WorkflowService:
         run = self.workflow_repository.get_run(run_id)
         state = normalize_workflow_state(self.workflow_repository.get_run_state(run_id))
         run_payload = run.model_dump(mode="json")
-        if bool(state.get("requires_hitl")) and str(state.get("workflow_status") or "") == "WAITING_HITL":
+        if should_expose_hitl_context(state):
             hc = build_hitl_context_payload(state)
             run_payload["hitl_context"] = hc.model_dump(mode="json") if hc else None
         else:
@@ -850,6 +881,10 @@ class WorkflowService:
             raise KeyError(f"Story not found: {story_id}")
         return self.story_repository.list_chapters(story_id)
 
+    def list_hitl_actions(self, run_id: str, *, limit: int = 100, offset: int = 0) -> list[dict]:
+        self.workflow_repository.get_run(run_id)
+        return self.workflow_repository.list_hitl_actions(run_id, limit=limit, offset=offset)
+
     def get_chapter(self, story_id: str, chapter_id: int) -> dict:
         story = self.story_repository.get_story(story_id)
         if not story:
@@ -858,6 +893,44 @@ class WorkflowService:
         if not chapter:
             raise KeyError(f"Chapter not found: {story_id}:{chapter_id}")
         return chapter
+
+    def regenerate_chapter_plot_summary(self, story_id: str, chapter_id: int) -> dict:
+        """Re-run chapter_summarizer LLM path from stored chapter body (no workflow fallbacks)."""
+        story = self.story_repository.get_story(story_id)
+        if not story:
+            raise KeyError(f"Story not found: {story_id}")
+        chapter = self.story_repository.get_chapter(story_id, chapter_id)
+        if not chapter:
+            raise KeyError(f"Chapter not found: {story_id}:{chapter_id}")
+        body = str(chapter.get("content") or "").strip()
+        if not body:
+            raise ValueError("Chapter has no content to summarize")
+
+        ol = normalize_output_language(str(story.get("output_language") or ""))
+        context = WorkflowContext(
+            story_repository=self.story_repository,
+            workflow_repository=self.workflow_repository,
+            bible_service=self.bible_service,
+            anchor_service=self.anchor_service,
+            graph_store=self.graph_store,
+            vector_store=self.vector_store,
+            llm_client=self.llm_client,
+            run_id=f"regenerate-summary:{story_id}:{chapter_id}",
+            output_language=ol,
+        )
+        state = build_minimal_state_for_regenerate(
+            story_id=story_id,
+            chapter_id=chapter_id,
+            chapter_content=body,
+        )
+        result = persist_chapter_summary(state, context, allow_fallback=False)
+        if not result.get("written"):
+            raise ChapterSummaryRegenerateFailed(str(result.get("error") or "Regenerate failed"))
+        return {
+            "regenerated": True,
+            "plot_summary": result.get("plot_summary", ""),
+            "plot_summary_source": result.get("plot_summary_source", ""),
+        }
 
     def apply_hitl_decision(self, run_id: str, request: HitlDecisionRequest) -> None:
         state = normalize_workflow_state(self.workflow_repository.get_run_state(run_id))
@@ -892,6 +965,28 @@ class WorkflowService:
         if request.option_id == "extraction_return_author" and prev_hitl_reason == HitlReason.EXTRACTION_GATE_FAILED:
             state["extraction_gate_failure_streak"] = 0
             resume = "author"
+        if prev_hitl_reason == HitlReason.OUTPUT_LANGUAGE_MISMATCH:
+            if request.option_id == "language_force_continue":
+                state["output_language_hitl_waived"] = True
+                resume = "output_language_gate"
+            elif request.option_id == "language_return_author":
+                state["output_language_hitl_waived"] = False
+                note = (
+                    "Output language check: chapter text likely does not match the story "
+                    "output_language setting; rewrite the chapter body in the configured language."
+                )
+                draft_feedback = list(state.get("draft_feedback") or [])
+                draft_feedback.append(
+                    {
+                        "attempt": int(state.get("draft_retry_count") or 0) + 1,
+                        "violation": "OUTPUT_LANGUAGE",
+                        "suggestion": "REWRITE",
+                        "length_adjustment": "NONE",
+                        "message": note,
+                    }
+                )
+                state["draft_feedback"] = draft_feedback
+                resume = "author"
         if request.option_id == "keep_current_logic":
             state["draft_loop_retry_count"] = 0
             state["draft_retry_count"] = 0
@@ -918,6 +1013,8 @@ class WorkflowService:
     def apply_hitl_outline_edit(self, run_id: str, request: HitlOutlineEditRequest) -> None:
         state = normalize_workflow_state(self.workflow_repository.get_run_state(run_id))
         _ensure_hitl_waiting(state)
+        if not request.ground_truth_events:
+            raise ValueError("ground_truth_events must contain at least one event")
         prev_hitl_reason = str(state.get("hitl_reason", "") or "")
         state["ground_truth_events"] = [event.model_dump(mode="json") for event in request.ground_truth_events]
         if request.narrative_script:
@@ -943,6 +1040,10 @@ class WorkflowService:
         state = normalize_workflow_state(self.workflow_repository.get_run_state(run_id))
         _ensure_hitl_waiting(state)
         prev_hitl_reason = str(state.get("hitl_reason", "") or "")
+        if prev_hitl_reason == HitlReason.ALIGNMENT_RULES_REQUIRED:
+            rules = (request.chapter_hard_rules or "").strip()
+            if not rules:
+                raise ValueError("Alignment HITL requires non-empty chapter_hard_rules")
         resume = (request.resume_from or state.get("resume_from", "author") or "author").strip()
         if resume not in _ALLOWED_HITL_RESUME_NODES:
             resume = str(state.get("resume_from", "author") or "author")
@@ -967,13 +1068,6 @@ class WorkflowService:
         patched_rules = (request.chapter_hard_rules or "").strip()
         if patched_rules:
             state["chapter_hard_rules"] = patched_rules[:8000]
-        elif prev_hitl_reason == HitlReason.ALIGNMENT_RULES_REQUIRED:
-            # Explicitly allow empty rules fallback for alignment HITL, but leave a warning.
-            warnings = list(state.get("plan_warnings") or [])
-            msg = "Alignment HITL resumed with empty chapter_hard_rules; system will force-pass if retry budget is exhausted."
-            if msg not in warnings:
-                warnings.append(msg)
-            state["plan_warnings"] = warnings
         state["requires_hitl"] = False
         state["hitl_reason"] = ""
         state["hitl_decision_mode"] = "NONE"
@@ -1067,6 +1161,11 @@ class WorkflowService:
     def apply_hitl_extraction_remap(self, run_id: str, request: HitlExtractionRemapRequest) -> None:
         state = normalize_workflow_state(self.workflow_repository.get_run_state(run_id))
         _ensure_hitl_waiting(state)
+        if not request.entity_remaps and not request.waive_mandatory_node_ids:
+            raise ValueError("Provide at least one entity remap or one waive_mandatory_node_ids entry")
+        for row in request.entity_remaps:
+            if not str(row.from_node_id).strip() or not str(row.to_node_id).strip():
+                raise ValueError("Each entity remap must have non-empty from_node_id and to_node_id")
         manual = list(state.get("manual_entity_remap") or [])
         for row in request.entity_remaps:
             manual.append({"from_node_id": row.from_node_id, "to_node_id": row.to_node_id})

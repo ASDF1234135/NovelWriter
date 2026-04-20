@@ -208,6 +208,33 @@ class WorkflowRepository:
                 ),
             )
 
+    def list_hitl_actions(self, run_id: str, *, limit: int = 100, offset: int = 0) -> list[dict]:
+        lim = max(1, min(int(limit), 500))
+        off = max(0, int(offset))
+        with self.db.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT action_id, run_id, action_type, payload_json, created_at
+                FROM hitl_actions
+                WHERE run_id = ?
+                ORDER BY created_at ASC, action_id ASC
+                LIMIT ? OFFSET ?
+                """,
+                (run_id, lim, off),
+            ).fetchall()
+        out: list[dict] = []
+        for row in rows:
+            out.append(
+                {
+                    "action_id": row["action_id"],
+                    "run_id": row["run_id"],
+                    "action_type": row["action_type"],
+                    "payload": self.db.loads(row["payload_json"]),
+                    "created_at": row["created_at"],
+                }
+            )
+        return out
+
     def create_state_transaction(self, run_id: str, story_id: str, chapter_id: int, payload: dict) -> StateTransactionRecord:
         record = StateTransactionRecord(
             transaction_id=str(uuid4()),

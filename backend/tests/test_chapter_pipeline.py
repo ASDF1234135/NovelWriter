@@ -2,9 +2,19 @@
 
 from __future__ import annotations
 
-from app.domain.schema import ExtractedEntity, NodeType, ProposedGraphNode
+from app.domain.schema import (
+    ChapterExtractionOutput,
+    EdgeType,
+    ExtractedEntity,
+    ExtractedRelation,
+    NodeType,
+    ProposedGraphNode,
+)
+from app.services.workflow.extraction import EVENT_DESCRIPTION_DISPLAY_MAX, clip_event_description_for_storage
 from app.services.workflow.chapter_pipeline import (
+    apply_full_extraction_remaps,
     apply_manual_entity_remap,
+    apply_resolution_to_extraction,
     extraction_substantiated_event_ids,
     remap_planned_entities,
     validate_b_story_resolution,
@@ -62,6 +72,28 @@ def test_remap_uses_author_surfaces_when_canonical_differs() -> None:
     remapped, warns = remap_planned_entities(entities, planned, author_surfaces=author_surfaces)
     assert remapped[0].node_id == "char_slot"
     assert any(w.get("to_id") == "char_slot" for w in warns)
+
+
+def test_remap_does_not_merge_on_too_short_substring_overlap() -> None:
+    planned = [
+        ProposedGraphNode(
+            node_id="char_slot",
+            node_type=NodeType.CHARACTER,
+            role="Li",
+            canonical_name="Li",
+            mandatory=True,
+        ).model_dump(mode="json")
+    ]
+    entities = [
+        ExtractedEntity(
+            node_id="char_llm",
+            node_type=NodeType.CHARACTER,
+            canonical_name="cliff",
+            aliases=["solid"],
+        )
+    ]
+    remapped, _warns = remap_planned_entities(entities, planned)
+    assert remapped[0].node_id == "char_llm"
 
 
 def test_r6_skips_waived_mandatory_ids() -> None:
@@ -168,3 +200,72 @@ def test_extraction_substantiated_ignores_planner_only_events() -> None:
     pending = {"entities": [{"node_id": "char_x", "node_type": "CHARACTER"}], "relations": []}
     got = extraction_substantiated_event_ids(pending, {"evt_only_in_planner"})
     assert got == set()
+
+
+def test_apply_full_extraction_remaps_rewrites_relation_endpoints_for_manual_remap() -> None:
+    extraction = ChapterExtractionOutput(
+        entities=[
+            ExtractedEntity(
+                node_id="ghost",
+                node_type=NodeType.CHARACTER,
+                canonical_name="x",
+                aliases=[],
+            )
+        ],
+        relations=[
+            ExtractedRelation(
+                source_node_id="ghost",
+                relation_type=EdgeType.PARTICIPATED_IN,
+                target_node_id="evt_1",
+            )
+        ],
+    )
+    out = apply_full_extraction_remaps(
+        extraction,
+        [{"from_node_id": "ghost", "to_node_id": "planned_1"}],
+        [],
+        None,
+    )
+    assert out.entities[0].node_id == "planned_1"
+    assert out.relations[0].source_node_id == "planned_1"
+    assert out.relations[0].target_node_id == "evt_1"
+
+
+def test_apply_resolution_to_extraction_rewrites_relations_for_planned_merge() -> None:
+    planned = [
+        ProposedGraphNode(
+            node_id="char_slot",
+            node_type=NodeType.CHARACTER,
+            role="研究員",
+            canonical_name="陳博士",
+            mandatory=True,
+        ).model_dump(mode="json")
+    ]
+    extraction = ChapterExtractionOutput(
+        entities=[
+            ExtractedEntity(
+                node_id="char_llm",
+                node_type=NodeType.CHARACTER,
+                canonical_name="隔壁的老王",
+                aliases=[],
+            )
+        ],
+        relations=[
+            ExtractedRelation(
+                source_node_id="char_llm",
+                relation_type=EdgeType.PARTICIPATED_IN,
+                target_node_id="evt_1",
+            )
+        ],
+    )
+    author_surfaces = {"char_slot": ["隔壁的老王"]}
+    out = apply_resolution_to_extraction(extraction, planned, author_surfaces=author_surfaces)
+    assert out.entities[0].node_id == "char_slot"
+    assert out.relations[0].source_node_id == "char_slot"
+
+
+def test_clip_event_description_respects_display_max() -> None:
+    long = "字" * (EVENT_DESCRIPTION_DISPLAY_MAX + 50)
+    clipped = clip_event_description_for_storage(long)
+    assert len(clipped) == EVENT_DESCRIPTION_DISPLAY_MAX
+    assert clipped.endswith("…")

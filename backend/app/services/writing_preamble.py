@@ -33,6 +33,7 @@ def _serialize_summary_row(row: dict) -> dict:
     return {
         "chapter_id": int(row["chapter_id"]),
         "plot_summary": str(row.get("plot_summary") or ""),
+        "plot_summary_source": str(row.get("plot_summary_source") or "UNKNOWN"),
         "conflict_type": str(row.get("conflict_type") or ""),
         "resolution_method": str(row.get("resolution_method") or ""),
         "ending_vibe": str(row.get("ending_vibe") or ""),
@@ -82,27 +83,28 @@ def build_writing_preamble(repo: StoryRepository, story_id: str, chapter_id: int
         if int(m["chapter_end"]) < cid
     ]
 
-    prev_summary = ""
-    prev_status = ""
     prev_num: int | None = None
+    prev_block: dict = {"chapter_id": None, "plot_summary": "", "status": ""}
     if cid > 1:
         prev_num = cid - 1
         prev_ch = repo.get_chapter(story_id, prev_num)
         prev_status = str((prev_ch or {}).get("status") or "")
         rows_prev = repo.get_chapter_summaries_in_range(story_id, prev_num, prev_num)
+        prev_block = {
+            "chapter_id": prev_num,
+            "plot_summary": "",
+            "status": prev_status,
+        }
         if rows_prev:
-            prev_summary = str(rows_prev[0].get("plot_summary") or "")
+            prev_block["plot_summary"] = str(rows_prev[0].get("plot_summary") or "")
+            prev_block["plot_summary_source"] = str(rows_prev[0].get("plot_summary_source") or "UNKNOWN")
 
     earlier_count = repo.count_chapter_summaries_before(story_id, cid)
 
     return {
         "chapter_id": cid,
         "plot_progress": {
-            "previous_chapter": {
-                "chapter_id": prev_num,
-                "plot_summary": prev_summary,
-                "status": prev_status,
-            },
+            "previous_chapter": prev_block,
             "recent_summaries": [_serialize_summary_row(dict(r)) for r in recent_5_raw],
             "milestones": milestones,
             "earlier_chapters_with_summary_count": earlier_count,

@@ -18,14 +18,30 @@ from app.domain.schema import (
     StateUpdaterOutput,
     VectorDocument,
 )
-from app.services.workflow.extraction import extract_chapter_artifacts, stable_entity_id
+from app.services.workflow.extraction import (
+    clip_event_description_for_storage,
+    extract_chapter_artifacts,
+    stable_entity_id,
+)
+from app.services.workflow.relation_direction_rules import relation_direction_is_valid
 from app.services.workflow.continuity import chapter_content_tail_snippet
 from app.services.workflow.context import WorkflowContext
+from app.services.workflow.event_normalization import (
+    coalesce_over_fragmented_events,
+    is_standard_event_id,
+    normalize_event_ai_flags,
+    normalize_event_ids,
+)
 
 
 def run_state_updater(state: dict, context: WorkflowContext) -> dict:
     raw_events = [EventOutline.model_validate(event) for event in state["ground_truth_events"]]
-    events = _coalesce_micro_events(raw_events)
+    normalized_raw_events = normalize_event_ai_flags(raw_events)
+    events = _coalesce_micro_events(normalized_raw_events)
+    events = coalesce_over_fragmented_events(events)
+    malformed_ids = [event.event_id for event in events if not is_standard_event_id(event.event_id, chapter_id=int(state["chapter_id"]))]
+    if malformed_ids:
+        events = normalize_event_ids(int(state["chapter_id"]), events).events
     chapter_content = state["best_draft_content"] or state["current_draft"]
     graph_snapshot = context.graph_store.query_context(
         GraphQueryRequest(
@@ -64,7 +80,7 @@ def run_state_updater(state: dict, context: WorkflowContext) -> dict:
                 node_id=event.event_id,
                 node_type=NodeType.EVENT,
                 properties={
-                    "canonical_name": event.description[:40],
+                    "canonical_name": clip_event_description_for_storage(event.description),
                     "aliases": [],
                 },
             )
@@ -82,7 +98,7 @@ def run_state_updater(state: dict, context: WorkflowContext) -> dict:
                     "is_public": True,
                     "known_by": [],
                     "holder": [],
-                    "context_details": "章節結算所屬時代",
+                    "context_details": "Chapter closeout epoch binding",
                 },
             )
         )
@@ -101,7 +117,7 @@ def run_state_updater(state: dict, context: WorkflowContext) -> dict:
                         "is_public": True,
                         "known_by": [],
                         "holder": [],
-                        "context_details": f"{event.caused_by_event_id} 造成了 {event.event_id}",
+                        "context_details": f"{event.caused_by_event_id} caused {event.event_id}",
                     },
                 )
             )
@@ -226,13 +242,13 @@ def _build_node_properties(entity: ExtractedEntity, node_type: NodeType) -> dict
     if entity.metadata:
         properties["metadata"] = dict(entity.metadata)
     if node_type in {NodeType.CHARACTER, NodeType.PERSONA}:
-        properties.setdefault("description", entity.summary or f"{entity.canonical_name} 在章節中出現。")
+        properties.setdefault("description", entity.summary or f"{entity.canonical_name} appears in this chapter.")
         properties.setdefault("is_alive", True)
     if node_type == NodeType.LOCATION:
-        properties.setdefault("environmental_condition", "正常")
+        properties.setdefault("environmental_condition", "normal")
         properties.setdefault("is_accessible", True)
     if node_type == NodeType.ITEM:
-        properties.setdefault("item_status", "完好")
+        properties.setdefault("item_status", "intact")
         properties.setdefault("is_unique", False)
     if node_type == NodeType.EPOCH:
         properties.setdefault("order_index", 0)
@@ -247,10 +263,28 @@ def _build_node_properties(entity: ExtractedEntity, node_type: NodeType) -> dict
 def _coalesce_micro_events(events: list[EventOutline]) -> list[EventOutline]:
     if len(events) < 5:
         return events
-    micro_markers = ("閃避", "揮拳", "出手", "反擊", "翻滾", "轉身", "格擋", "刺擊", "扣下", "躍起")
+    micro_markers = (
+        "閃避",
+        "揮拳",
+        "出手",
+        "反擊",
+        "翻滾",
+        "轉身",
+        "格擋",
+        "刺擊",
+        "扣下",
+        "躍起",
+        "dodge",
+        "punch",
+        "strike",
+        "counter",
+        "roll",
+        "parry",
+        "thrust",
+    )
     if sum(1 for e in events if any(tok in (e.description or "") for tok in micro_markers)) < 4:
         return events
-    merged_desc = "；".join((e.description or "").strip() for e in events if (e.description or "").strip())
+    merged_desc = "; ".join((e.description or "").strip() for e in events if (e.description or "").strip())
     merged_event = EventOutline(
         event_id=events[-1].event_id,
         description=merged_desc[:300],
@@ -310,7 +344,7 @@ def _resolve_state_mutations(
     for node in existing_nodes_by_id.values():
         by_name[node.canonical_name.casefold()] = (node.node_id, node.node_type)
     out: list[NodeMutation] = []
-    death_tokens = ("死亡", "死去", "斷氣", "喪命")
+    death_tokens = ("死亡", "死去", "斷氣", "喪命", "died", "death", "killed", "fatal")
     for ev in events:
         desc = (ev.description or "").strip()
         if not desc:
@@ -346,7 +380,7 @@ def _build_relation_mutation(
         return None
     if source_id not in known_ids or target_id not in known_ids or source_id == target_id:
         return None
-    if not _is_valid_relation_direction(relation.relation_type, source_id, target_id, node_types):
+    if not relation_direction_is_valid(relation.relation_type, source_id, target_id, node_types):
         return None
     known_by, holder = _resolve_epistemic_audience(
         relation=relation,
@@ -398,59 +432,6 @@ def _resolve_epistemic_audience(
     return [], audience
 
 
-def _is_valid_relation_direction(
-    relation_type: EdgeType,
-    source_id: str,
-    target_id: str,
-    node_types: dict[str, NodeType],
-) -> bool:
-    source_type = node_types.get(source_id)
-    target_type = node_types.get(target_id)
-    if source_type is None or target_type is None:
-        return True
-
-    direction_rules: dict[EdgeType, tuple[set[NodeType], set[NodeType]]] = {
-        EdgeType.HAS_ITEM: (
-            {NodeType.CHARACTER, NodeType.PERSONA, NodeType.LOCATION},
-            {NodeType.ITEM},
-        ),
-        EdgeType.LOCATED_IN: (
-            {NodeType.CHARACTER, NodeType.PERSONA, NodeType.ITEM, NodeType.EVENT},
-            {NodeType.LOCATION},
-        ),
-        EdgeType.PARTICIPATED_IN: (
-            {NodeType.CHARACTER, NodeType.PERSONA},
-            {NodeType.EVENT},
-        ),
-        EdgeType.BELONGS_TO_EPOCH: (
-            {NodeType.EVENT},
-            {NodeType.EPOCH},
-        ),
-        EdgeType.CAUSED: (
-            {NodeType.EVENT},
-            {NodeType.EVENT},
-        ),
-        EdgeType.ENFORCED_IN: (
-            {NodeType.RULE},
-            {NodeType.LOCATION, NodeType.EPOCH},
-        ),
-        EdgeType.RESTRICTS: (
-            {NodeType.RULE},
-            {NodeType.CHARACTER, NodeType.PERSONA, NodeType.ITEM, NodeType.CONCEPT},
-        ),
-        EdgeType.EXEMPT_FROM: (
-            {NodeType.RULE},
-            {NodeType.CHARACTER, NodeType.PERSONA},
-        ),
-    }
-    allowed_types = direction_rules.get(relation_type)
-    if allowed_types is None:
-        return True
-
-    allowed_source, allowed_target = allowed_types
-    return source_type in allowed_source and target_type in allowed_target
-
-
 def _resolve_relation_node_id(node_id: str, node_name: str, resolved_name_index: dict[str, str]) -> str:
     if node_id:
         return node_id
@@ -490,21 +471,21 @@ def _build_vector_documents(
     }
     summary_chunk = memory.summary or chapter_content_tail_snippet(chapter_content, 320)
     excerpt_chunk = chapter_content[:1200]
-    unresolved_chunk = "；".join(memory.unresolved_threads)
+    unresolved_chunk = "; ".join(memory.unresolved_threads)
     documents = [
         VectorDocument(
-            text_chunk=f"第{state['chapter_id']}章摘要：{summary_chunk}",
+            text_chunk=f"Chapter {state['chapter_id']} summary: {summary_chunk}",
             metadata={**common_metadata, "memory_type": "chapter_summary"},
         ),
         VectorDocument(
-            text_chunk=f"第{state['chapter_id']}章片段：{excerpt_chunk}",
+            text_chunk=f"Chapter {state['chapter_id']} excerpt: {excerpt_chunk}",
             metadata={**common_metadata, "memory_type": "chapter_excerpt"},
         ),
     ]
     if unresolved_chunk:
         documents.append(
             VectorDocument(
-                text_chunk=f"第{state['chapter_id']}章未解線索：{unresolved_chunk}",
+                text_chunk=f"Chapter {state['chapter_id']} unresolved threads: {unresolved_chunk}",
                 metadata={**common_metadata, "memory_type": "unresolved_threads"},
             )
         )
@@ -613,7 +594,7 @@ def _resolve_location_name(
     existing_nodes_by_id: dict[str, GraphNode],
 ) -> str:
     if location_id == "loc_unknown":
-        return "未明地點"
+        return "unknown_location"
     entity = resolved_entities.get(location_id)
     if entity:
         return str(entity["properties"].get("canonical_name", location_id))

@@ -21,3 +21,5 @@ class WorkflowContext:
     vector_store: VectorStore
     llm_client: LLMClient
     run_id: str
+    """BCP-47 style story setting: en | zh-Hant | zh-Hans."""
+    output_language: str = "zh-Hant"

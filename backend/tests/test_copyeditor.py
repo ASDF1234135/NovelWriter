@@ -89,14 +89,14 @@ def test_run_copyeditor_includes_completed_prev_tails_in_prompt(monkeypatch, tmp
     assert "AAAA_CLOSE" in pr or "AAAA" in pr
     assert "BBBB_CLOSE" in pr or "BBBB" in pr
     assert "第3章" in pr
-    assert "Jargon Pruning" in pr
-    assert "虛空節點：坍塌區" in pr
+    assert "jargon pruning" in pr.casefold()
+    assert "Void Node: Collapse Zone" in pr
 
 
 def test_get_profile_copyeditor_registered() -> None:
     p = get_profile("copyeditor")
     assert p.agent_name == "copyeditor"
-    assert "校閱" in p.system_prompt
+    assert "line/copy editor" in p.system_prompt
 
 
 def test_copyeditor_redacts_forbidden_identity_in_output(tmp_path) -> None:

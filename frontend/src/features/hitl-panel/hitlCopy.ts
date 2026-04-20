@@ -9,6 +9,7 @@ export const HITL_REASON = {
   ENDING_VIBE: "Ending_Vibe_Cooldown_Violation",
   CONTEXT: "Context_Length_Exceeded",
   ALIGNMENT_RULES_REQUIRED: "Alignment_Rules_Required",
+  OUTPUT_LANGUAGE: "Output_Language_Mismatch",
 } as const;
 
 export type HitlReasonValue = (typeof HITL_REASON)[keyof typeof HITL_REASON];
@@ -37,6 +38,7 @@ const RESUME_TO_STEP_INDEX: Record<string, number> = {
   draft_supervisor: 6,
   reader: 7,
   extraction_gate: 8,
+  output_language_gate: 9,
   chapter_summarizer: 9,
   b_story_resolve: 9,
   state_updater: 10,
@@ -52,6 +54,7 @@ const REASON_TO_STEP_INDEX: Partial<Record<string, number>> = {
   [HITL_REASON.DRAFT_LOOP]: 5,
   [HITL_REASON.EXTRACTION_GATE]: 7,
   [HITL_REASON.B_STORY]: 8,
+  [HITL_REASON.OUTPUT_LANGUAGE]: 9,
 };
 
 export function getStuckFlowStepIndex(reason: string, resumeFrom: string): number {
@@ -105,6 +108,10 @@ const HITL_SITUATION_COPY: Record<string, { title: string; why: string }> = {
     title: "偵測到複雜智鬥，需補充規則",
     why: "草稿包含高複雜智鬥元素，但缺少可執行的硬性規則。請補充勝負條件、回合/判定流程與籌碼代價，系統才能安全對齊後續正文。",
   },
+  [HITL_REASON.OUTPUT_LANGUAGE]: {
+    title: "輸出語言與專案設定不一致",
+    why: "系統用簡單規則檢查本章正文的主要字母類型，發現可能與故事「輸出語言」設定不符。您可以退回撰寫依設定語言重寫，或確認後略過檢查繼續彙總。",
+  },
 };
 
 export function getSituationCopy(reason: string): { title: string; why: string } {
@@ -124,6 +131,8 @@ export const OPTION_DECISION_HINTS: Record<string, string> = {
   keep_current_logic: "維持劇情邏輯，重置內文重試次數，請接著修改正文或補線索。",
   relax_word_count: "放寬字數目標約四成，讓內文審核較易通過。",
   extraction_return_author: "先不對照設定表，回到撰寫階段修改內文用詞與指涉。",
+  language_return_author: "回到撰寫，依專案設定的輸出語言重寫本章正文。",
+  language_force_continue: "接受目前正文並略過語言檢查，繼續進入章節彙總與收尾流程。",
 };
 
 function asRecord(v: unknown): Record<string, unknown> | null {

@@ -3,6 +3,7 @@ import pytest
 from app.domain.schema import (
     ChapterType,
     ConflictType,
+    PlotSummarySource,
     ResolutionMethod,
     StoryInput,
 )
@@ -17,7 +18,7 @@ from app.services.llm import MockLLMClient
 from app.services.vector_store import InMemoryVectorStore
 from app.services.workflow.context import WorkflowContext
 from app.services.workflow.nodes.chapter_summarizer import run_chapter_summarizer
-from app.services.workflow.service import WorkflowService
+from app.services.workflow.service import ChapterSummaryRegenerateFailed, WorkflowService
 
 
 def build_service(db_path: str) -> WorkflowService:
@@ -166,6 +167,7 @@ def test_chapter_summarizer_node_writes_chapter_and_milestone_mock(tmp_path) -> 
     assert len(recent) == 1
     assert recent[0]["chapter_id"] == 5
     assert recent[0]["conflict_type"] == ConflictType.OTHER.value
+    assert recent[0]["plot_summary_source"] == PlotSummarySource.CHAPTER_SUMMARIZER_LLM.value
 
     all_milestones = service.story_repository.list_all_milestones(sid)
     assert len(all_milestones) == 1
@@ -218,14 +220,137 @@ def test_chapter_summarizer_node_fails_open_without_writing(tmp_path) -> None:
         },
     }
 
-    # Should not raise; should still upsert placeholder chapter summary,
-    # but milestone generation should be skipped because plot_summary is empty.
+    # Should not raise; upsert extraction-memory fallback summary.
     run_chapter_summarizer(state, context)
 
     recent = service.story_repository.get_recent_chapter_summaries(sid, before_chapter_id=6, limit=3)
     assert len(recent) == 1
     assert recent[0]["chapter_id"] == 5
     assert recent[0]["conflict_type"] == ConflictType.OTHER.value
-    assert recent[0]["plot_summary"] == ""
+    assert recent[0]["plot_summary"] == "摘要（fail）"
+    assert recent[0]["plot_summary_source"] == PlotSummarySource.FALLBACK_EXTRACTION.value
     assert service.story_repository.list_all_milestones(sid) == []
+
+
+def test_chapter_summarizer_fallback_draft_when_no_extraction_summary(tmp_path) -> None:
+    class FailingLLM:
+        def invoke_json(self, *args, **kwargs):  # noqa: ANN001, D401
+            raise RuntimeError("boom")
+
+    service = build_service(str(tmp_path / "chapter_summarizer_draft_fb.sqlite3"))
+    story = service.create_story(
+        StoryInput(
+            title="測試故事",
+            premise="副本測試用。",
+            bible={},
+            target_total_words=30000,
+        )
+    )
+    sid = story["story_id"]
+
+    context = WorkflowContext(
+        story_repository=service.story_repository,
+        workflow_repository=service.workflow_repository,
+        bible_service=service.bible_service,
+        anchor_service=service.anchor_service,
+        graph_store=service.graph_store,
+        vector_store=service.vector_store,
+        llm_client=FailingLLM(),
+        run_id="test",
+    )
+
+    long_draft = "本章正文開頭" + ("x" * 800)
+    state = {
+        "story_id": sid,
+        "chapter_id": 2,
+        "chapter_type": ChapterType.PLOT_DRIVEN,
+        "b_story_directive": "",
+        "narrative_directive": "",
+        "best_draft_content": long_draft,
+        "ground_truth_events": [],
+        "pending_chapter_extraction": {
+            "chapter_memory": {
+                "summary": "",
+                "unresolved_threads": [],
+                "notable_entities": [],
+                "latest_location": "",
+            },
+            "entities": [],
+        },
+    }
+
+    run_chapter_summarizer(state, context)
+
+    recent = service.story_repository.get_recent_chapter_summaries(sid, before_chapter_id=3, limit=3)
+    assert len(recent) == 1
+    assert recent[0]["plot_summary_source"] == PlotSummarySource.FALLBACK_DRAFT.value
+    assert recent[0]["plot_summary"].startswith("[備援摘要]")
+
+
+def test_regenerate_chapter_plot_summary_mock(tmp_path) -> None:
+    service = build_service(str(tmp_path / "regen_summary.sqlite3"))
+    story = service.create_story(
+        StoryInput(
+            title="測試故事",
+            premise="副本測試用。",
+            bible={},
+            target_total_words=30000,
+        )
+    )
+    sid = story["story_id"]
+    body = "章節內文用於重新產生摘要。" * 20
+    service.story_repository.upsert_chapter_content(sid, 3, title="C3", content=body, status="completed")
+
+    out = service.regenerate_chapter_plot_summary(sid, 3)
+    assert out["regenerated"] is True
+    assert out["plot_summary_source"] == PlotSummarySource.CHAPTER_SUMMARIZER_LLM.value
+
+    rows = service.story_repository.get_chapter_summaries_in_range(sid, 3, 3)
+    assert len(rows) == 1
+    assert rows[0]["plot_summary_source"] == PlotSummarySource.CHAPTER_SUMMARIZER_LLM.value
+
+
+def test_regenerate_chapter_plot_summary_empty_body(tmp_path) -> None:
+    service = build_service(str(tmp_path / "regen_empty.sqlite3"))
+    story = service.create_story(
+        StoryInput(
+            title="測試故事",
+            premise="副本測試用。",
+            bible={},
+            target_total_words=30000,
+        )
+    )
+    sid = story["story_id"]
+    service.story_repository.upsert_chapter_content(sid, 2, title="C2", content="   ", status="draft")
+    with pytest.raises(ValueError, match="Chapter has no content"):
+        service.regenerate_chapter_plot_summary(sid, 2)
+
+
+def test_regenerate_chapter_plot_summary_failing_llm(tmp_path) -> None:
+    class FailingLLM:
+        def invoke_json(self, *args, **kwargs):  # noqa: ANN001, D401
+            raise RuntimeError("boom")
+
+    db = SQLiteDatabase(str(tmp_path / "regen_fail.sqlite3"))
+    service = WorkflowService(
+        story_repository=StoryRepository(db),
+        workflow_repository=WorkflowRepository(db),
+        bible_service=BibleService(),
+        anchor_service=AnchorService(),
+        graph_store=InMemoryGraphStore(),
+        vector_store=InMemoryVectorStore(),
+        llm_client=FailingLLM(),
+    )
+    story = service.create_story(
+        StoryInput(
+            title="測試故事",
+            premise="副本測試用。",
+            bible={},
+            target_total_words=30000,
+        )
+    )
+    sid = story["story_id"]
+    service.story_repository.upsert_chapter_content(sid, 1, title="C1", content="正文" * 50, status="completed")
+    with pytest.raises(ChapterSummaryRegenerateFailed):
+        service.regenerate_chapter_plot_summary(sid, 1)
 

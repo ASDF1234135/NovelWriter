@@ -16,7 +16,7 @@ def coerce_new_elements_items(items: list[Any] | None) -> list[dict[str, Any]]:
     return out
 
 from app.core.config import get_settings
-from app.domain.schema import EventOutline, StoryCastMemberStored
+from app.domain.schema import BeatOutline, EventOutline, StoryCastMemberStored
 from app.domain.state import (
     SafeAuthorPayload,
     SafePlannerPayload,
@@ -37,7 +37,18 @@ from app.services.workflow.constants import (
     PLAN_SUPERVISOR_BEAT_STRING_CAP,
     VISIBLE_UNACHIEVED_ANCHOR_LIMIT,
 )
-from app.services.workflow.utils import normalized_text_length
+from app.services.workflow.identity_rules import extract_identity_tokens, looks_like_identity_rule
+from app.services.workflow.output_language import (
+    default_chapter_target_words,
+    milestone_arc_markers,
+    normalize_output_language,
+)
+from app.services.workflow.utils import (
+    chapter_content_length,
+    latin_word_boundary_search,
+    latin_word_boundary_sub,
+    looks_like_latin_word,
+)
 
 
 def visible_unachieved_anchors(state: dict[str, Any]) -> list[dict[str, Any]]:
@@ -85,7 +96,11 @@ def build_planner_payload(state: dict, story: dict | None = None, volumes: list[
         continuity_notes=state.get("continuity_notes", []),
         recent_entity_names=state.get("recent_entity_names", []),
         prior_feedback=state["plan_feedback"],
-        default_chapter_words=int(state.get("target_word_count") or settings.default_chapter_words),
+        default_chapter_words=(
+            twc
+            if (twc := int(state.get("target_word_count") or 0)) > 0
+            else default_chapter_target_words(normalize_output_language(str(state.get("story_output_language") or "")))
+        ),
         chapter_word_min=settings.chapter_word_min,
         chapter_word_max=settings.chapter_word_max,
         chapter_type=str(state.get("chapter_type") or "PLOT_DRIVEN"),
@@ -120,17 +135,22 @@ def build_author_payload(state: dict) -> SafeAuthorPayload:
         forbidden_reveals=list(state.get("forbidden_reveals") or []),
         allowed_reveals=list(state.get("allowed_identity_reveals_this_chapter") or []),
     )
+    ol = normalize_output_language(str(state.get("story_output_language") or ""))
     active_profiles = _build_active_character_profiles(
         int(state.get("chapter_id") or 0),
         list(state.get("cast_slim_view") or []),
         list(state.get("recent_entity_names") or []),
         list(state.get("cast_full_view") or []),
+        output_language=ol,
     )
     return SafeAuthorPayload(
         narrative_script=state["narrative_script"],
         chapter_start_location=state.get("chapter_start_location", ""),
         author_goal=state.get("author_goal", ""),
         must_include_beats=state.get("must_include_beats", []),
+        must_include_beat_outlines=[
+            BeatOutline.model_validate(row) for row in list(state.get("must_include_beat_outlines") or [])
+        ],
         reader_visible_facts=state.get("reader_visible_facts", []),
         reader_unresolved_questions=state.get("reader_unresolved_questions", []),
         chapter_end_location_hint=state.get("chapter_end_location_hint", ""),
@@ -166,6 +186,8 @@ def _build_active_character_profiles(
     cast_slim_view: list[dict[str, Any]],
     recent_entity_names: list[str],
     cast_full_view: list[dict[str, Any]],
+    *,
+    output_language: str,
 ) -> list[dict[str, str]]:
     full_index: dict[str, StoryCastMemberStored] = {}
     for raw in cast_full_view:
@@ -196,9 +218,10 @@ def _build_active_character_profiles(
                     continue
                 prev_tag = max(int(milestone.chapter_id or 0) - 1, 0)
                 after_tag = int(milestone.chapter_id or 0)
+                before_br, after_br = milestone_arc_markers(prev_tag, after_tag, output_language)
                 chunks.append(
-                    f"[第{prev_tag}章前]{milestone.old_personality or '未記錄'}; "
-                    f"[第{after_tag}章後]{milestone.new_personality or '未記錄'}"
+                    f"{before_br}{milestone.old_personality or '未記錄'}; "
+                    f"{after_br}{milestone.new_personality or '未記錄'}"
                 )
             past_ref = "；".join(chunks[:3])
         rows.append(
@@ -243,6 +266,9 @@ def build_plan_supervisor_payload(state: dict) -> SafeSupervisorPayload:
         ending_boundary_rule=state.get("ending_boundary_rule", ""),
         forbidden_next_scene_actions=state.get("forbidden_next_scene_actions", []),
         must_include_beats=state.get("must_include_beats", []),
+        must_include_beat_outlines=[
+            BeatOutline.model_validate(row) for row in list(state.get("must_include_beat_outlines") or [])
+        ],
         graph_context=state["graph_context"],
         vector_context=state["vector_context"],
         bible_context=state["bible_context"],
@@ -281,7 +307,9 @@ def build_draft_supervisor_payload(state: dict) -> SafeSupervisorPayload:
         chapter_word_min=settings.chapter_word_min,
         chapter_word_max=settings.chapter_word_max,
         words_per_beat_floor=settings.plan_supervisor_words_per_beat_floor,
-        normalized_current_draft_length=normalized_text_length(state["current_draft"]),
+        normalized_current_draft_length=chapter_content_length(
+            state["current_draft"], str(state.get("story_output_language") or "")
+        ),
         previous_chapter_summary=state.get("previous_chapter_summary", ""),
         recent_chapter_context=state.get("recent_chapter_context", ""),
         last_known_location=state.get("last_known_location", ""),
@@ -292,6 +320,9 @@ def build_draft_supervisor_payload(state: dict) -> SafeSupervisorPayload:
         ending_boundary_rule=state.get("ending_boundary_rule", ""),
         forbidden_next_scene_actions=state.get("forbidden_next_scene_actions", []),
         must_include_beats=state.get("must_include_beats", []),
+        must_include_beat_outlines=[
+            BeatOutline.model_validate(row) for row in list(state.get("must_include_beat_outlines") or [])
+        ],
         current_draft=state["current_draft"],
         graph_context=state["graph_context"],
         vector_context=state["vector_context"],
@@ -423,44 +454,37 @@ def _collect_blocked_identity_terms(forbidden_reveals: list[str], allowed_reveal
         if not isinstance(row, str) or not row.strip():
             continue
         txt = row.strip()
-        if not _looks_like_identity_rule(txt):
+        if not looks_like_identity_rule(txt):
             continue
-        for token in _extract_identity_tokens(txt):
+        for token in extract_identity_tokens(txt):
             if token not in allow:
                 blocked.add(token)
     return sorted(blocked, key=len, reverse=True)
 
 
-def _looks_like_identity_rule(text: str) -> bool:
-    markers = ("身分", "身份", "真名", "真相", "其實是", "真正是", "revea")
-    return any(m in text for m in markers)
-
-
-def _extract_identity_tokens(text: str) -> list[str]:
-    candidates: set[str] = set()
-    for pat in (r"「([^」]{1,30})」", r"'([^']{1,30})'", r"\"([^\"]{1,30})\""):
-        for m in re.findall(pat, text):
-            t = m.strip()
-            if t:
-                candidates.add(t)
-    for pat in (r"(?:其實是|真正是|就是)([A-Za-z\u4e00-\u9fff]{2,20})",):
-        for m in re.findall(pat, text):
-            t = m.strip()
-            if t:
-                candidates.add(t)
-    return sorted(candidates)
-
-
 def _contains_any_term(text: str, terms: list[str]) -> bool:
-    lowered = text.casefold()
-    return any(term.casefold() in lowered for term in terms)
+    hay = str(text or "")
+    lowered = hay.casefold()
+    for term in terms:
+        if not term:
+            continue
+        if looks_like_latin_word(term):
+            if latin_word_boundary_search(term, hay):
+                return True
+            continue
+        if str(term).casefold() in lowered:
+            return True
+    return False
 
 
 def _redact_text_with_terms(text: str, terms: list[str]) -> str:
     out = text
     for term in terms:
         if term:
-            out = re.sub(re.escape(term), "[REDACTED_IDENTITY]", out, flags=re.IGNORECASE)
+            if looks_like_latin_word(term):
+                out = latin_word_boundary_sub(term, "[REDACTED_IDENTITY]", out)
+            else:
+                out = re.sub(re.escape(term), "[REDACTED_IDENTITY]", out, flags=re.IGNORECASE)
     return out
 
 

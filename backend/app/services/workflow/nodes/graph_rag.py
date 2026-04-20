@@ -60,6 +60,7 @@ def run_graph_rag(state: dict, context: WorkflowContext) -> dict:
             vector_hits,
             pov_character_id=resolved_pov_character_id,
             active_epoch_id=state["active_epoch_id"],
+            output_language=context.output_language,
         )
         location_id = resolve_pov_location_node_id(
             graph_snapshot,

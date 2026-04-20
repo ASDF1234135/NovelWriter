@@ -12,6 +12,7 @@ import type {
   StoryPatch,
   WorkflowPayload,
   WritingPreambleResponse,
+  RegenerateChapterSummaryResponse,
 } from "./types";
 
 const API_BASE = "http://localhost:8000/api";
@@ -243,21 +244,6 @@ export async function sendDirectorPatch(
   return parseJson(response);
 }
 
-/** Surface hints must be passed to {@link runChapter} before the workflow starts. */
-export async function sendExtractionHints(
-  _runId: string,
-  _payload: {
-    entries: Array<{ node_id: string; surface_forms: string[] }>;
-    resume_from?: string;
-    waive_mandatory_node_ids?: string[];
-    reason?: string;
-  },
-): Promise<WorkflowPayload> {
-  throw new Error(
-    "專名線索請在「開始撰寫本章」時一併送出（runChapter 的 extractionSurfaceHints / waiveMandatoryNodeIds）；HITL 端點已停用。",
-  );
-}
-
 export async function sendExtractionRemap(
   runId: string,
   payload: {
@@ -391,6 +377,17 @@ export async function fetchChapter(storyId: string, chapterId: number): Promise<
 export async function fetchWritingPreamble(storyId: string, chapterId: number): Promise<WritingPreambleResponse> {
   const response = await fetch(
     `${API_BASE}/stories/${encodeURIComponent(storyId)}/chapters/${chapterId}/writing-preamble`,
+  );
+  return parseJson(response);
+}
+
+export async function regenerateChapterSummary(
+  storyId: string,
+  chapterId: number,
+): Promise<RegenerateChapterSummaryResponse> {
+  const response = await fetch(
+    `${API_BASE}/stories/${encodeURIComponent(storyId)}/chapters/${chapterId}/regenerate-summary`,
+    { method: "POST" },
   );
   return parseJson(response);
 }

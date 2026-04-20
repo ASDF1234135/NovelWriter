@@ -84,8 +84,8 @@ def test_extraction_gate_message_includes_planned_labels_and_fallback_notice(wf_
     assert "char_slot" in msg
     assert "黑市商人" in msg
     assert "商人" in msg
-    assert "【系統提示】" in msg
-    assert "後備流程" in msg
+    assert "[System notice]" in msg
+    assert "fallback mode" in msg
 
     entry = out["extraction_gate_feedback_entry"]
     assert entry["missing_mandatory_entities"]

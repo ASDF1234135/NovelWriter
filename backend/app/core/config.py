@@ -65,7 +65,14 @@ class Settings(BaseSettings):
     # Chapter word targets (Planner output is clamped; independent of volume budgets).
     chapter_word_min: int = 800
     chapter_word_max: int = 12000
+    # Non-English output_language defaults (zh-Hans / zh-Hant / other).
     default_chapter_words: int = 2500
+    # English (en) per-chapter target in words (whitespace tokens); calibrated from legacy isalnum gate (~1800 letters ≈ ~360 words).
+    default_chapter_words_en: int = 360
+    # Macro compile: assumed chapters per volume when deriving volume count from target_total_words.
+    macro_chapters_per_volume: int = 10
+    # Macro compile for English only: chapter divisor for target_total_words (legacy ~alnum-per-chapter scale; decoupled from workflow word targets).
+    macro_english_chapter_unit: int = 1800
     # Plan supervisor: heuristic min normalized words per must_include_beat.
     plan_supervisor_words_per_beat_floor: int = 200
     cors_origins: str = Field(default="http://localhost:5173")

@@ -9,7 +9,7 @@ def test_normalize_director_output_world_building_when_b_story_pool_has_no_ids()
     raw = {"chapter_type": "PLOT_DRIVEN", "b_story_directive": "", "new_elements_to_introduce": []}
     out = normalize_director_output(state, raw)
     assert out["chapter_type"] == ChapterType.WORLD_BUILDING.value
-    assert "探索周遭環境" in (out.get("b_story_directive") or "")
+    assert "Explore surroundings" in (out.get("b_story_directive") or "")
 
 
 def test_director_prompt_includes_story_premise_volume_summary_and_anchor_description() -> None:
@@ -40,17 +40,17 @@ def test_director_prompt_includes_story_premise_volume_summary_and_anchor_descri
         bible_context="世界規則：皇室血脈涉及禁忌契約。",
     )
 
-    assert "## 故事核心" in prompt
+    assert "## Story core" in prompt
     assert "story_premise: 一名被流放的年輕騎士回到王都，追查皇室命案背後的真正凶手。" in prompt
     assert "volume_summary: 建立世界與主角困境，鋪設核心衝突。" in prompt
-    assert "本章字數由後續 Planner 決定" in prompt
+    assert "chapter length is decided later by Planner" in prompt
     assert "current_anchor_description: 主角離開原本安穩場域，正式捲入主線。" in prompt
     assert "visible_unachieved_anchors" in prompt
     assert "anchor_01" in prompt
     assert "bible_context: 世界規則：皇室血脈涉及禁忌契約。" in prompt
-    assert "請決定 chapter_type（PLOT_DRIVEN / CHARACTER_DRIVEN / WORLD_BUILDING）、POV、Epoch、tone、narrative_directive" in prompt
-    assert "narrative_directive 必須明確指出本章要新增的劇情推進" in prompt
-    assert "起點、目的地或章末有效位置" in prompt
+    assert "Choose chapter_type (PLOT_DRIVEN / CHARACTER_DRIVEN / WORLD_BUILDING), POV, Epoch, tone, narrative_directive" in prompt
+    assert "narrative_directive must name new plot advancement" in prompt
+    assert "start, destination, or end-of-chapter effective position" in prompt
 
 
 def test_director_prompt_includes_previous_chapter_tail_excerpt() -> None:
@@ -124,17 +124,17 @@ def test_director_prompt_includes_milestones_recent3_and_global_top3() -> None:
         bible_context="世界規則：皇室血脈涉及禁忌契約。",
     )
 
-    assert "宏觀節奏記憶（至今所有 milestone）" in prompt
+    assert "## Macro rhythm memory (all milestones to date)" in prompt
     assert "MS(6-10)" in prompt
-    assert "最近 3 章結構化摘要" in prompt
-    assert "第9章事件推進" in prompt
-    assert "全局套路統計（Top-3）" in prompt
+    assert "## Last ~3 chapter structured summaries" in prompt
+    assert "Ch.9: 第9章事件推進" in prompt
+    assert "## Global trope stats (Top-3)" in prompt
     assert "MYSTERY: 4" in prompt
-    assert "系統強制約束" in prompt
+    assert "## System hard constraints (must obey)" in prompt
     assert "禁止重複精神對決" in prompt
     assert "ACTION_CLIFFHANGER" in prompt
-    assert "Lore 謎團進度樹" in prompt
-    assert "Writing Notes（全域寫作規定）" in prompt
+    assert "## Lore mystery progression (pending stages)" in prompt
+    assert "## Writing notes (global craft rules)" in prompt
     assert "短句優先" in prompt
 
 
@@ -175,11 +175,11 @@ def test_planner_prompt_includes_story_premise_volume_summary_and_anchor_descrip
         )
     )
 
-    assert "## 字數與本章內容（必做）" in prompt
+    assert "## Word budget and chapter scope (required)" in prompt
     assert "target_word_count" in prompt
     assert "800 ~ 12000" in prompt
-    assert "## 前情提要" in prompt
-    assert "## 本章劇情發展方向" in prompt
+    assert "## Continuity context" in prompt
+    assert "## Chapter narrative direction" in prompt
     assert "- story_premise: 一名被流放的年輕騎士回到王都，追查皇室命案背後的真正凶手。" in prompt
     assert "- active_epoch: epoch_present" in prompt
     assert "- pov_character: char_public_observer" in prompt
@@ -190,18 +190,18 @@ def test_planner_prompt_includes_story_premise_volume_summary_and_anchor_descrip
     assert "- vector_context: {}" in prompt
     assert "- previous_chapter_summary: 上一章主角收到密信。" in prompt
     assert "- last_known_location: 王都南門。" in prompt
-    assert "## 上一版規劃（供修正參考）" in prompt
+    assert "## Prior plan attempt (for revision)" in prompt
     assert "previous_attempt_ground_truth_events" in prompt
     assert "主角收到密信後準備返城。" in prompt
     assert "- continuity_notes: ['灰鴉的警告尚未處理。']" in prompt
     assert "- recent_entities: ['Kaelen', '灰鴉']" in prompt
     assert "- prior_feedback: []" in prompt
-    assert "若上方已提供 previous_attempt_ground_truth_events 或 previous_attempt_narrative_script" in prompt
-    assert "優先保留已經合理的事件鏈與章節方向" in prompt
-    assert "ground_truth_events 每一條都必須代表本章新增的狀態變化" in prompt
-    assert "事件粒度規則（硬性）" in prompt
-    assert "連續戰鬥或連續對話預設聚合為單一宏觀 EVENT" in prompt
-    assert "不得把上一章已完成的交易、發現、對話或衝突" in prompt
+    assert "If previous_attempt_ground_truth_events or previous_attempt_narrative_script is present" in prompt
+    assert "keep sound event chains and chapter direction" in prompt
+    assert "Each ground_truth_events row must encode a new state change for this chapter" in prompt
+    assert "Event granularity (hard)" in prompt
+    assert "default-merge continuous fights or continuous dialogue into one macro EVENT" in prompt
+    assert "Do not repackage completed trades, discoveries, dialogues, or conflicts" in prompt
     assert "author_goal" in prompt
     assert "must_include_beats" in prompt
     assert "reader_visible_facts" in prompt
@@ -210,18 +210,18 @@ def test_planner_prompt_includes_story_premise_volume_summary_and_anchor_descrip
     assert "chapter_start_location" in prompt
     assert "chapter_end_location_hint" in prompt
     assert "ending_boundary_rule" in prompt
-    assert "空間與邊界邏輯一致性" in prompt
+    assert "Spatial/boundary consistency (hard)" in prompt
     assert "mandatory: true" in prompt
-    assert "嚴禁要求 Author 寫出超出邊界之外" in prompt
+    assert "Never require the Author to stage entity contact or scenes that belong after the boundary" in prompt
     assert "forbidden_next_scene_actions" in prompt
     assert "forbidden_reveals" in prompt
     assert "author_safe_continuity_notes" in prompt
-    assert "不可原句貼給 author" in prompt
+    assert "do not paste them verbatim to the author" in prompt
     assert "lore_mysteries_progression" in prompt
     assert "ending_vibe_cooldown_constraint" in prompt
     assert "writing_note_rules" in prompt
-    assert "本章新重要實體配額：允許 0 個" in prompt
-    assert "最多 2 條" in prompt
+    assert "New important-entity quota: 0 by default" in prompt
+    assert "At most 2 nodes" in prompt
 
 
 def test_planner_prompt_includes_previous_chapter_tail_excerpt() -> None:

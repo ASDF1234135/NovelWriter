@@ -104,40 +104,6 @@ def test_plan_supervisor_requires_anchor_completion_on_target_chapter(tmp_path) 
     assert "ANCHOR_DIVERGENCE" in output["violation_type"]
 
 
-def test_plan_supervisor_timeline_rollback_heuristic_is_soft_warning_only(tmp_path) -> None:
-    context = build_context(str(tmp_path / "plan_supervisor_rollback.sqlite3"))
-    state = {
-        "chapter_id": 2,
-        "active_epoch_id": "epoch_present",
-        "target_anchor_id": "anchor_06",
-        "unachieved_anchors": [{"anchor_id": "anchor_06", "chapter_target": 6}],
-        "ground_truth_events": [
-            {
-                "event_id": "e002",
-                "description": "主角收到密信，決定回城調查。",
-                "caused_by_event_id": None,
-            }
-        ],
-        "narrative_script": "本章再次讓主角收到密信，並決定回城調查。",
-        "chapter_start_location": "城外驛站",
-        "chapter_end_location_hint": "城外驛站",
-        "must_include_beats": ["收到密信", "決定回城"],
-        "previous_chapter_summary": "主角收到密信，決定回城調查。",
-        "recent_chapter_context": "第1章：主角收到密信，決定回城調查。",
-        "last_known_location": "城外驛站",
-        "graph_context": "{}",
-        "vector_context": "{}",
-        "bible_context": "{}",
-        "target_word_count": 2500,
-    }
-
-    output, _ = run_plan_supervisor(state, context)
-
-    assert output["is_approved"] is True
-    assert "INCONSISTENCY" not in output["violation_type"]
-    assert any("時序重演" in w for w in (output.get("soft_warnings") or []))
-
-
 def test_plan_supervisor_rejects_word_count_below_beat_floor(tmp_path) -> None:
     context = build_context(str(tmp_path / "plan_supervisor_words.sqlite3"))
     state = {
@@ -253,12 +219,12 @@ def test_plan_supervisor_prompt_includes_boundary_entity_conflict_rule() -> None
     payload = SafeSupervisorPayload(chapter_id=1, current_chapter_id=1, active_epoch_id="epoch_present")
     prompt = _build_plan_supervisor_prompt(payload)
     assert "13." in prompt
-    assert "邊界與實體衝突檢查" in prompt
+    assert "Boundary / mandatory-entity conflict" in prompt
     assert "ending_boundary_rule" in prompt
     assert "proposed_new_nodes" in prompt
 
 
 def test_plan_supervisor_profile_mentions_boundary_and_mandatory_entities() -> None:
     text = get_profile("plan_supervisor").system_prompt
-    assert "章末邊界" in text
-    assert "必選圖節點" in text
+    assert "chapter-end boundaries" in text
+    assert "mandatory graph nodes" in text

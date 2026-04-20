@@ -7,6 +7,7 @@ from app.domain.schema import BStoryType, ChapterType, DirectorNewElement, Direc
 from app.services.llm import MockLLMClient
 from app.services.workflow.context import WorkflowContext
 from app.services.workflow.masking import visible_unachieved_anchors
+from app.services.workflow.output_language import augment_profile_system_prompt
 from app.services.workflow.profiles import get_profile
 
 
@@ -32,7 +33,7 @@ def normalize_director_output(state: dict, raw: dict) -> dict:
             out["chapter_type"] = ChapterType.WORLD_BUILDING.value
             out["b_story_directive"] = (
                 bdir
-                or "探索周遭環境與風土民情，累積感官與生活細節，不強制推進主線。"
+                or "Explore surroundings and local texture; accumulate sensory and everyday detail without forcing the main plot."
             )
             out.setdefault("b_story_type", BStoryType.UNKNOWN.value)
     if dval is not None and dval <= 1:
@@ -53,8 +54,8 @@ def normalize_director_output(state: dict, raw: dict) -> dict:
     if ct in (ChapterType.CHARACTER_DRIVEN.value, ChapterType.WORLD_BUILDING.value) and not neo:
         neo = [
             {
-                "need": "本章敘事變數（背景人物、地點或道具擇一，勿與 graph 既有專名重複）",
-                "reason": "章節類型需要至少一項可觀的新元素，避免只重述前情。",
+                "need": "A chapter-scale narrative variable (pick one: background figure, location, or prop; avoid duplicating existing graph proper names).",
+                "reason": "This chapter type needs at least one tangible new element so the chapter is not only rehashing prior context.",
             }
         ]
     out["new_elements_to_introduce"] = neo
@@ -75,7 +76,7 @@ def run_director(state: dict, context: WorkflowContext) -> dict:
     )
     current_volume = _resolve_current_volume(state["chapter_id"], volumes)
     if not isinstance(context.llm_client, MockLLMClient):
-        profile = get_profile("director")
+        profile = augment_profile_system_prompt(get_profile("director"), context.output_language)
         prompt = _build_director_prompt(
             state, story, volumes, next_anchor, anchor_prompt_window, bible_context, current_volume
         )
@@ -91,11 +92,11 @@ def run_director(state: dict, context: WorkflowContext) -> dict:
         active_epoch_id="epoch_present",
         pov_character_id=state.get("pov_character_id") or "char_public_observer",
         narrative_directive=(
-            f"推進第 {state['chapter_id']} 章，朝向錨點「{next_anchor['title']}」前進"
+            f"Advance chapter {state['chapter_id']} toward anchor “{next_anchor['title']}”"
             if next_anchor
-            else f"推進第 {state['chapter_id']} 章的結局收束"
+            else f"Advance chapter {state['chapter_id']} toward finale closure"
         ),
-        tone_direction="懸疑壓抑",
+        tone_direction="tense, restrained suspense",
         target_anchor_id=next_anchor["anchor_id"] if next_anchor else None,
         chapter_type=mock_type,
         b_story_directive=b_first,
@@ -103,15 +104,15 @@ def run_director(state: dict, context: WorkflowContext) -> dict:
         new_elements_to_introduce=(
             [
                 DirectorNewElement(
-                    need="側寫配角",
-                    reason="本章以人物細節支撐節奏，服務主線調查方向。",
+                    need="Spotlight a supporting character",
+                    reason="Use character texture to pace the chapter and support the investigation thrust.",
                 )
             ]
             if mock_type != ChapterType.PLOT_DRIVEN
             else []
         ),
         request_new_b_story=None,
-        state_operational_brief="（Mock）大綱資訊不足時的簡報：依錨點、副線池與 distance_to_anchor 推進。",
+        state_operational_brief="(Mock) Sparse-outline brief: progress using anchors, B-story pool, and distance_to_anchor.",
     )
     return normalize_director_output(state, output.model_dump(mode="json"))
 
@@ -139,7 +140,7 @@ def _build_director_prompt(
         if cs is None or ce is None or not summ:
             continue
         milestone_lines.append(f"- [{cs}-{ce}]: {summ[:600]}")
-    milestone_block = "\n".join(milestone_lines) if milestone_lines else "-（尚無里程碑摘要）"
+    milestone_block = "\n".join(milestone_lines) if milestone_lines else "- (No milestone summaries yet)"
 
     recent_summaries = state.get("recent_chapter_summaries") or []
     recent_lines: list[str] = []
@@ -152,8 +153,8 @@ def _build_director_prompt(
         rmethod = rs.get("resolution_method") or ""
         if cid is None or not plot:
             continue
-        recent_lines.append(f"- 第{cid}章: {plot[:420]} | conflict_type={ctype} | resolution_method={rmethod}")
-    recent_block = "\n".join(recent_lines) if recent_lines else "-（尚無近期摘要）"
+        recent_lines.append(f"- Ch.{cid}: {plot[:420]} | conflict_type={ctype} | resolution_method={rmethod}")
+    recent_block = "\n".join(recent_lines) if recent_lines else "- (No recent summaries yet)"
 
     top_conf = state.get("global_conflict_type_top3") or []
     top_conf_lines: list[str] = []
@@ -161,7 +162,7 @@ def _build_director_prompt(
         if not isinstance(row, dict):
             continue
         top_conf_lines.append(f"- {row.get('conflict_type')}: {row.get('cnt')}")
-    top_conf_block = "\n".join(top_conf_lines) if top_conf_lines else "-（尚無統計）"
+    top_conf_block = "\n".join(top_conf_lines) if top_conf_lines else "- (No stats yet)"
 
     top_res = state.get("global_resolution_method_top3") or []
     top_res_lines: list[str] = []
@@ -169,7 +170,7 @@ def _build_director_prompt(
         if not isinstance(row, dict):
             continue
         top_res_lines.append(f"- {row.get('resolution_method')}: {row.get('cnt')}")
-    top_res_block = "\n".join(top_res_lines) if top_res_lines else "-（尚無統計）"
+    top_res_block = "\n".join(top_res_lines) if top_res_lines else "- (No stats yet)"
     cooldown = state.get("resolution_cooldown_constraint") or {}
     vibe_cooldown = state.get("ending_vibe_cooldown_constraint") or {}
     writing_note = [str(x).strip() for x in (state.get("writing_note") or []) if str(x).strip()]
@@ -184,10 +185,10 @@ def _build_director_prompt(
         next_stage = pending[0] if isinstance(pending, list) and pending else {}
         if mid and next_stage:
             lore_lines.append(f"- {mid}: {desc} | next_stage={next_stage}")
-    lore_block = "\n".join(lore_lines) if lore_lines else "-（無待揭露謎團階段）"
-    writing_note_block = "\n".join(f"- {x}" for x in writing_note[:10]) if writing_note else "-（無）"
-    cooldown_block = (cooldown.get("ban_text") or "無")
-    vibe_block = (vibe_cooldown.get("interrupt_text") or "無")
+    lore_block = "\n".join(lore_lines) if lore_lines else "- (No pending lore mystery stages)"
+    writing_note_block = "\n".join(f"- {x}" for x in writing_note[:10]) if writing_note else "- (none)"
+    cooldown_block = (cooldown.get("ban_text") or "none")
+    vibe_block = (vibe_cooldown.get("interrupt_text") or "none")
 
     ap = (state.get("chapter_outline") or state.get("author_chapter_plan") or "").strip()
     freedom = str(state.get("ai_freedom_level") or "balanced")
@@ -196,84 +197,84 @@ def _build_director_prompt(
     if ap:
         if bind == "FULL":
             author_plan_block = (
-                "## 本章人類大綱（outline_binding_mode=FULL；在 ai_freedom_level=strict 時已寫明處具約束力）\n"
-                "請勿在 narrative_directive 中發明與下列內容衝突的主線轉折；僅重述／結構化。\n"
+                "## Human chapter outline (outline_binding_mode=FULL; binding when ai_freedom_level=strict)\n"
+                "Do not invent main-plot turns in narrative_directive that contradict the following; only restate/structure.\n"
                 f"{ap[:1600]}\n\n"
             )
         elif bind == "PARTIAL":
             author_plan_block = (
-                "## 本章人類大綱（outline_binding_mode=PARTIAL；片段，留白處交 Planner 補齊）\n"
+                "## Human chapter outline (outline_binding_mode=PARTIAL; fragment—Planner fills blanks)\n"
                 f"{ap[:1600]}\n\n"
             )
         else:
-            author_plan_block = f"## 本章人類大綱\n{ap[:1600]}\n\n"
+            author_plan_block = f"## Human chapter outline\n{ap[:1600]}\n\n"
     mode_block = (
-        "## 執行模式（系統欄位）\n"
+        "## Execution mode (system fields)\n"
         f"- ai_freedom_level: {freedom}\n"
         f"- outline_binding_mode: {bind}\n\n"
     )
 
     return (
-        "## 章節定位\n"
+        "## Chapter placement\n"
         f"- chapter_id: {state['chapter_id']}\n\n"
-        "## 故事核心\n"
+        "## Story core\n"
         f"- story_title: {story.get('title', '')}\n"
         f"- story_premise: {story.get('premise', '')}\n\n"
-        "## 當前卷資訊（敘事節奏參考；本章字數由後續 Planner 決定，與卷字數預算無硬性綁定）\n"
+        "## Current volume (pacing reference; chapter length is decided later by Planner—not hard-tied to volume word budget)\n"
         f"- volume_title: {vol.get('title', '')}\n"
         f"- volume_summary: {vol.get('summary', '')}\n"
         f"- volume_chapter_range: {(vol.get('chapter_start', ''), vol.get('chapter_end', ''))}\n\n"
-        "## 本章主要推進目標\n"
+        "## Primary thrust this chapter\n"
         f"- current_anchor_id: {(next_anchor or {}).get('anchor_id')}\n"
         f"- current_anchor_title: {(next_anchor or {}).get('title', '')}\n"
         f"- current_anchor_description: {(next_anchor or {}).get('description', '')}\n"
-        "- visible_unachieved_anchors: 以下僅列出「最近數個」尚未達成的錨點（滑動視窗），"
-        "供你把握中期節奏；**本章仍以 current_anchor 為主**，勿替更遠的錨點編排具體情節或劇透。\n"
+        "- visible_unachieved_anchors: sliding window of the nearest unfinished anchors for mid-term rhythm; "
+        "**this chapter still centers on current_anchor**—do not script concrete beats or spoilers for far future anchors.\n"
         f"- visible_unachieved_anchors: {json.dumps(visible_unachieved_anchors, ensure_ascii=False)}\n\n"
-        "## 世界與狀態背景\n"
+        "## World and state context\n"
         f"- bible_context: {bible_context[:1800]}\n"
         f"- graph_hint: {state.get('graph_context', '')[:1800]}\n"
         f"- previous_chapter_tail_excerpt: {(state.get('previous_chapter_tail_excerpt') or '')[:800]}\n"
         f"- distance_to_anchor: {state.get('distance_to_anchor')}\n"
         f"- recent_b_story_types: {json.dumps(state.get('recent_b_story_types') or [], ensure_ascii=False)[:800]}\n"
         f"- active_b_stories: {json.dumps(state.get('active_b_stories') or [], ensure_ascii=False)[:1200]}\n\n"
-        "## 宏觀節奏記憶（至今所有 milestone）\n"
+        "## Macro rhythm memory (all milestones to date)\n"
         f"{milestone_block}\n\n"
-        "## 最近 3 章結構化摘要（含衝突類型與收束方式）\n"
+        "## Last ~3 chapter structured summaries (conflict_type + resolution_method)\n"
         f"{recent_block}\n\n"
-        "## 全局套路統計（Top-3）\n"
-        "conflict_type 頻率：\n"
+        "## Global trope stats (Top-3)\n"
+        "conflict_type counts:\n"
         f"{top_conf_block}\n"
-        "resolution_method 頻率：\n"
+        "resolution_method counts:\n"
         f"{top_res_block}\n\n"
-        "## Lore 謎團進度樹（待揭露階段）\n"
+        "## Lore mystery progression (pending stages)\n"
         f"{lore_block}\n\n"
-        "## Writing Notes（全域寫作規定）\n"
+        "## Writing notes (global craft rules)\n"
         f"{writing_note_block}\n\n"
         f"{mode_block}"
         f"{author_plan_block}"
-        "## 系統強制約束（不可違反）\n"
+        "## System hard constraints (must obey)\n"
         f"- resolution_tactic_cooldown: {cooldown_block}\n"
         f"- ending_vibe_cooldown: {vibe_block}\n\n"
-        "## 你的輸出要求\n"
-        "- 必須輸出 state_operational_brief（繁中，條列短句）：錨點距離、副線未解要點、連續性／空間狀態、對 Planner 的執行提醒。\n"
-        "- 請決定 chapter_type（PLOT_DRIVEN / CHARACTER_DRIVEN / WORLD_BUILDING）、POV、Epoch、tone、narrative_directive。\n"
-        "- 若 distance_to_anchor >= 2：chapter_type 必須為 CHARACTER_DRIVEN 或 WORLD_BUILDING，"
-        "並從 active_b_stories 指定一條副線寫入 b_story_directive；同時輸出 b_story_type（必須對應該副線 type）。"
-        "若 b_story_type 落在 recent_b_story_types 禁止清單中，視為違規並需在 HITL 手動修正。\n"
-        "- 反重複規則：請避免重現全局 Top-3 的 conflict_type 與 resolution_method 組合；當你構思時若發現可能落在 Top-3，請轉向其他類型。\n"
-        "- 反套路規則：請避免與最近 3 章的 plot_summary 呈現相同的推進節拍（同類衝突 + 同類收束）。\n"
-        "- 若 distance_to_anchor 為 0 或 1：chapter_type 必須為 PLOT_DRIVEN，並全力收束朝向 target_anchor。\n"
-        "- CHARACTER_DRIVEN 或 WORLD_BUILDING 時 new_elements_to_introduce 至少 1 項；"
-        "每一項為 {need, reason}：need 描述要引入的對象或變數，reason 說明為何本章需要它（推進調查／壓力／資訊缺口等）。"
-        "須避免與 graph 重複專名。\n"
-        "- 若你認為需要拖延主線或增加阻礙、且適合開一條**新**副線：輸出 request_new_b_story {type, purpose}；"
-        "type 必須是 BStoryType 之一，且**不得**落在 recent_b_story_types 冷卻清單。\n"
-        "- 若不需要新副線，request_new_b_story 請輸出 null。\n"
-        "- narrative_directive 必須明確指出本章要新增的劇情推進，不能只寫氛圍延續。\n"
-        "- 若本章涉及移動、潛入、撤離或追逐，必須把起點、目的地或章末有效位置寫清楚。\n"
-        "- 若本章存在秘密行動，narrative_directive 應點出其戲劇功能，但不要把秘密誤寫成任何人都知道的常識。\n"
-        "- 若系統強制約束啟用，你的 narrative_directive 必須明確寫出替代手段與章末節奏，不得沿用被禁套路。\n"
+        "## Output requirements\n"
+        "- You MUST output state_operational_brief as short bullet sentences in the story output_language: anchor distance, open B-story threads, continuity/spatial state, and Planner execution reminders.\n"
+        "- Choose chapter_type (PLOT_DRIVEN / CHARACTER_DRIVEN / WORLD_BUILDING), POV, Epoch, tone, narrative_directive.\n"
+        "- If distance_to_anchor >= 2: chapter_type MUST be CHARACTER_DRIVEN or WORLD_BUILDING, "
+        "pick one active_b_story into b_story_directive, and output b_story_type matching that row's type. "
+        "If b_story_type is in the recent_b_story_types ban list, that is a violation requiring manual HITL correction.\n"
+        "- Anti-repeat: avoid repeating the global Top-3 conflict_type + resolution_method pairings; if your idea lands in Top-3, pivot.\n"
+        "- Anti-rut: avoid the same forward beat as the last 3 plot_summary entries (same conflict + same resolution cadence).\n"
+        "- If distance_to_anchor is 0 or 1: chapter_type MUST be PLOT_DRIVEN and drive hard toward target_anchor.\n"
+        "- For CHARACTER_DRIVEN or WORLD_BUILDING, new_elements_to_introduce needs at least one item; "
+        "each item is {need, reason}: need names the object/variable; reason explains why this chapter needs it (pressure, intel gap, etc.). "
+        "Avoid duplicating graph proper names.\n"
+        "- If you want to slow the spine or add friction with a **new** B-story: output request_new_b_story {type, purpose}; "
+        "type must be a BStoryType and must NOT be on the recent_b_story_types cooldown list.\n"
+        "- If no new B-story is needed, set request_new_b_story to null.\n"
+        "- narrative_directive must name new plot advancement—not only mood continuation.\n"
+        "- If the chapter involves movement, infiltration, extraction, or chase, spell out start, destination, or end-of-chapter effective position.\n"
+        "- If there are secret actions, narrative_directive should name their dramatic function without treating secrets as public common knowledge.\n"
+        "- When system hard constraints are active, narrative_directive must specify replacement tactics and ending rhythm—do not reuse banned patterns.\n"
     )
 
 

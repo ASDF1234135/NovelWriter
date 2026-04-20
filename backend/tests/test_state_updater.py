@@ -20,14 +20,15 @@ from app.services.graph_store import InMemoryGraphStore
 from app.services.llm import MockLLMClient
 from app.services.vector_store import InMemoryVectorStore
 from app.services.workflow.context import WorkflowContext
+from app.services.workflow.extraction import EVENT_DESCRIPTION_DISPLAY_MAX
 from app.services.workflow.nodes.state_updater import (
     _build_location_transition_mutations,
     _build_node_properties,
     _build_relation_mutation,
-    _is_valid_relation_direction,
     _sanitize_node_properties,
     run_state_updater,
 )
+from app.services.workflow.relation_direction_rules import relation_direction_is_valid
 
 
 class SparseGraphStore(InMemoryGraphStore):
@@ -79,6 +80,35 @@ def test_state_updater_uses_whitelisted_ids(workflow_context: WorkflowContext) -
     assert metadata["characters_involved"] == ["char_public_observer"]
     assert belongs_to_epoch_edge["attributes"]["known_by"] == []
     assert belongs_to_epoch_edge["attributes"]["is_public"] is True
+
+
+def test_state_updater_event_node_keeps_long_description_up_to_cap(workflow_context: WorkflowContext) -> None:
+    """EVENT canonical_name should not be truncated to 40 chars (regression for '断句')."""
+    long_desc = "敘" * 200
+    workflow_context.graph_store.seed_story("story_1")
+    state = {
+        "story_id": "story_1",
+        "chapter_id": 1,
+        "active_epoch_id": "epoch_present",
+        "pov_character_id": "char_public_observer",
+        "narrative_directive": "測試",
+        "ground_truth_events": [
+            EventOutline(event_id="event_ch1_01", description=long_desc, caused_by_event_id=None).model_dump(
+                mode="json"
+            )
+        ],
+        "current_draft": "草稿",
+        "best_draft_content": "",
+    }
+    output = run_state_updater(state, workflow_context)
+    event_node = next(
+        m
+        for m in output["mutations"]
+        if m["action"] == "CREATE_NODE" and m.get("node_id") == "event_ch1_01"
+    )
+    cname = event_node["properties"]["canonical_name"]
+    assert len(cname) > 40
+    assert len(cname) <= EVENT_DESCRIPTION_DISPLAY_MAX
 
 
 def test_state_updater_allows_required_reference_ids_when_query_context_is_sparse(tmp_path) -> None:
@@ -185,6 +215,35 @@ def test_state_updater_extracts_entities_relations_and_memory_chunks(workflow_co
     assert "Kaelen" in summary_doc["metadata"]["entity_names"]
 
 
+def test_state_updater_normalizes_nonstandard_event_ids(workflow_context: WorkflowContext) -> None:
+    workflow_context.graph_store.seed_story("story_norm")
+    state = {
+        "story_id": "story_norm",
+        "chapter_id": 5,
+        "active_epoch_id": "epoch_present",
+        "pov_character_id": "char_public_observer",
+        "narrative_directive": "測試ID規範化",
+        "ground_truth_events": [
+            EventOutline(event_id="event_ai_invention_04", description="舊ID事件A", caused_by_event_id=None).model_dump(mode="json"),
+            EventOutline(event_id="legacy_event_beta", description="舊ID事件B", caused_by_event_id="event_ai_invention_04").model_dump(mode="json"),
+        ],
+        "current_draft": "主角推進劇情。",
+        "best_draft_content": "",
+    }
+
+    output = run_state_updater(state, workflow_context)
+    event_nodes = [
+        row for row in output["mutations"] if row["action"] in {"CREATE_NODE", "UPDATE_NODE"} and row.get("node_type") == "EVENT"
+    ]
+    caused_edge = next(
+        row for row in output["mutations"] if row["action"] == "CREATE_EDGE" and row["relation_type"] == "CAUSED"
+    )
+    event_node_ids = {row["node_id"] for row in event_nodes}
+    assert event_node_ids == {"event_ch5_01", "event_ch5_02"}
+    assert caused_edge["source_id"] == "event_ch5_01"
+    assert caused_edge["target_id"] == "event_ch5_02"
+
+
 def test_private_truth_edge_includes_pov_in_known_by() -> None:
     edge = _build_relation_mutation(
         relation=ExtractedRelation(
@@ -246,7 +305,7 @@ def test_direction_rules_allow_expected_pairs(
     source_type: NodeType,
     target_type: NodeType,
 ) -> None:
-    assert _is_valid_relation_direction(
+    assert relation_direction_is_valid(
         relation_type,
         "source",
         "target",
@@ -269,7 +328,7 @@ def test_direction_rules_reject_reversed_pairs(
     source_type: NodeType,
     target_type: NodeType,
 ) -> None:
-    assert not _is_valid_relation_direction(
+    assert not relation_direction_is_valid(
         relation_type,
         "source",
         "target",

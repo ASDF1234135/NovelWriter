@@ -24,6 +24,10 @@ export { HITL_REASON } from "./hitlCopy";
 type Props = {
   workflow: WorkflowPayload | null;
   variant?: "default" | "compact";
+  /** When true, all HITL actions are disabled to prevent double-submit. */
+  busy?: boolean;
+  /** Shown inside the panel when HITL is active (e.g. server 422 / validation message). */
+  workflowError?: string;
   onDecision: (optionId: string) => Promise<void>;
   onOutlineEdit: (payload: { ground_truth_events: Array<Record<string, unknown>>; narrative_script?: string }) => Promise<void>;
   onStateInjection: (payload: {
@@ -78,9 +82,19 @@ function isHitlActive(workflow: WorkflowPayload | null): boolean {
 
 const asyncNoop = async () => {};
 
+function parseJsonField(raw: string, label: string): { ok: true; value: unknown } | { ok: false; message: string } {
+  try {
+    return { ok: true, value: JSON.parse(raw) as unknown };
+  } catch {
+    return { ok: false, message: `${label}：JSON 格式不正確` };
+  }
+}
+
 export function HitlPanel({
   workflow,
   variant = "default",
+  busy = false,
+  workflowError = "",
   onDecision,
   onOutlineEdit,
   onStateInjection,
@@ -110,7 +124,7 @@ export function HitlPanel({
   const [newElementsLines, setNewElementsLines] = useState("");
   const [narrativeDirective, setNarrativeDirective] = useState("");
   const [anchorId, setAnchorId] = useState("");
-  const [anchorNewChapter, setAnchorNewChapter] = useState(1);
+  const [anchorChapterInput, setAnchorChapterInput] = useState("1");
   const [waiveIdsComma, setWaiveIdsComma] = useState("");
   const [remapJson, setRemapJson] = useState('[{"from_node_id":"ghost_01","to_node_id":"planned_01"}]');
   const [remapHintsView, setRemapHintsView] = useState("[]");
@@ -121,8 +135,14 @@ export function HitlPanel({
   const [pruneProductTier, setPruneProductTier] = useState(0);
   const [selectedSolution, setSelectedSolution] = useState<HitlSolutionId | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [outlineJsonError, setOutlineJsonError] = useState("");
+  const [remapJsonError, setRemapJsonError] = useState("");
+  const [injectionJsonError, setInjectionJsonError] = useState("");
+  const [anchorChapterError, setAnchorChapterError] = useState("");
+  const [advancedInjectAck, setAdvancedInjectAck] = useState(false);
 
   const hitlActive = isHitlActive(workflow);
+  const controlsLocked = !hitlActive || busy;
   const hitlContext = (workflow?.run.hitl_context ?? null) as HitlContextPayload | null;
   const rawOptions = (workflow?.state.pending_hitl_options as Array<{ id: string; label: string }> | undefined) ?? [];
   const options = useMemo(
@@ -167,7 +187,7 @@ export function HitlPanel({
       const first = anchors[0]?.anchor_id;
       if (first) setAnchorId(String(first));
       const cid = Number(st.chapter_id ?? 1);
-      setAnchorNewChapter(cid + 1);
+      setAnchorChapterInput(String(cid + 1));
     }
     if (reason === HITL_REASON.EXTRACTION_GATE) {
       const h = st.hitl_extraction_remap_hints;
@@ -216,7 +236,7 @@ export function HitlPanel({
           <button
             type="button"
             className="shrink-0 rounded-md border border-error/50 bg-error/15 px-2 py-1 font-label text-[11px] font-semibold text-error hover:bg-error/25 disabled:opacity-40"
-            disabled={!hitlActive}
+            disabled={controlsLocked}
             onClick={() => onDecision("ABORT_AND_RESTART")}
           >
             放棄本章草稿，打掉重練
@@ -239,11 +259,23 @@ export function HitlPanel({
 
       {hitlActive ? (
         <>
+          {workflowError.trim() ? (
+            <div className="mb-3 rounded-lg border border-error/40 bg-error/10 px-3 py-2 font-body text-sm text-error">{workflowError.trim()}</div>
+          ) : null}
           <div className="mb-4 rounded-lg border border-tertiary/20 bg-tertiary/5 px-3 py-3">
             <h3 className="font-headline text-sm font-bold text-on-surface">{situation.title}</h3>
             <p className="mt-2 font-body text-sm leading-relaxed text-on-surface-variant">{situation.why}</p>
             {hitlContext?.primary_issue ? (
               <p className="mt-2 rounded-md bg-surface-container-highest/60 px-2 py-2 font-body text-xs text-on-surface">{hitlContext.primary_issue}</p>
+            ) : null}
+            {hitlContext?.context_metadata?.payload_type === "output_language" &&
+            hitlContext.context_metadata.expected_output_language ? (
+              <p className="mt-2 font-label text-xs text-on-surface-variant">
+                專案輸出語言：<span className="text-on-surface">{String(hitlContext.context_metadata.expected_output_language)}</span>
+              </p>
+            ) : null}
+            {hitlContext?.context_metadata?.language_detection_summary ? (
+              <p className="mt-1 font-body text-xs text-on-surface-variant">{hitlContext.context_metadata.language_detection_summary}</p>
             ) : null}
             {reason === HITL_REASON.CONTEXT ? (
               <p className="mt-2 font-label text-xs text-on-surface-variant">
@@ -286,17 +318,22 @@ export function HitlPanel({
                 className={inputClass}
                 value={alignmentRulesInput}
                 rows={taRows(4)}
-                onChange={(e) => setAlignmentRulesInput(e.target.value)}
-                disabled={!hitlActive}
+                onChange={(e) => {
+                  setAlignmentRulesInput(e.target.value);
+                }}
+                disabled={controlsLocked}
                 placeholder="補充本章硬性規則：勝負條件、回合流程、籌碼/代價、可用策略邊界"
               />
+              {!alignmentRulesInput.trim() ? (
+                <p className="mt-1 font-body text-xs text-error">請填寫硬性規則後再繼續。</p>
+              ) : null}
               <label className="auteur-label mt-2">本章節奏煞車（可選；禁止本章寫出最終結局）</label>
               <textarea
                 className={inputClass}
                 value={pacingLimitInput}
                 rows={2}
                 onChange={(e) => setPacingLimitInput(e.target.value)}
-                disabled={!hitlActive}
+                disabled={controlsLocked}
                 placeholder="例：本章只允許試探與懸念，不得揭露真凶身分。"
               />
               <p className="mt-2 font-label text-[10px] uppercase tracking-wider text-on-surface-variant">未來結局錨點（可選）</p>
@@ -304,7 +341,7 @@ export function HitlPanel({
                 className={inputClass}
                 value={futureAnchorTitle}
                 onChange={(e) => setFutureAnchorTitle(e.target.value)}
-                disabled={!hitlActive}
+                disabled={controlsLocked}
                 placeholder="錨點標題"
               />
               <textarea
@@ -312,7 +349,7 @@ export function HitlPanel({
                 value={futureAnchorDesc}
                 rows={2}
                 onChange={(e) => setFutureAnchorDesc(e.target.value)}
-                disabled={!hitlActive}
+                disabled={controlsLocked}
                 placeholder="錨點描述（可空）"
               />
               <label className="auteur-label mt-1">延遲幾章後觸發（空白表示 0）</label>
@@ -322,14 +359,15 @@ export function HitlPanel({
                 className={inputClass}
                 value={futureAnchorDelay}
                 onChange={(e) => setFutureAnchorDelay(e.target.value)}
-                disabled={!hitlActive}
+                disabled={controlsLocked}
                 placeholder="0"
               />
               <button
                 type="button"
                 className={btnClass}
-                disabled={!hitlActive}
+                disabled={controlsLocked || !alignmentRulesInput.trim()}
                 onClick={() => {
+                  if (!alignmentRulesInput.trim()) return;
                   const raw = futureAnchorDelay.trim();
                   const parsed = raw === "" ? null : Number.parseInt(raw, 10);
                   const chapters_to_delay = parsed != null && Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
@@ -358,7 +396,7 @@ export function HitlPanel({
                   <div key={option.id} className="rounded-lg border border-outline-variant/15 bg-surface-container-highest/30 p-2">
                     <button
                       type="button"
-                      disabled={!hitlActive}
+                      disabled={controlsLocked}
                       onClick={() => onDecision(option.id)}
                       className="w-full rounded-md bg-primary/15 px-3 py-2 text-left font-label text-sm font-medium text-primary transition-colors hover:bg-primary/25 disabled:opacity-40"
                     >
@@ -381,7 +419,7 @@ export function HitlPanel({
                   <button
                     key={sol.id}
                     type="button"
-                    disabled={!hitlActive}
+                    disabled={controlsLocked}
                     onClick={() => setSelectedSolution(sol.id)}
                     className={`max-w-full rounded-xl border px-3 py-2 text-left transition-colors ${
                       selectedSolution === sol.id
@@ -408,26 +446,40 @@ export function HitlPanel({
                   className={inputClass}
                   value={outlineJson}
                   rows={taRows(6)}
-                  onChange={(e) => setOutlineJson(e.target.value)}
-                  disabled={!hitlActive}
+                  onChange={(e) => {
+                    setOutlineJson(e.target.value);
+                    setOutlineJsonError("");
+                  }}
+                  disabled={controlsLocked}
                 />
+                {outlineJsonError ? <p className="mt-1 font-body text-xs text-error">{outlineJsonError}</p> : null}
                 <textarea
                   className={inputClass}
                   value={narrativeScript}
                   rows={taRows(3)}
                   onChange={(e) => setNarrativeScript(e.target.value)}
-                  disabled={!hitlActive}
+                  disabled={controlsLocked}
                 />
                 <button
                   type="button"
                   className={btnClass}
-                  disabled={!hitlActive}
-                  onClick={() =>
-                    onOutlineEdit({
-                      ground_truth_events: JSON.parse(outlineJson) as Array<Record<string, unknown>>,
+                  disabled={controlsLocked}
+                  onClick={() => {
+                    const parsed = parseJsonField(outlineJson, "事件大綱 JSON");
+                    if (!parsed.ok) {
+                      setOutlineJsonError(parsed.message);
+                      return;
+                    }
+                    if (!Array.isArray(parsed.value)) {
+                      setOutlineJsonError("事件大綱必須是 JSON 陣列。");
+                      return;
+                    }
+                    setOutlineJsonError("");
+                    void onOutlineEdit({
+                      ground_truth_events: parsed.value as Array<Record<string, unknown>>,
                       narrative_script: narrativeScript,
-                    })
-                  }
+                    });
+                  }}
                 >
                   套用大綱並繼續
                 </button>
@@ -441,21 +493,33 @@ export function HitlPanel({
                   指定要延後的節點代號，以及希望改到哪一章再達成。
                 </p>
                 <label className="auteur-label">里程碑代號</label>
-                <input className={inputClass} value={anchorId} onChange={(e) => setAnchorId(e.target.value)} disabled={!hitlActive} />
+                <input className={inputClass} value={anchorId} onChange={(e) => setAnchorId(e.target.value)} disabled={controlsLocked} />
                 <label className="auteur-label mt-2">改到第幾章</label>
                 <input
                   type="number"
                   min={1}
                   className={inputClass}
-                  value={anchorNewChapter}
-                  onChange={(e) => setAnchorNewChapter(Number(e.target.value))}
-                  disabled={!hitlActive}
+                  value={anchorChapterInput}
+                  onChange={(e) => {
+                    setAnchorChapterInput(e.target.value);
+                    setAnchorChapterError("");
+                  }}
+                  disabled={controlsLocked}
                 />
+                {anchorChapterError ? <p className="mt-1 font-body text-xs text-error">{anchorChapterError}</p> : null}
                 <button
                   type="button"
                   className={btnClass}
-                  disabled={!hitlActive || !anchorId.trim()}
-                  onClick={() => onAnchorDelay({ anchor_id: anchorId.trim(), new_chapter_target: anchorNewChapter })}
+                  disabled={controlsLocked || !anchorId.trim()}
+                  onClick={() => {
+                    const n = Number.parseInt(anchorChapterInput.trim(), 10);
+                    if (!Number.isFinite(n) || n < 1) {
+                      setAnchorChapterError("請輸入有效的章節編號（≥ 1）。");
+                      return;
+                    }
+                    setAnchorChapterError("");
+                    void onAnchorDelay({ anchor_id: anchorId.trim(), new_chapter_target: n });
+                  }}
                 >
                   儲存並回到劇情規劃
                 </button>
@@ -469,19 +533,19 @@ export function HitlPanel({
                   這些欄位會影響本章定位與副線走向，請用簡短中文填寫即可。
                 </p>
                 <label className="auteur-label">章節類型（例：過渡／高潮）</label>
-                <input className={inputClass} value={chapterType} onChange={(e) => setChapterType(e.target.value)} disabled={!hitlActive} />
+                <input className={inputClass} value={chapterType} onChange={(e) => setChapterType(e.target.value)} disabled={controlsLocked} />
                 <label className="auteur-label mt-2">副線指示</label>
-                <input className={inputClass} value={bStoryDirective} onChange={(e) => setBStoryDirective(e.target.value)} disabled={!hitlActive} />
+                <input className={inputClass} value={bStoryDirective} onChange={(e) => setBStoryDirective(e.target.value)} disabled={controlsLocked} />
                 <label className="auteur-label mt-2">副線類型標籤</label>
-                <input className={inputClass} value={bStoryType} onChange={(e) => setBStoryType(e.target.value)} disabled={!hitlActive} />
+                <input className={inputClass} value={bStoryType} onChange={(e) => setBStoryType(e.target.value)} disabled={controlsLocked} />
                 <label className="auteur-label mt-2">想新登場的元素（每行一項）</label>
-                <textarea className={inputClass} value={newElementsLines} rows={taRows(3)} onChange={(e) => setNewElementsLines(e.target.value)} disabled={!hitlActive} />
+                <textarea className={inputClass} value={newElementsLines} rows={taRows(3)} onChange={(e) => setNewElementsLines(e.target.value)} disabled={controlsLocked} />
                 <label className="auteur-label mt-2">主線／敘事指示</label>
-                <input className={inputClass} value={narrativeDirective} onChange={(e) => setNarrativeDirective(e.target.value)} disabled={!hitlActive} />
+                <input className={inputClass} value={narrativeDirective} onChange={(e) => setNarrativeDirective(e.target.value)} disabled={controlsLocked} />
                 <button
                   type="button"
                   className={btnClass}
-                  disabled={!hitlActive}
+                  disabled={controlsLocked}
                   onClick={() =>
                     onDirectorPatch({
                       chapter_type: chapterType || undefined,
@@ -507,22 +571,22 @@ export function HitlPanel({
                   專名對照線索請在下次「開始撰寫本章」時，於章節執行請求一併送出（無法在此 HITL 面板補送）。
                 </p>
                 <label className="flex items-center gap-2 font-label text-xs text-on-surface-variant">
-                  <input type="checkbox" checked={mergeHintsOnDraft} onChange={(e) => setMergeHintsOnDraft(e.target.checked)} disabled={!hitlActive} />
+                  <input type="checkbox" checked={mergeHintsOnDraft} onChange={(e) => setMergeHintsOnDraft(e.target.checked)} disabled={controlsLocked} />
                   保留已蒐集的專名線索
                 </label>
                 <label className="auteur-label">接下來從哪一步再檢查</label>
-                <select className={inputClass} value={resumeFrom} onChange={(e) => setResumeFrom(e.target.value)} disabled={!hitlActive}>
+                <select className={inputClass} value={resumeFrom} onChange={(e) => setResumeFrom(e.target.value)} disabled={controlsLocked}>
                   {DRAFT_RESUME_OPTIONS.map((o) => (
                     <option key={o.value} value={o.value}>
                       {o.label}
                     </option>
                   ))}
                 </select>
-                <textarea className={inputClass} value={draftText} rows={taRows(10)} onChange={(e) => setDraftText(e.target.value)} disabled={!hitlActive} />
+                <textarea className={inputClass} value={draftText} rows={taRows(10)} onChange={(e) => setDraftText(e.target.value)} disabled={controlsLocked} />
                 <button
                   type="button"
                   className={btnClass}
-                  disabled={!hitlActive}
+                  disabled={controlsLocked}
                   onClick={() =>
                     onDraftEdit({
                       chapter_content: draftText,
@@ -575,19 +639,54 @@ export function HitlPanel({
                   <p className="mb-2 font-body text-xs text-on-surface-variant">目前沒有表格化猜測，請依內文自行填寫對照。</p>
                 )}
                 <label className="auteur-label">手動對照（結構化，進階）</label>
-                <textarea className={inputClass} value={remapJson} rows={taRows(4)} onChange={(e) => setRemapJson(e.target.value)} disabled={!hitlActive} />
+                <textarea
+                  className={inputClass}
+                  value={remapJson}
+                  rows={taRows(4)}
+                  onChange={(e) => {
+                    setRemapJson(e.target.value);
+                    setRemapJsonError("");
+                  }}
+                  disabled={controlsLocked}
+                />
+                {remapJsonError ? <p className="mt-1 font-body text-xs text-error">{remapJsonError}</p> : null}
                 <label className="auteur-label mt-2">可略過的必填項目代號（逗號分隔，進階）</label>
-                <input className={inputClass} value={waiveIdsComma} onChange={(e) => setWaiveIdsComma(e.target.value)} disabled={!hitlActive} />
+                <input className={inputClass} value={waiveIdsComma} onChange={(e) => setWaiveIdsComma(e.target.value)} disabled={controlsLocked} />
                 <button
                   type="button"
                   className={btnClass}
-                  disabled={!hitlActive}
-                  onClick={() =>
-                    onExtractionRemap({
-                      entity_remaps: JSON.parse(remapJson) as Array<{ from_node_id: string; to_node_id: string }>,
+                  disabled={controlsLocked}
+                  onClick={() => {
+                    const parsed = parseJsonField(remapJson, "對照表 JSON");
+                    if (!parsed.ok) {
+                      setRemapJsonError(parsed.message);
+                      return;
+                    }
+                    if (!Array.isArray(parsed.value)) {
+                      setRemapJsonError("對照表必須是 JSON 陣列。");
+                      return;
+                    }
+                    const rows: Array<{ from_node_id: string; to_node_id: string }> = [];
+                    for (const item of parsed.value) {
+                      if (!item || typeof item !== "object") {
+                        setRemapJsonError("對照表每一列必須是物件，且含 from_node_id、to_node_id。");
+                        return;
+                      }
+                      const rec = item as Record<string, unknown>;
+                      const fromId = String(rec.from_node_id ?? "").trim();
+                      const toId = String(rec.to_node_id ?? "").trim();
+                      if (!fromId || !toId) {
+                        setRemapJsonError("對照表每一列都需有非空的 from_node_id 與 to_node_id。");
+                        return;
+                      }
+                      rows.push({ from_node_id: fromId, to_node_id: toId });
+                    }
+                    setRemapJsonError("");
+                    void onExtractionRemap({
+                      entity_remaps: rows,
                       waive_mandatory_node_ids: waiveList(),
-                    })
-                  }
+                    });
+                  }}
                 >
                   套用對照並重新歸檔
                 </button>
@@ -605,16 +704,16 @@ export function HitlPanel({
                   </ul>
                 ) : null}
                 <label className="auteur-label">補充說明（會一併存檔）</label>
-                <textarea className={inputClass} value={bAnalysis} rows={taRows(4)} onChange={(e) => setBAnalysis(e.target.value)} disabled={!hitlActive} />
+                <textarea className={inputClass} value={bAnalysis} rows={taRows(4)} onChange={(e) => setBAnalysis(e.target.value)} disabled={controlsLocked} />
                 <label className="auteur-label mt-2">視為已收尾的副線名稱代號（逗號分隔）</label>
-                <input className={inputClass} value={bResolvedCsv} onChange={(e) => setBResolvedCsv(e.target.value)} disabled={!hitlActive} />
+                <input className={inputClass} value={bResolvedCsv} onChange={(e) => setBResolvedCsv(e.target.value)} disabled={controlsLocked} />
                 <label className="auteur-label mt-2">當作證據的情節事件代號（逗號分隔）</label>
-                <input className={inputClass} value={bEvidenceCsv} onChange={(e) => setBEvidenceCsv(e.target.value)} disabled={!hitlActive} />
+                <input className={inputClass} value={bEvidenceCsv} onChange={(e) => setBEvidenceCsv(e.target.value)} disabled={controlsLocked} />
                 <div className="mt-2 flex flex-wrap gap-2">
                   <button
                     type="button"
                     className={btnClass + " flex-1"}
-                    disabled={!hitlActive}
+                    disabled={controlsLocked}
                     onClick={() =>
                       onBStoryJudgement({
                         action: "force_resolve",
@@ -635,7 +734,7 @@ export function HitlPanel({
                   <button
                     type="button"
                     className={btnClass + " flex-1"}
-                    disabled={!hitlActive}
+                    disabled={controlsLocked}
                     onClick={() =>
                       onBStoryJudgement({
                         action: "reject",
@@ -648,7 +747,7 @@ export function HitlPanel({
                   </button>
                 </div>
                 <label className="auteur-label mt-2">打回後從哪一步重來</label>
-                <select className={inputClass} value={bRejectResume} onChange={(e) => setBRejectResume(e.target.value)} disabled={!hitlActive}>
+                <select className={inputClass} value={bRejectResume} onChange={(e) => setBRejectResume(e.target.value)} disabled={controlsLocked}>
                   {B_STORY_REJECT_RESUME_OPTIONS.map((o) => (
                     <option key={o.value} value={o.value}>
                       {o.label}
@@ -678,7 +777,7 @@ export function HitlPanel({
                         name="prune-tier"
                         checked={pruneProductTier === row.v}
                         onChange={() => setPruneProductTier(row.v)}
-                        disabled={!hitlActive}
+                        disabled={controlsLocked}
                       />
                       {row.label}
                     </label>
@@ -687,7 +786,7 @@ export function HitlPanel({
                 <button
                   type="button"
                   className={btnClass}
-                  disabled={!hitlActive}
+                  disabled={controlsLocked}
                   onClick={() => onContextPrune?.({ graph_rag_context_tier: pruneProductTier, reason: "author_context_prune" })}
                 >
                   套用並重新整理背景
@@ -716,16 +815,48 @@ export function HitlPanel({
               <div>
                 <h4 className="font-label text-xs font-bold text-on-surface">直接寫入故事資料（進階結構化）</h4>
                 <p className="mb-1 font-body text-[10px] text-on-surface-variant">錯誤操作可能破壞資料，請謹慎。</p>
-                <textarea className={inputClass} value={injectionJson} rows={taRows(6)} onChange={(e) => setInjectionJson(e.target.value)} disabled={!hitlActive} />
+                <textarea
+                  className={inputClass}
+                  value={injectionJson}
+                  rows={taRows(6)}
+                  onChange={(e) => {
+                    setInjectionJson(e.target.value);
+                    setInjectionJsonError("");
+                    setAdvancedInjectAck(false);
+                  }}
+                  disabled={controlsLocked}
+                />
+                {injectionJsonError ? <p className="mt-1 font-body text-xs text-error">{injectionJsonError}</p> : null}
+                <label className="mt-2 flex cursor-pointer items-start gap-2 font-body text-xs text-on-surface">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={advancedInjectAck}
+                    onChange={(e) => setAdvancedInjectAck(e.target.checked)}
+                    disabled={controlsLocked}
+                  />
+                  <span>我已了解此操作會直接變更故事圖譜資料，且可能無法還原。</span>
+                </label>
                 <button
                   type="button"
                   className={btnClass}
-                  disabled={!hitlActive}
-                  onClick={() =>
-                    onStateInjection({
-                      mutations: JSON.parse(injectionJson) as Array<Record<string, unknown>>,
-                    })
-                  }
+                  disabled={controlsLocked || !advancedInjectAck}
+                  onClick={() => {
+                    if (!advancedInjectAck) return;
+                    const parsed = parseJsonField(injectionJson, "mutations JSON");
+                    if (!parsed.ok) {
+                      setInjectionJsonError(parsed.message);
+                      return;
+                    }
+                    if (!Array.isArray(parsed.value)) {
+                      setInjectionJsonError("mutations 必須是 JSON 陣列。");
+                      return;
+                    }
+                    setInjectionJsonError("");
+                    void onStateInjection({
+                      mutations: parsed.value as Array<Record<string, unknown>>,
+                    });
+                  }}
                 >
                   執行寫入並繼續
                 </button>

@@ -7,8 +7,14 @@ from app.services.llm import MockLLMClient
 from app.services.workflow.constants import LOCAL_ENFORCED_RULES_CONTEXT_CAP
 from app.services.workflow.context import WorkflowContext
 from app.services.workflow.masking import build_author_payload
+from app.services.workflow.output_language import (
+    augment_profile_system_prompt,
+    chapter_heading_line,
+    heading_first_line_matches_chapter,
+    strip_leading_chapter_heading_line,
+)
 from app.services.workflow.profiles import freedom_adjusted_profile, get_profile
-from app.services.workflow.utils import normalized_text_length
+from app.services.workflow.utils import chapter_content_length
 
 _MAX_HINTS_CHAPTER_CHARS = 28000
 
@@ -25,6 +31,31 @@ def _filter_surface_hints_to_exact_substrings(chapter_content: str, hints: Autho
     return out
 
 
+def _mandatory_node_ids_from_payload(payload) -> set[str]:
+    rows = getattr(payload, "mandatory_new_entities", None) or []
+    out: set[str] = set()
+    for row in rows:
+        nid = str(getattr(row, "node_id", "") or "").strip()
+        if nid:
+            out.add(nid)
+    return out
+
+
+def _find_missing_mandatory_hint_ids(filtered_hints: list[dict], mandatory_ids: set[str]) -> list[str]:
+    if not mandatory_ids:
+        return []
+    by_id = {
+        str(h.get("node_id", "")).strip(): [s for s in (h.get("surface_forms") or []) if isinstance(s, str) and s]
+        for h in filtered_hints
+        if isinstance(h, dict) and str(h.get("node_id", "")).strip()
+    }
+    missing: list[str] = []
+    for nid in sorted(mandatory_ids):
+        if not by_id.get(nid):
+            missing.append(nid)
+    return missing
+
+
 def _build_extraction_hints_prompt(chapter_content: str, state: dict, payload) -> str:
     excerpt = chapter_content[:_MAX_HINTS_CHAPTER_CHARS]
     planned = list(state.get("planned_graph_nodes") or [])
@@ -33,11 +64,12 @@ def _build_extraction_hints_prompt(chapter_content: str, state: dict, payload) -
     instructions = {
         "task": "author_extraction_surface_hints",
         "rules": [
-            "輸出 JSON：entries 為陣列；每項含 node_id 與 surface_forms（字串陣列）。",
-            "僅處理本章規劃或必選相關的 node_id（見 planned_graph_nodes 與 mandatory_new_entities）。",
-            "surface_forms 中每個字串必須是章節正文中可找到的「精確子字串」：與原文完全一致，含標點與空白；禁止改寫、概括、增刪標點或同義替換。",
-            "若某 node_id 在正文沒有任何可逐字摘錄的稱呼，該項的 surface_forms 必須為空陣列 []。",
-            "禁止發明正文中不存在的字串。",
+            "Output JSON: entries is an array; each item has node_id and surface_forms (string array).",
+            "Only handle node_id values tied to this chapter's plan or mandatory list (see planned_graph_nodes and mandatory_new_entities).",
+            "Each string in surface_forms must be an exact substring of the chapter body—same characters, punctuation, and whitespace; "
+            "no paraphrase, summary, punctuation edits, or synonym swaps.",
+            "If a node_id has no verbatim surface form in the text, that entry's surface_forms must be [].",
+            "Do not invent strings that do not appear in the chapter text.",
         ],
         "planned_graph_nodes": planned[:24],
         "mandatory_new_entities": mand_ids,
@@ -47,6 +79,15 @@ def _build_extraction_hints_prompt(chapter_content: str, state: dict, payload) -
     return json.dumps(instructions, ensure_ascii=False)
 
 
+def _build_retry_extraction_hints_prompt(chapter_content: str, state: dict, payload, missing_ids: list[str]) -> str:
+    base = json.loads(_build_extraction_hints_prompt(chapter_content, state, payload))
+    base["retry_required_for_node_ids"] = missing_ids
+    base["rules"].append(
+        "Retry mode: for each retry_required_for_node_ids value, return at least one exact in-text surface form when possible."
+    )
+    return json.dumps(base, ensure_ascii=False)
+
+
 def _format_local_enforced_rules_for_author(payload) -> str:
     raw = str(getattr(payload, "local_enforced_rules_context", "") or "").strip()
     if not raw:
@@ -54,27 +95,33 @@ def _format_local_enforced_rules_for_author(payload) -> str:
     clipped = raw[:LOCAL_ENFORCED_RULES_CONTEXT_CAP]
     if len(raw) > LOCAL_ENFORCED_RULES_CONTEXT_CAP:
         clipped += "…"
-    return f"## 當前場域絕對法則（硬性；優先於表層劇本中與之衝突的暗示）\n{clipped}\n"
+    return f"## Local absolute rules (hard; override conflicting hints in narrative_script)\n{clipped}\n"
 
 
 def _format_author_safe_continuity(notes: list[str]) -> str:
     cleaned = [(line or "").strip() for line in notes if (line or "").strip()]
     if not cleaned:
-        return "無"
+        return "(none)"
     return "\n".join(f"- {line}" for line in cleaned)
 
 
 def run_author(state: dict, context: WorkflowContext) -> tuple[dict, dict, int, int]:
     payload = build_author_payload(state)
+    _len_lang = str(state.get("story_output_language") or context.output_language or "")
     prompt = _build_author_prompt(payload)
     if not isinstance(context.llm_client, MockLLMClient):
-        profile = freedom_adjusted_profile(
-            "author",
-            ai_freedom_level=str(state.get("ai_freedom_level") or "balanced"),
-            outline_binding_mode=str(state.get("outline_binding_mode") or "ABSENT"),
+        profile = augment_profile_system_prompt(
+            freedom_adjusted_profile(
+                "author",
+                ai_freedom_level=str(state.get("ai_freedom_level") or "balanced"),
+                outline_binding_mode=str(state.get("outline_binding_mode") or "ABSENT"),
+            ),
+            context.output_language,
         )
         llm_result = context.llm_client.invoke_text(prompt, profile)
-        chapter_content = _ensure_chapter_heading(state["chapter_id"], llm_result.content)
+        chapter_content = _ensure_chapter_heading(
+            state["chapter_id"], llm_result.content, context.output_language
+        )
         token_usage = llm_result.token_usage
         latency_ms = llm_result.latency_ms
         chapter_content, repair_tokens, repair_latency = _repair_boundary_if_needed(
@@ -88,12 +135,14 @@ def run_author(state: dict, context: WorkflowContext) -> tuple[dict, dict, int, 
         latency_ms += repair_latency
 
         compression_round = 0
-        while normalized_text_length(chapter_content) > payload.normalized_length_max and compression_round < 2:
+        while chapter_content_length(chapter_content, _len_lang) > payload.normalized_length_max and compression_round < 2:
             compression_round += 1
-            over_length = normalized_text_length(chapter_content) - payload.normalized_length_max
+            over_length = chapter_content_length(chapter_content, _len_lang) - payload.normalized_length_max
             compression_prompt = _build_compression_prompt(payload, chapter_content, over_length)
             compression_result = context.llm_client.invoke_text(compression_prompt, profile)
-            compressed_content = _ensure_chapter_heading(state["chapter_id"], compression_result.content)
+            compressed_content = _ensure_chapter_heading(
+                state["chapter_id"], compression_result.content, context.output_language
+            )
             if compressed_content.strip() == chapter_content.strip():
                 break
             chapter_content = compressed_content
@@ -110,12 +159,12 @@ def run_author(state: dict, context: WorkflowContext) -> tuple[dict, dict, int, 
             latency_ms += repair_latency
 
         expansion_round = 0
-        while normalized_text_length(chapter_content) < payload.normalized_length_min and expansion_round < 2:
+        while chapter_content_length(chapter_content, _len_lang) < payload.normalized_length_min and expansion_round < 2:
             expansion_round += 1
-            missing_length = payload.normalized_length_min - normalized_text_length(chapter_content)
+            missing_length = payload.normalized_length_min - chapter_content_length(chapter_content, _len_lang)
             continuation_prompt = _build_expansion_prompt(payload, chapter_content, missing_length)
             continuation_result = context.llm_client.invoke_text(continuation_prompt, profile)
-            continuation = _strip_chapter_heading(continuation_result.content)
+            continuation = strip_leading_chapter_heading_line(continuation_result.content)
             if not continuation:
                 break
             chapter_content = f"{chapter_content.rstrip()}\n\n{continuation.strip()}"
@@ -131,60 +180,93 @@ def run_author(state: dict, context: WorkflowContext) -> tuple[dict, dict, int, 
             token_usage += repair_tokens
             latency_ms += repair_latency
 
-        hints_profile = get_profile("author_extraction_hints")
+        hints_profile = augment_profile_system_prompt(get_profile("author_extraction_hints"), context.output_language)
         hints_prompt = _build_extraction_hints_prompt(chapter_content, state, payload)
+        mandatory_ids = _mandatory_node_ids_from_payload(payload)
+        hints_diagnostics: dict[str, object] = {}
         try:
-            hints_struct, hints_res = context.llm_client.invoke_json(
-                hints_prompt, AuthorExtractionHintsOutput, hints_profile
-            )
+            hints_struct, hints_res = context.llm_client.invoke_json(hints_prompt, AuthorExtractionHintsOutput, hints_profile)
             token_usage += hints_res.token_usage
             latency_ms += hints_res.latency_ms
         except Exception:
             hints_struct = AuthorExtractionHintsOutput(entries=[])
         filtered = _filter_surface_hints_to_exact_substrings(chapter_content, hints_struct)
+        missing_mandatory = _find_missing_mandatory_hint_ids(filtered, mandatory_ids)
+        if missing_mandatory:
+            retry_prompt = _build_retry_extraction_hints_prompt(chapter_content, state, payload, missing_mandatory)
+            try:
+                retry_struct, retry_res = context.llm_client.invoke_json(
+                    retry_prompt, AuthorExtractionHintsOutput, hints_profile
+                )
+                token_usage += retry_res.token_usage
+                latency_ms += retry_res.latency_ms
+                retry_filtered = _filter_surface_hints_to_exact_substrings(chapter_content, retry_struct)
+                retry_missing = _find_missing_mandatory_hint_ids(retry_filtered, mandatory_ids)
+                if len(retry_missing) <= len(missing_mandatory):
+                    filtered = retry_filtered
+                    missing_mandatory = retry_missing
+            except Exception:
+                pass
+        if missing_mandatory:
+            hints_diagnostics = {
+                "missing_mandatory_hint_node_ids": missing_mandatory,
+                "expected_mandatory_node_ids": sorted(mandatory_ids),
+            }
         surface_models = [AuthorExtractionSurfaceEntry(node_id=e["node_id"], surface_forms=e["surface_forms"]) for e in filtered]
         output = AuthorOutput(
             chapter_content=chapter_content,
-            word_count=normalized_text_length(chapter_content),
+            word_count=chapter_content_length(chapter_content, _len_lang),
             extraction_surface_hints=surface_models,
         )
         dumped = output.model_dump(mode="json")
         dumped["author_extraction_surface_hints"] = dumped.pop("extraction_surface_hints", [])
+        if hints_diagnostics:
+            dumped["author_extraction_hints_diagnostics"] = hints_diagnostics
         return dumped, payload.model_dump(mode="json"), token_usage, latency_ms
 
     llm_result = context.llm_client.invoke(prompt)
     base_paragraphs = [
-        f"他清楚記得上一章留下的局勢：{payload.previous_chapter_summary}" if payload.previous_chapter_summary else "",
-        f"上一章結尾的尾端節錄（保留姿勢/情緒/氛圍）：{payload.previous_chapter_tail_excerpt}"
+        f"He still carries the prior chapter's situation: {payload.previous_chapter_summary}"
+        if payload.previous_chapter_summary
+        else "",
+        f"Tail mood/position reference (do not paste verbatim): {payload.previous_chapter_tail_excerpt}"
         if payload.previous_chapter_tail_excerpt
         else "",
-        f"上一章結束時，他最後確定的位置是：{payload.last_known_location}" if payload.last_known_location else "",
-        f"這一章開場時，他人就在：{payload.chapter_start_location}" if payload.chapter_start_location else "",
-        f"這一章的主筆任務是：{payload.author_goal}" if payload.author_goal else "",
-        f"這一章必須完成：{'、'.join(payload.must_include_beats)}" if payload.must_include_beats else "",
-        f"本章必須延續的線索包括：{'、'.join(payload.author_safe_continuity_notes)}"
+        f"Last locked position after the prior chapter: {payload.last_known_location}" if payload.last_known_location else "",
+        f"Opening position for this chapter: {payload.chapter_start_location}" if payload.chapter_start_location else "",
+        f"Primary author_goal: {payload.author_goal}" if payload.author_goal else "",
+        f"Must-include beats: {'; '.join(payload.must_include_beats)}" if payload.must_include_beats else "",
+        f"Safe continuity hints: {'; '.join(payload.author_safe_continuity_notes)}"
         if payload.author_safe_continuity_notes
         else "",
-        f"此刻牽動局勢的關鍵實體有：{'、'.join(payload.recent_entity_names)}" if payload.recent_entity_names else "",
-        f"讀者在本章應該明確認知：{'、'.join(payload.reader_visible_facts)}" if payload.reader_visible_facts else "",
-        f"但本章仍需保留未知：{'、'.join(payload.reader_unresolved_questions)}" if payload.reader_unresolved_questions else "",
-        f"章末位置必須收束到：{payload.chapter_end_location_hint}" if payload.chapter_end_location_hint else "",
-        "他知道今晚只能先停在預定的安全邊界，不能再多走一步。" if payload.ending_boundary_rule else "",
-        "有些事現在還不能做，否則就會太早踏進下一段局勢。" if payload.forbidden_next_scene_actions else "",
-        "街上很安靜，主角沒有時間發呆。他知道自己再慢一步，線索就會斷掉。",
-        "他先看眼前能做的事，再決定下一步，不讓情緒把行動拖住。",
-        "現場每一句話、每一個表情、每一次停頓，都可能把他推向新的麻煩。",
+        f"Key entities in play: {'; '.join(payload.recent_entity_names)}" if payload.recent_entity_names else "",
+        f"Reader-visible facts after this chapter: {'; '.join(payload.reader_visible_facts)}"
+        if payload.reader_visible_facts
+        else "",
+        f"Reader should still wonder about: {'; '.join(payload.reader_unresolved_questions)}"
+        if payload.reader_unresolved_questions
+        else "",
+        f"End-of-chapter location hint: {payload.chapter_end_location_hint}" if payload.chapter_end_location_hint else "",
+        "He stops at tonight's safe perimeter; one more step would spill into the next arc."
+        if payload.ending_boundary_rule
+        else "",
+        "Some moves must wait—doing them now would jump the story too early." if payload.forbidden_next_scene_actions else "",
+        "The street is quiet; he cannot afford to stall. Another slow minute and the trail goes cold.",
+        "He handles what is in front of him before choosing the next move—emotion does not drive the feet.",
+        "Every line, glance, and pause on-site could shove him into worse trouble.",
         f"{payload.narrative_script}",
-        "他沒有把事情想得太遠，只先抓住手上已經出現的變化。",
-        f"到章末時，局勢應該已經變了：{payload.ending_state_shift}" if payload.ending_state_shift else "到章末時，他已經被推進下一步，風險也比一開始更高。",
-        "他知道這一章不能停在原地，所以最後一定要把人和局勢推到新的位置。",
+        "He does not forecast too far ahead; he grips the change already in his hands.",
+        f"By chapter end the board should shift: {payload.ending_state_shift}"
+        if payload.ending_state_shift
+        else "By chapter end he is pushed forward; the risk is higher than at sunrise.",
+        "This chapter cannot idle in place—people and stakes must land somewhere new before the last line.",
     ]
-    chapter_content = f"第{state['chapter_id']}章\n\n"
-    while normalized_text_length(chapter_content) < payload.normalized_length_min:
+    chapter_content = f"{chapter_heading_line(state['chapter_id'], context.output_language)}\n\n"
+    while chapter_content_length(chapter_content, _len_lang) < payload.normalized_length_min:
         chapter_content += "\n\n" + "\n".join(paragraph for paragraph in base_paragraphs if paragraph)
     output = AuthorOutput(
         chapter_content=chapter_content,
-        word_count=normalized_text_length(chapter_content),
+        word_count=chapter_content_length(chapter_content, _len_lang),
         extraction_surface_hints=[],
     )
     dumped = output.model_dump(mode="json")
@@ -195,13 +277,13 @@ def run_author(state: dict, context: WorkflowContext) -> tuple[dict, dict, int, 
 def _format_mandatory_new_entities(payload) -> str:
     rows = getattr(payload, "mandatory_new_entities", None) or []
     if not rows:
-        return "無（本章無額外必選創世實體）。"
+        return "(No mandatory new-entity seeds for this chapter.)"
     lines: list[str] = []
     for m in rows:
         lines.append(
-            f"- node_id={m.node_id} | role={m.role or '（未填）'} | 辨識名={m.canonical_name or '（未填）'}\n"
-            f"  寫作提示：{m.writing_brief or '請寫出可辨識特徵。'}\n"
-            f"  硬性要求：正文至少一處出現與 role 或辨識名可對齊的稱呼／特徵，供下游抽取對齊。"
+            f"- node_id={m.node_id} | role={m.role or '(unset)'} | display_name={m.canonical_name or '(unset)'}\n"
+            f"  writing_brief: {m.writing_brief or 'Give recognizable traits.'}\n"
+            f"  hard requirement: the prose must contain at least one surface form aligned with role or display_name for downstream extraction."
         )
     return "\n".join(lines)
 
@@ -209,27 +291,42 @@ def _format_mandatory_new_entities(payload) -> str:
 def _format_writing_note(payload) -> str:
     rows = [str(x).strip() for x in (getattr(payload, "writing_note", None) or []) if str(x).strip()]
     if not rows:
-        return "無"
+        return "(none)"
     return "\n".join(f"- {x}" for x in rows[:12])
 
 
 def _format_active_character_profiles(payload) -> str:
     rows = list(getattr(payload, "active_character_profiles", None) or [])
     if not rows:
-        return "無"
+        return "(none)"
     lines: list[str] = []
     for row in rows[:8]:
         if not isinstance(row, dict):
             continue
-        name = str(row.get("canonical_name") or "").strip() or "（未命名）"
-        current_p = str(row.get("current_personality") or "").strip() or "（未填）"
-        current_s = str(row.get("current_speech_style") or "").strip() or "（未填）"
-        past = str(row.get("past_personality_reference") or "").strip() or "（無歷史）"
+        name = str(row.get("canonical_name") or "").strip() or "(unnamed)"
+        current_p = str(row.get("current_personality") or "").strip() or "(unset)"
+        current_s = str(row.get("current_speech_style") or "").strip() or "(unset)"
+        past = str(row.get("past_personality_reference") or "").strip() or "(no history)"
         lines.append(
             f"- {name} | current_personality={current_p} | current_speech_style={current_s}\n"
             f"  past_personality_reference={past}"
         )
-    return "\n".join(lines) if lines else "無"
+    return "\n".join(lines) if lines else "(none)"
+
+
+def _format_beat_outlines(payload) -> str:
+    rows = list(getattr(payload, "must_include_beat_outlines", None) or [])
+    if not rows:
+        return "\n".join(f"- text={beat}" for beat in (getattr(payload, "must_include_beats", None) or []) if beat) or "(none)"
+    lines: list[str] = []
+    for row in rows:
+        text = str(getattr(row, "text", "") or "").strip()
+        if not text:
+            continue
+        is_ai = bool(getattr(row, "is_ai_invention", False))
+        scope = str(getattr(row, "invention_scope", "") or "").strip() or "(unset)"
+        lines.append(f"- text={text} | is_ai_invention={str(is_ai).lower()} | invention_scope={scope}")
+    return "\n".join(lines) if lines else "(none)"
 
 
 def _build_author_prompt(payload) -> str:
@@ -237,161 +334,160 @@ def _build_author_prompt(payload) -> str:
     reader_feedback_text = _format_feedback_entries(payload.reader_feedback, "reader")
     previous_attempt_draft = _truncate_previous_attempt_draft(payload.previous_attempt_draft)
     tail_excerpt_block = (
-        f"上一章尾端節錄（僅供時刻／情緒／位置銜接；禁止逐字抄進本章正文）：\n{payload.previous_chapter_tail_excerpt}\n\n"
+        f"Previous chapter tail excerpt (timing/mood/position only; do not paste verbatim into this chapter):\n"
+        f"{payload.previous_chapter_tail_excerpt}\n\n"
         if payload.previous_chapter_tail_excerpt
         else ""
     )
     freedom = str(getattr(payload, "ai_freedom_level", None) or "balanced")
     bind = str(getattr(payload, "outline_binding_mode", None) or "ABSENT")
     return f"""
-你是本章幽靈代筆：只根據表層劇本與 beats 寫作，不得猜測額外真相。
-禁止新增 must_include_beats／narrative_script 未涵蓋的新人物、新轉折或新對白動機；含 [AI_INVENTION] 的節點僅可擴寫該範圍。
-請直接輸出小說正文，不要輸出 JSON、標題解釋、欄位名稱或額外註解。
+You are this chapter's ghostwriter: write only from the surface narrative_script and beats—do not invent extra truth.
+Do not add characters, twists, or dialogue motives outside must_include_beats / narrative_script; expand only where schema marks is_ai_invention=true.
+Output novel prose only—no JSON, no field labels, no meta commentary.
 
-## 執行模式（系統）
+## Runtime (system)
 - ai_freedom_level: {freedom}
 - outline_binding_mode: {bind}
 
-## 寫作目標
-節奏與情緒：{payload.tone_direction}
-目標字數參考：{payload.target_word_count}
-實際審核字數下限：正規化後至少 {payload.normalized_length_min}
-實際審核允許範圍：{payload.normalized_length_min} - {payload.normalized_length_max}
+## Targets
+Tone/mood: {payload.tone_direction}
+Target word count (reference): {payload.target_word_count}
+Normalized length floor: at least {payload.normalized_length_min}
+Normalized allowed band: {payload.normalized_length_min} - {payload.normalized_length_max}
 
-## 字數修訂模式
-本次長度指令：{payload.length_adjustment}
-當 `length_adjustment=EXPAND` 時，代表上一版太短，請補入新的有效行動、對話、反應或推進。
-當 `length_adjustment=COMPRESS` 時，代表上一版太長，請保留核心事件與節點，但刪去重複等待、重複心理描寫與無效環境鋪陳。
-當 `length_adjustment=NONE` 時，照正常章節寫作，但仍須落在允許範圍內。
+## Length adjustment mode
+length_adjustment: {payload.length_adjustment}
+- EXPAND: prior draft too short—add new actions, dialogue, reactions, or plot push.
+- COMPRESS: prior draft too long—keep core events/beats, cut repeated waiting, repeated interior monologue, dead-end atmosphere padding.
+- NONE: normal chapter writing, still stay inside the allowed band.
 
-## 作者寫作規定（writing_note）
+## Author writing_note (hard)
 {_format_writing_note(payload)}
-上述規定為本章硬性寫作約束；若與一般風格建議衝突，優先遵守 writing_note。
+These lines are hard constraints for this chapter; if they conflict with generic style advice, obey writing_note.
 
-## ⚠️ 本章絕對法則（硬性；視為物理定律）
-{str(getattr(payload, "safe_chapter_rules", "") or "").strip() or "（無硬性規則）"}
-你在描寫角色行動與系統／遊戲過程時，絕對不可違背上述法則。
+## Absolute chapter laws (hard; treat as physics)
+{str(getattr(payload, "safe_chapter_rules", "") or "").strip() or "(no hard rules)"}
+Character actions and any system/game beats must never violate the laws above.
 
 {_format_local_enforced_rules_for_author(payload)}
 
-## 命名節制鐵律（Show, Don't Label）
-1. 非必要不命名：除非該實體會在後文反覆使用、影響決策，或是本章核心辨識點，否則優先不用新專有名詞。
-2. 允許必要命名，但要節制：若真的需要命名，同章避免連續新增多個平行新名詞；名稱要簡潔，避免「引號+副標+冒號」式包裝。
-3. 陌生事物先描寫再命名：優先寫可觀察的光線、聲音、觸感、動作結果，不要先貼標籤再補解釋。
-4. 若非本章必選創世實體，原則上不要新創做作術語（例如招式代號、系統術語、地點代號）；必要時請用自然語句表達其效果。
+## Naming discipline (show, don't label)
+1. Name only when needed: skip new proper nouns unless the entity recurs, drives decisions, or is a core beat anchor.
+2. If you must name, stay sparse: avoid stacking multiple new parallel names in one chapter; keep names short—no "quote + subtitle + colon" packaging.
+3. Describe before you label: prefer observable light, sound, touch, outcomes before slapping a term on something.
+4. Unless a mandatory seed entity requires it, avoid invented move codenames, system jargon, or location codes—express effects in plain prose.
 
-主筆任務：
+Primary author_goal:
 {payload.author_goal}
 
-## 前情提要
+## Continuity pack
 
-### 與上一章正文銜接（硬性）
-1. 本章是**續寫**：開頭必須從同一敘事時刻**往後**推進（新動作、新對話、新觀察），不得停滯在重述上一章結尾。
-2. 「上一章摘要」與「上一章尾端節錄」只用於掌握因果、位置與情緒，**禁止**將其中整段、整句，或僅替換少數詞語後，當作本章開頭正文貼上。
-3. 禁止把「尾端節錄」當第一段再寫一次；若需銜接，最多一句極短轉場即可，其餘須是**未出現於上述材料**的新句子。
-4. 若必須呼應前章收束，須**改寫**句型與具體細節，避免與摘要／尾錄出現連續十個字以上相同（不計標點與空白）。
+### Hard bridge from prior chapter prose
+1. This chapter **continues** time: the opening must move **forward** (new action, dialogue, observation)—do not stall retelling the prior ending.
+2. Use "previous summary" and "tail excerpt" only for causal/positional/mood grounding—**do not** paste whole sentences from them as this chapter's opening.
+3. Do not repeat the tail excerpt as your first paragraph; at most one very short transition, then **new** sentences absent from those sources.
+4. If you echo a prior beat, **rewrite** wording and specifics; avoid 10+ consecutive characters identical to summary/tail (ignore punctuation/space).
 
-上一章摘要：
+Previous chapter summary:
 {payload.previous_chapter_summary}
 
 {tail_excerpt_block}
-上一章已知位置：
+Last known position (end of prior chapter):
 {payload.last_known_location}
 
-本章開場位置：
+Opening position (this chapter):
 {payload.chapter_start_location}
 
-連續性提醒（已由編劇 POV 過濾，僅含可安全交給主筆的句子；若無則表示本輪不額外提示）：
+Continuity notes (POV-filtered; safe for the author; empty means no extra hints):
 {_format_author_safe_continuity(payload.author_safe_continuity_notes)}
 
-近期重要實體：
+Recent important entities:
 {payload.recent_entity_names}
 
-## 角色性格參照（延續性）
+## Character voice reference
 {_format_active_character_profiles(payload)}
-規則：
-- 當前情節優先遵守 current_personality 與 current_speech_style。
-- 只有在回憶、追述或歷史對照場景，才可參考 past_personality_reference。
+Rules:
+- Obey current_personality and current_speech_style for present action.
+- past_personality_reference is only for flashbacks, retellings, or historical contrast scenes.
 
-## 本章劇情發展方向
-表層劇本：
+## This chapter's narrative direction
+Surface narrative_script:
 {payload.narrative_script}
 
-## 本章必做內容
-必出節點：
-{payload.must_include_beats}
+## Must-do beats
+must_include_beats_with_schema_flags:
+{_format_beat_outlines(payload)}
 
-## 本章必選創世實體（硬性；須可抽取對齊）
+## Mandatory new-entity seeds (hard; must be extractable)
 {_format_mandatory_new_entities(payload)}
 
-章末狀態變化：
+Ending state shift:
 {payload.ending_state_shift}
 
-章末有效位置：
+End-of-chapter location hint:
 {payload.chapter_end_location_hint}
 
-## 本章硬邊界
-本章最遠只能寫到：
+## Hard boundaries
+Farthest you may write:
 {payload.ending_boundary_rule}
 
-本章禁止提前發生：
+Forbidden early beats:
 {payload.forbidden_next_scene_actions}
 
-## 讀者資訊差
-本章結束後讀者應知道：
+## Reader knowledge delta
+After this chapter the reader should know:
 {payload.reader_visible_facts}
 
-本章結束後讀者仍不知道：
+After this chapter the reader should still not know:
 {payload.reader_unresolved_questions}
 
-## 禁止提前揭露
+## Forbidden early reveals
 {payload.forbidden_reveals}
 
-## 上一版草稿（供修稿參考）
+## Prior draft (for revision passes)
 {previous_attempt_draft}
 
-## 修稿優先順序
-1. 第一優先：嚴格完成本章主任務，包含 `author_goal`、`must_include_beats`、`ending_state_shift`、`chapter_end_location_hint`、`ending_boundary_rule`。
-2. 第二優先：修正 `draft_feedback` 指出的硬問題，例如事件鏈缺失、位置不一致、結尾越界、POV 洩漏或違反硬邊界。
-3. 第三優先：只有在前兩者都已滿足時，才參考 `reader_feedback` 做文句、節奏、重複詞、情緒張力等文學層微調。
-4. 若 `reader_feedback` 與本章主任務或 `draft_feedback` 衝突，必須忽略 `reader_feedback`，保留既定事件鏈與章節目標。
+## Revision priority
+1) Satisfy author_goal, must_include_beats, ending_state_shift, chapter_end_location_hint, ending_boundary_rule.
+2) Fix hard issues in draft_feedback (broken chain, inconsistent locations, boundary overshoot, POV leaks).
+3) Only if (1)(2) are met, apply reader_feedback polish (wording, rhythm, repetition, tension).
+4) If reader_feedback conflicts with (1)(2), ignore reader_feedback.
 
-## 歷史退稿回饋
-編輯部邏輯建議：
+## Historical rejection notes (logic)
 {draft_feedback_text}
 
-## 讀者回饋
-讀者回饋：
+## Reader feedback
 {reader_feedback_text}
 
-請注意：讀者回饋只代表文學優化建議，不得推翻既定事件鏈、必出節點、章末位置與本章硬邊界。
+Reader feedback is literary polish only—it cannot override the locked event chain, beats, end location, or hard boundaries.
 
-## 你的寫作要求
-1. 若上方提供了「上一版草稿」，代表這次是修稿，不是從零重寫；優先保留已經成立且未被 feedback 指出的內容。
-2. 你必須先完成本章主任務與所有「本章必做內容」，再考慮文學潤飾；不可為了回應讀者建議而刪除關鍵事件。
-3. 本章必須出現新的行動、新的發現、新的衝突，至少推進一個明確事件。
-4. 章末狀態必須與章初不同，並符合指定的章末狀態變化。
-5. 若上一版草稿已經完成某些必出節點，且沒有被 `draft_feedback` 指出有問題，請沿用並局部修正，不要任意改成另一組事件。
-6. `draft_feedback` 屬於硬修正指令；`reader_feedback` 只屬於軟性優化建議，不得凌駕於劇情任務與硬邊界之上。
-7. 你可以利用讀者知道與不知道的資訊差製造懸念，但不得直接揭露禁止提前揭露的內容。
-8. 若本章涉及移動，必須清楚寫出角色離開了哪裡、抵達了哪裡，或章末停留在哪裡，讓位置可被抽取。
-9. 不得自行補完底層真相，也不得擅自新增與本章任務無關的新機關、新謎團或新世界規則。
-10. 語言要自然白話，句子偏短，優先寫具體動作、對話與可觀察細節。
-11. 少用比喻、排比、連續形容詞，不要每段都先鋪氣氛再進劇情。
-12. 字數審核看的是正規化後字數，不計空白與大多數標點；若 `length_adjustment=EXPAND` 或內容偏短，請直接補足新的有效情節與對話，不要灌水重述。
-13. `chapter_end_location_hint` 與「本章硬邊界」是硬限制，不是參考建議；正文最遠只能停在那裡。
-14. 只要碰到「本章禁止提前發生」中的任一動作，就代表你已經寫到下一章，必須停下並改寫結尾。
-15. 若 feedback 指的是局部問題，例如結尾越界、位置不一致、缺少某個 beat，請只修正相關段落，不要把整章前半全部推翻重寫。
-16. 若 `length_adjustment=COMPRESS` 或內容偏長，優先刪除重複檢查、重複等待、連續空轉心理描寫與重複氛圍句，但不得刪掉 `must_include_beats`、`ending_state_shift` 與章末位置。
-17. 嚴格遵守「前情提要」內「與上一章正文銜接」四條：不得逐字或近抄「上一章摘要」「上一章尾端節錄」；本章開頭必須是新的推進句，不是前章結尾的複製。
-18. 遇到陌生機制、物件或區域時，先寫角色可感知到的現象與影響，再決定是否需要命名；禁止用術語替代描寫。
-19. 非本章必選創世實體，若無劇情必要不得任意發明帶引號或冒號格式的專屬名稱；必要命名可保留，但同章須控制密度。
+## Writing checklist
+1) If a prior draft exists, revise—do not nuke working material untouched by feedback.
+2) Finish all must-do beats before cosmetic polish; never delete key events to please readers.
+3) Add at least one clear on-page push: new action, discovery, or conflict.
+4) End state must differ from the opening and match ending_state_shift.
+5) If the prior draft already satisfied beats and draft_feedback is silent, patch locally—do not swap in a different event set.
+6) draft_feedback is hard; reader_feedback is soft.
+7) Use knowledge asymmetry for suspense—never violate forbidden_reveals.
+8) If characters move, make leave/arrive/stay explicit for extraction.
+9) No off-task new puzzles, systems, or world rules; no resolving hidden ground-truth on your own.
+10) Plain, short sentences; concrete action and dialogue first.
+11) Avoid purple stacks of metaphor; do not open every paragraph with mood-only staging.
+12) Length checks use normalized counts; for EXPAND/short drafts add real scenes/dialogue, not repetition padding.
+13) chapter_end_location_hint and hard boundaries are ceilings, not suggestions.
+14) If you execute any forbidden_next_scene_actions beat, you have jumped to the next chapter—rewrite the ending.
+15) For localized feedback (ending overshoot, missing beat), patch the affected spans only—do not rewrite the whole front half.
+16) For COMPRESS/long drafts, cut redundant patrol loops, idle waiting, spiral interior monologue, and repeated mood lines—never drop must_include_beats, ending_state_shift, or end location.
+17) Honor the four bridge rules: no near-copy of summary/tail; the opening must be new forward motion.
+18) For unfamiliar mechanisms/objects/areas, show perceivable effects before naming; do not substitute jargon for description.
+19) Without plot need, avoid inventing quoted/colon-heavy proprietary names; if you must name, keep density low.
 """.strip()
 
 
 def _format_feedback_entries(entries: list[dict], source: str) -> str:
     if not entries:
-        return "無"
+        return "(none)"
     lines: list[str] = []
     for index, entry in enumerate(entries, start=1):
         attempt = entry.get("attempt", index)
@@ -400,7 +496,7 @@ def _format_feedback_entries(entries: list[dict], source: str) -> str:
         message = entry.get("message", "")
         if source == "draft":
             lines.append(
-                f"- 第 {attempt} 次退稿 | violation={violation} | suggestion={suggestion} | message={message}"
+                f"- rejection attempt {attempt} | violation={violation} | suggestion={suggestion} | message={message}"
             )
             missing_struct = entry.get("missing_mandatory_entities")
             if isinstance(missing_struct, list) and missing_struct:
@@ -411,117 +507,67 @@ def _format_feedback_entries(entries: list[dict], source: str) -> str:
                     nid = row.get("node_id", "")
                     note = row.get("note", "")
                     if note == "not_in_planned":
-                        sub.append(f"  · {nid}（規劃表無此列）")
+                        sub.append(f"  · {nid} (not listed in planner table)")
                     else:
                         sub.append(
-                            f"  · node_id={nid} | 類型={row.get('node_type', '')} | "
-                            f"規劃名稱={row.get('canonical_name', '')!r} | 任務角色={row.get('role', '')!r}"
+                            f"  · node_id={nid} | node_type={row.get('node_type', '')} | "
+                            f"planned_name={row.get('canonical_name', '')!r} | role={row.get('role', '')!r}"
                         )
                 if sub:
-                    lines.append("  缺失實體（結構化）：\n" + "\n".join(sub))
+                    lines.append("  missing entities (structured):\n" + "\n".join(sub))
         else:
             lines.append(
-                f"- 第 {attempt} 次讀者評審 | score={entry.get('score', '')} | suggestion={entry.get('suggestion', '')} | message={message}"
+                f"- reader review attempt {attempt} | score={entry.get('score', '')} | "
+                f"suggestion={entry.get('suggestion', '')} | message={message}"
             )
     return "\n".join(lines)
 
 
 def _truncate_previous_attempt_draft(text: str, max_chars: int = 7000) -> str:
     if not text:
-        return "無"
+        return "(none)"
     if len(text) <= max_chars:
         return text
-    return f"{text[:max_chars]}\n\n[上一版草稿過長，僅提供前 {max_chars} 字作為修稿參考]"
+    return f"{text[:max_chars]}\n\n[Prior draft truncated to first {max_chars} characters for revision context.]"
 
 
 def _build_expansion_prompt(payload, chapter_content: str, missing_length: int) -> str:
     return f"""
-你要續寫同一章正文，不能重寫開頭，也不能摘要前文。
-目前正文的正規化字數仍不足，還差至少 {missing_length}。
-請直接承接最後一段往下寫，用新的有效情節、對話、動作與反應補足，不要灌水，不要重複已經寫過的資訊。
-語言維持自然白話、句子偏短、少用比喻。
-你不能跨過本章硬邊界；若必出節點已完成，請只在同一場景內補足反應、餘韻或短對話，不可開啟下一場景。
-章末有效位置：{payload.chapter_end_location_hint}
-本章硬邊界：{payload.ending_boundary_rule}
-禁止提前發生：{payload.forbidden_next_scene_actions}
-若尚未完成以下節點，優先補上：
+Continue the SAME chapter body—do not rewrite the opening and do not summarize prior text.
+Normalized length is still short by at least {missing_length}.
+Continue from the last paragraph with new plot, dialogue, action, and reaction—no padding, no repeating already-stated facts.
+Keep plain, short sentences; avoid heavy metaphor.
+Do not cross hard boundaries; if must_include_beats are satisfied, extend only with reactions/aftermath in the same scene—no new scene launch.
+End-of-chapter location hint: {payload.chapter_end_location_hint}
+Hard boundary: {payload.ending_boundary_rule}
+Forbidden early beats: {payload.forbidden_next_scene_actions}
+If any beats below are unfinished, prioritize them:
 {payload.must_include_beats}
 
-目前正文：
+Current body:
 {chapter_content}
 """.strip()
 
 
 def _build_compression_prompt(payload, chapter_content: str, excess_length: int) -> str:
     return f"""
-你要壓縮同一章正文，不能改成摘要，也不能刪掉核心事件。
-目前正文的正規化字數超出上限，至少要再縮短 {excess_length}。
-請保留既有事件順序、must_include_beats、章末狀態與章末位置，但刪去重複等待、重複巡視、重複心理獨白、重複環境描寫與無效句。
-語言維持自然白話、句子偏短，直接重寫成更緊湊的同章正文。
-章末有效位置：{payload.chapter_end_location_hint}
-本章硬邊界：{payload.ending_boundary_rule}
-禁止提前發生：{payload.forbidden_next_scene_actions}
-必須保留的節點：
+Compress the SAME chapter body—do not turn it into summary and do not delete core events.
+Normalized length exceeds the cap; shorten by at least {excess_length}.
+Keep event order, must_include_beats, ending state, and end location—cut redundant waiting, patrol loops, spiral interior monologue, repeated setting lines, and dead sentences.
+Rewrite as tighter prose in plain short sentences.
+End-of-chapter location hint: {payload.chapter_end_location_hint}
+Hard boundary: {payload.ending_boundary_rule}
+Forbidden early beats: {payload.forbidden_next_scene_actions}
+Beats you must keep:
 {payload.must_include_beats}
 
-目前正文：
+Current body:
 {chapter_content}
 """.strip()
 
 
 def _repair_boundary_if_needed(chapter_id: int, payload, chapter_content: str, context: WorkflowContext, profile) -> tuple[str, int, int]:
-    violations = _detect_boundary_violations(chapter_content, payload)
-    if not violations:
-        return chapter_content, 0, 0
-
-    repair_prompt = _build_boundary_repair_prompt(payload, chapter_content, violations)
-    repair_result = context.llm_client.invoke_text(repair_prompt, profile)
-    repaired_content = _ensure_chapter_heading(chapter_id, repair_result.content)
-    return repaired_content, repair_result.token_usage, repair_result.latency_ms
-
-
-def _detect_boundary_violations(chapter_content: str, payload) -> list[str]:
-    violations: list[str] = []
-    lowered_content = chapter_content.casefold()
-    for action in payload.forbidden_next_scene_actions:
-        for cue in _extract_boundary_cues(action):
-            if cue.casefold() in lowered_content:
-                violations.append(action)
-                break
-
-    boundary_feedback = _format_feedback_entries(payload.draft_feedback, "draft")
-    boundary_keywords = ("超出", "結尾", "章末", "安全屋", "下一章", "停留在", "截斷", "巷弄", "外圍")
-    if any(keyword in boundary_feedback for keyword in boundary_keywords):
-        violations.extend(message.get("message", "") for message in payload.draft_feedback if any(keyword in message.get("message", "") for keyword in boundary_keywords))
-
-    deduped: list[str] = []
-    for violation in violations:
-        if violation and violation not in deduped:
-            deduped.append(violation)
-    return deduped
-
-
-def _build_boundary_repair_prompt(payload, chapter_content: str, violations: list[str]) -> str:
-    return f"""
-你要修正同一章正文的結尾，原因是它已超出本章邊界。
-請保留前面已經成立且不違規的內容，但重寫最後一段到最後數段，讓本章停在正確終點。
-你必須滿足以下硬限制：
-- 章末有效位置：{payload.chapter_end_location_hint}
-- 本章硬邊界：{payload.ending_boundary_rule}
-- 禁止提前發生：{payload.forbidden_next_scene_actions}
-
-這次偵測到的越界內容：
-{violations}
-
-請特別注意：
-1. 不可進入下一個完整場景、房間、據點或任務節點。
-2. 不可解除原本要保留到下一章的懸念。
-3. 可以保留撤離後的餘韻，但角色最遠只能停在本章指定的外圍或章末位置。
-4. 直接輸出修正版正文，不要加說明。
-
-目前正文：
-{chapter_content}
-""".strip()
+    return chapter_content, 0, 0
 
 
 def _extract_boundary_cues(action: str) -> list[str]:
@@ -537,20 +583,10 @@ def _extract_boundary_cues(action: str) -> list[str]:
     return cues
 
 
-def _ensure_chapter_heading(chapter_id: int, content: str) -> str:
+def _ensure_chapter_heading(chapter_id: int, content: str, output_language: str) -> str:
     stripped = content.strip()
-    if stripped.startswith(f"第{chapter_id}章"):
-        return stripped
-    return f"第{chapter_id}章\n\n{stripped}"
-
-
-def _strip_chapter_heading(content: str) -> str:
-    stripped = content.strip()
-    if not stripped.startswith("第"):
-        return stripped
     lines = stripped.splitlines()
-    if not lines:
+    if lines and heading_first_line_matches_chapter(lines[0], chapter_id):
         return stripped
-    if len(lines[0]) <= 12 and "章" in lines[0]:
-        return "\n".join(lines[1:]).strip()
-    return stripped
+    head = chapter_heading_line(chapter_id, output_language)
+    return f"{head}\n\n{stripped}"

@@ -64,9 +64,9 @@ class MockLLMClient:
 
     def invoke_text(self, prompt: str, profile: AgentPromptProfile) -> LLMResult:
         content = (
-            "【Mock LLM】\n"
-            "這是一個可替換的本機回應，用來讓多 Agent 工作流、觀測面板與資料落盤先完整跑通。\n"
-            f"摘要：{prompt[:280]}"
+            "[Mock LLM]\n"
+            "This is a local stub response so multi-agent workflows, observability, and persistence can run end-to-end.\n"
+            f"Summary: {prompt[:280]}"
         )
         return LLMResult(content=content, token_usage=max(32, len(prompt) // 2), latency_ms=35)
 
@@ -492,7 +492,8 @@ class OpenAICompatibleLLMClient:
         schema = json.dumps(response_model.model_json_schema(), ensure_ascii=False)
         system_prompt = (
             f"{profile.system_prompt}\n"
-            "你必須只輸出單一 JSON 物件，不可加入 markdown、註解或額外說明。"
+            "You must return exactly one JSON object and nothing else. "
+            "Do not include markdown, comments, or extra explanation."
             f"\nJSON Schema:\n{schema}"
         )
         data, latency_ms = self._request(
@@ -528,12 +529,12 @@ class OpenAICompatibleLLMClient:
                 },
             )
             repair_prompt = (
-                "請修復下列輸出，使其成為符合 schema 的單一 JSON 物件。"
-                f"\nSchema:\n{schema}\n原始輸出:\n{content}"
+                "Repair the following output so it becomes exactly one valid JSON object that matches the schema."
+                f"\nSchema:\n{schema}\nRaw output:\n{content}"
             )
             repair_data, repair_latency_ms = self._request(
                 messages=[
-                    {"role": "system", "content": "你是 JSON 修復器，只能回傳合法 JSON。"},
+                    {"role": "system", "content": "You are a JSON repair assistant. Return valid JSON only."},
                     {"role": "user", "content": repair_prompt},
                 ],
                 agent_name=profile.agent_name,

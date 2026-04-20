@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 
 from app.domain.schema import EnforcedRuleContext, GraphSnapshot, NodeType, EdgeType, VectorDocument
+from app.services.workflow.output_language import chapter_context_line, normalize_output_language
+from app.services.workflow.utils import latin_word_boundary_search, looks_like_latin_word
 
 
 def build_continuity_packet(
@@ -11,6 +13,8 @@ def build_continuity_packet(
     vector_hits: list[VectorDocument],
     pov_character_id: str = "",
     active_epoch_id: str = "",
+    *,
+    output_language: str | None = None,
 ) -> dict:
     if not chapters:
         return {
@@ -36,9 +40,11 @@ def build_continuity_packet(
         active_epoch_id,
     )
 
+    ol = normalize_output_language(output_language)
     recent_context_lines = []
     for chapter, summary in zip(chapters, chapter_summaries, strict=False):
-        recent_context_lines.append(f"第{chapter['chapter_id']}章：{summary}")
+        cid = int(chapter["chapter_id"])
+        recent_context_lines.append(chapter_context_line(cid, summary, ol))
 
     return {
         "previous_chapter_summary": previous_summary,
@@ -162,11 +168,22 @@ def _collect_recent_entities(
     lowered_text = chapter_text.lower()
     for node in graph_snapshot.nodes:
         canonical_name = node.canonical_name.strip()
-        if canonical_name and canonical_name.lower() in lowered_text:
+        # Guard short names from substring pollution (e.g. "Li" matching inside unrelated words).
+        if len(canonical_name) < 3:
+            continue
+        if canonical_name and (
+            (looks_like_latin_word(canonical_name) and latin_word_boundary_search(canonical_name, chapter_text))
+            or (not looks_like_latin_word(canonical_name) and canonical_name.lower() in lowered_text)
+        ):
             names.append(canonical_name)
         for alias in getattr(node, "aliases", []):
             alias = str(alias).strip()
-            if alias and alias.lower() in lowered_text:
+            if len(alias) < 3:
+                continue
+            if alias and (
+                (looks_like_latin_word(alias) and latin_word_boundary_search(alias, chapter_text))
+                or (not looks_like_latin_word(alias) and alias.lower() in lowered_text)
+            ):
                 names.append(canonical_name or alias)
 
     seen: set[str] = set()

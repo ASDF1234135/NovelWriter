@@ -9,6 +9,7 @@ import {
   fetchMacroSnapshot,
   fetchStoryDetail,
   fetchWritingPreamble,
+  regenerateChapterSummary,
   fetchWorkflow,
   macroCompile,
   putMacroPlan,
@@ -44,6 +45,7 @@ import type {
   StoryCastSeedEntry,
   StoryDetailResponse,
   StoryInput,
+  StoryOutputLanguage,
   StoryProjectBundlePayload,
   WorkflowPayload,
   WritingPreambleResponse,
@@ -54,8 +56,29 @@ import { mergeMacroBibles } from "../features/macro-plan/macroPlanHelpers";
 /** Same heuristic as backend OUTLINE_MIN_CHARS_FOR_FULL_BINDING — UX hint only. */
 const OUTLINE_FULL_BINDING_MIN_CHARS = 100;
 
-function storyDetailToInput(d: StoryDetailResponse): StoryInput {
+const CHAPTER_SUMMARIZER_LLM_SOURCE = "CHAPTER_SUMMARIZER_LLM";
+
+/** True when backend persisted a summary row whose text was not produced by the chapter_summarizer LLM path. */
+function plotSummarySourceNeedsRegenerate(src: string | undefined): boolean {
+  if (src === undefined || src === null || src === "") return false;
+  return src !== CHAPTER_SUMMARIZER_LLM_SOURCE;
+}
+
+export function normalizeOutputLanguage(v: unknown): StoryOutputLanguage {
+  if (v === "en" || v === "zh-Hant" || v === "zh-Hans") return v;
+  const s = String(v ?? "").trim().toLowerCase();
+  if (s === "zh-cn" || s === "zh-sg" || s === "zh-hans") return "zh-Hans";
+  if (s === "zh-tw" || s === "zh-hk" || s === "zh-mo" || s === "zh-hant") return "zh-Hant";
+  if (s === "en-us" || s === "en-gb") return "en";
+  return "zh-Hant";
+}
+
+export function storyDetailToInput(
+  d: StoryDetailResponse,
+  fallbackLanguage: StoryOutputLanguage = "zh-Hant",
+): StoryInput {
   const bible = d.bible;
+  const rawLanguage = (d as StoryDetailResponse & { output_language?: unknown }).output_language;
   return {
     title: d.title,
     premise: d.premise,
@@ -65,7 +88,32 @@ function storyDetailToInput(d: StoryDetailResponse): StoryInput {
     target_total_words: d.target_total_words,
     plan_retry_limit: d.plan_retry_limit,
     draft_loop_retry_limit: d.draft_loop_retry_limit,
+    output_language:
+      rawLanguage === undefined || rawLanguage === null || String(rawLanguage).trim() === ""
+        ? fallbackLanguage
+        : normalizeOutputLanguage(rawLanguage),
   };
+}
+
+function normalizeStoryInputForCompare(input: StoryInput): StoryInput {
+  const castSeed = Array.isArray(input.cast_seed) ? [...input.cast_seed] : [];
+  castSeed.sort((a, b) => String(a.canonical_name ?? "").localeCompare(String(b.canonical_name ?? "")));
+  return {
+    title: String(input.title ?? "").trim(),
+    premise: String(input.premise ?? "").trim(),
+    bible: input.bible && typeof input.bible === "object" && !Array.isArray(input.bible) ? input.bible : {},
+    macro_author_notes: String(input.macro_author_notes ?? ""),
+    cast_seed: castSeed,
+    target_total_words: Number(input.target_total_words ?? 0),
+    plan_retry_limit: Number(input.plan_retry_limit ?? 0),
+    draft_loop_retry_limit: Number(input.draft_loop_retry_limit ?? 0),
+    output_language: normalizeOutputLanguage(input.output_language),
+  };
+}
+
+export function isStoryConfigDirty(current: StoryInput | null, persisted: StoryInput | null): boolean {
+  if (!current || !persisted) return false;
+  return JSON.stringify(normalizeStoryInputForCompare(current)) !== JSON.stringify(normalizeStoryInputForCompare(persisted));
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
@@ -136,6 +184,7 @@ function parseStorySettingsImportJson(raw: string): StoryInput {
     target_total_words,
     plan_retry_limit,
     draft_loop_retry_limit,
+    output_language: normalizeOutputLanguage(candidate.output_language),
   };
 }
 
@@ -238,6 +287,7 @@ function mergeStorySettings(current: StoryInput, incoming: StoryInput): StoryInp
     draft_loop_retry_limit: Number.isFinite(current.draft_loop_retry_limit)
       ? current.draft_loop_retry_limit
       : incoming.draft_loop_retry_limit,
+    output_language: normalizeOutputLanguage(current.output_language ?? incoming.output_language),
   };
 }
 
@@ -347,12 +397,14 @@ export default function App() {
   const [notice, setNotice] = useState<string>("");
   const [chapterAlreadyCompleted, setChapterAlreadyCompleted] = useState(false);
   const [storyConfigSnapshot, setStoryConfigSnapshot] = useState<StoryInput | null>(null);
+  const [persistedStoryConfig, setPersistedStoryConfig] = useState<StoryInput | null>(null);
   const [configurationLocked, setConfigurationLocked] = useState(false);
   const [chapterOutline, setChapterOutline] = useState("");
   const [chapterHardRules, setChapterHardRules] = useState("");
   const [aiFreedomLevel, setAiFreedomLevel] = useState<AiFreedomLevel>("balanced");
   const [writingPreamble, setWritingPreamble] = useState<WritingPreambleResponse | null>(null);
   const [preamblePanelOpen, setPreamblePanelOpen] = useState(true);
+  const [regenSummaryBusyChapter, setRegenSummaryBusyChapter] = useState<number | null>(null);
   const [configVersion, setConfigVersion] = useState(0);
   const workflowEventsUnsubRef = useRef<(() => void) | null>(null);
   const storyIdRef = useRef(storyId);
@@ -397,6 +449,16 @@ export default function App() {
     const waiting =
       workflow?.run?.requires_hitl === true || String(workflow?.state?.workflow_status ?? "") === "WAITING_HITL";
     return waiting && reason === "Alignment_Rules_Required";
+  }, [workflow]);
+
+  const workflowHitlActive = useMemo(() => {
+    if (!workflow) return false;
+    const st = String(workflow.state.workflow_status ?? "");
+    return (
+      workflow.run.requires_hitl === true ||
+      workflow.run.status === "WAITING_HITL" ||
+      st === "WAITING_HITL"
+    );
   }, [workflow]);
 
   useEffect(() => {
@@ -465,6 +527,30 @@ export default function App() {
     return `分卷 ${volumes.length} · 里程碑 ${anchors.length}${castPart}`;
   }, [macroData]);
 
+  const preambleHasNonLlmSummary = useMemo(() => {
+    if (!writingPreamble || chapterId <= 1) return false;
+    const prev = writingPreamble.plot_progress.previous_chapter;
+    if (plotSummarySourceNeedsRegenerate(prev.plot_summary_source)) {
+      return true;
+    }
+    return writingPreamble.plot_progress.recent_summaries.some((r) => plotSummarySourceNeedsRegenerate(r.plot_summary_source));
+  }, [writingPreamble, chapterId]);
+
+  async function handleRegenerateChapterSummary(targetChapterId: number) {
+    if (!storyId) return;
+    setRegenSummaryBusyChapter(targetChapterId);
+    setError("");
+    try {
+      await regenerateChapterSummary(storyId, targetChapterId);
+      const p = await fetchWritingPreamble(storyId, chapterId);
+      setWritingPreamble(p);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "重新產生摘要失敗");
+    } finally {
+      setRegenSummaryBusyChapter(null);
+    }
+  }
+
   async function handleCreateStory(payload: StoryInput) {
     setBusy(true);
     setError("");
@@ -474,6 +560,7 @@ export default function App() {
       setStoryId(String(story.story_id));
       setStoryTitle(payload.title);
       setStoryConfigSnapshot(payload);
+      setPersistedStoryConfig(payload);
       setConfigurationLocked(false);
       setConfigVersion((v) => v + 1);
       setWorkflow(null);
@@ -504,6 +591,7 @@ export default function App() {
     setChapterAlreadyCompleted(false);
     setWritingPreamble(null);
     setStoryConfigSnapshot(null);
+    setPersistedStoryConfig(null);
     setConfigurationLocked(false);
     setConfigVersion((v) => v + 1);
     setError("");
@@ -525,6 +613,7 @@ export default function App() {
     setChapterAlreadyCompleted(false);
     setWritingPreamble(null);
     setStoryConfigSnapshot(null);
+    setPersistedStoryConfig(null);
     setConfigurationLocked(false);
     setConfigVersion((v) => v + 1);
     setError("");
@@ -539,7 +628,9 @@ export default function App() {
     workflowEventsUnsubRef.current = null;
     try {
       const detail = await fetchStoryDetail(selectedId);
-      setStoryConfigSnapshot(storyDetailToInput(detail));
+      const nextConfig = storyDetailToInput(detail, storyConfigSnapshot?.output_language ?? "zh-Hant");
+      setStoryConfigSnapshot(nextConfig);
+      setPersistedStoryConfig(nextConfig);
       setConfigurationLocked(detail.configuration_locked);
       setConfigVersion((v) => v + 1);
       const snap = await fetchMacroSnapshot(selectedId);
@@ -583,12 +674,34 @@ export default function App() {
     setError("");
     setNotice("");
     try {
+      if (!configurationLocked && isStoryConfigDirty(storyConfigSnapshot, persistedStoryConfig) && storyConfigSnapshot) {
+        const confirmed = window.confirm(
+          "偵測到未儲存的故事設定（包含輸出語言）。是否先儲存設定再執行 compile？",
+        );
+        if (!confirmed) {
+          setNotice("已取消 compile；請先儲存設定後再試。");
+          return;
+        }
+        await patchStory(storyId, {
+          title: storyConfigSnapshot.title,
+          premise: storyConfigSnapshot.premise,
+          target_total_words: storyConfigSnapshot.target_total_words,
+          plan_retry_limit: storyConfigSnapshot.plan_retry_limit,
+          draft_loop_retry_limit: storyConfigSnapshot.draft_loop_retry_limit,
+          macro_author_notes: storyConfigSnapshot.macro_author_notes ?? "",
+          cast_seed: storyConfigSnapshot.cast_seed ?? [],
+          output_language: normalizeOutputLanguage(storyConfigSnapshot.output_language),
+        });
+        setPersistedStoryConfig(storyConfigSnapshot);
+      }
       const result = await macroCompile(storyId);
       setMacroData(result);
       setGraph(await fetchGraph(storyId));
       try {
         const detail = await fetchStoryDetail(storyId);
-        setStoryConfigSnapshot(storyDetailToInput(detail));
+        const nextConfig = storyDetailToInput(detail, storyConfigSnapshot?.output_language ?? "zh-Hant");
+        setStoryConfigSnapshot(nextConfig);
+        setPersistedStoryConfig(nextConfig);
       } catch {
         /* optional refresh */
       }
@@ -613,8 +726,10 @@ export default function App() {
         draft_loop_retry_limit: payload.draft_loop_retry_limit,
         macro_author_notes: payload.macro_author_notes ?? "",
         cast_seed: payload.cast_seed ?? [],
+        output_language: normalizeOutputLanguage(payload.output_language),
       });
       setStoryConfigSnapshot(payload);
+      setPersistedStoryConfig(payload);
       setStoryTitle(payload.title);
     } catch (err) {
       setError(err instanceof Error ? err.message : "儲存設定失敗");
@@ -705,6 +820,7 @@ export default function App() {
 
   /** After HITL apply returns: resume SSE if run is in progress, else finalize or stay idle at next HITL. */
   function applyHitlWorkflowResponse(wf: WorkflowPayload) {
+    setError("");
     const st = String(wf.state.workflow_status ?? "");
     const terminal = st === "COMPLETED" || st === "FAILED";
     const waiting = wf.run.requires_hitl === true || st === "WAITING_HITL";
@@ -738,7 +854,9 @@ export default function App() {
       setWorkflow(initial);
       try {
         const detail = await fetchStoryDetail(storyId);
-        setStoryConfigSnapshot(storyDetailToInput(detail));
+        const nextConfig = storyDetailToInput(detail, storyConfigSnapshot?.output_language ?? "zh-Hant");
+        setStoryConfigSnapshot(nextConfig);
+        setPersistedStoryConfig(nextConfig);
         setConfigurationLocked(detail.configuration_locked);
       } catch {
         setConfigurationLocked(true);
@@ -794,6 +912,7 @@ export default function App() {
         target_total_words: 100000,
         plan_retry_limit: 3,
         draft_loop_retry_limit: 3,
+        output_language: "zh-Hant",
       } satisfies StoryInput);
     const vols = macroData?.volumes ?? [];
     const ancs = macroData?.anchors ?? [];
@@ -833,6 +952,7 @@ export default function App() {
           target_total_words: 100000,
           plan_retry_limit: 3,
           draft_loop_retry_limit: 3,
+          output_language: "zh-Hant",
         } satisfies StoryInput);
       const merged = mode === "replace" ? parsedStory : mergeStorySettings(current, parsedStory);
       if (parsedMacro && (!merged.bible || Object.keys(merged.bible).length === 0) && isObjectRecord(parsedMacro.bible)) {
@@ -846,8 +966,10 @@ export default function App() {
         draft_loop_retry_limit: merged.draft_loop_retry_limit,
         macro_author_notes: merged.macro_author_notes ?? "",
         cast_seed: merged.cast_seed ?? [],
+        output_language: normalizeOutputLanguage(merged.output_language),
       });
       setStoryConfigSnapshot(merged);
+      setPersistedStoryConfig(merged);
       setStoryTitle(merged.title);
     }
 
@@ -1129,18 +1251,38 @@ export default function App() {
                         </p>
                       ) : (
                         <>
-                          {writingPreamble.plot_progress.previous_chapter.plot_summary ? (
-                            <p className="mb-2 font-body text-sm leading-relaxed text-on-surface">
-                              <span className="font-semibold text-on-surface">
-                                第 {writingPreamble.plot_progress.previous_chapter.chapter_id} 章摘要
-                              </span>
-                              {writingPreamble.plot_progress.previous_chapter.status ? (
-                                <span className="ml-2 text-xs text-on-surface-variant">
-                                  （{writingPreamble.plot_progress.previous_chapter.status}）
-                                </span>
-                              ) : null}
-                              ：{writingPreamble.plot_progress.previous_chapter.plot_summary}
+                          {preambleHasNonLlmSummary ? (
+                            <p className="mb-2 rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2 font-body text-xs leading-relaxed text-on-surface">
+                              部分章節摘要並非由章節整理器（LLM）直接產生（例如備援摘要或舊資料）。建議在對應章節旁點「重新產生摘要」，以目前手稿正文重新跑結構化摘要。
                             </p>
+                          ) : null}
+                          {writingPreamble.plot_progress.previous_chapter.plot_summary ? (
+                            <div className="mb-2 flex flex-wrap items-start gap-2 font-body text-sm leading-relaxed text-on-surface">
+                              <p className="min-w-0 flex-1">
+                                <span className="font-semibold text-on-surface">
+                                  第 {writingPreamble.plot_progress.previous_chapter.chapter_id} 章摘要
+                                </span>
+                                {writingPreamble.plot_progress.previous_chapter.status ? (
+                                  <span className="ml-2 text-xs text-on-surface-variant">
+                                    （{writingPreamble.plot_progress.previous_chapter.status}）
+                                  </span>
+                                ) : null}
+                                ：{writingPreamble.plot_progress.previous_chapter.plot_summary}
+                              </p>
+                              {writingPreamble.plot_progress.previous_chapter.chapter_id != null &&
+                              plotSummarySourceNeedsRegenerate(writingPreamble.plot_progress.previous_chapter.plot_summary_source) ? (
+                                <button
+                                  type="button"
+                                  className="shrink-0 rounded-md border border-outline-variant/30 px-2 py-1 text-[11px] font-medium text-secondary hover:bg-surface-container-highest/80 disabled:opacity-50"
+                                  disabled={regenSummaryBusyChapter !== null || busy}
+                                  onClick={() => void handleRegenerateChapterSummary(writingPreamble.plot_progress.previous_chapter.chapter_id!)}
+                                >
+                                  {regenSummaryBusyChapter === writingPreamble.plot_progress.previous_chapter.chapter_id
+                                    ? "處理中…"
+                                    : "重新產生摘要"}
+                                </button>
+                              ) : null}
+                            </div>
                           ) : (
                             <p className="mb-2 font-body text-sm text-on-surface-variant">
                               尚無第 {chapterId - 1} 章的結構化摘要；完稿並跑過流程後會累積在此。
@@ -1156,10 +1298,25 @@ export default function App() {
                             </ul>
                           ) : null}
                           {writingPreamble.plot_progress.recent_summaries.length > 0 ? (
-                            <ul className="list-inside list-disc space-y-1 font-body text-sm text-on-surface-variant">
+                            <ul className="list-none space-y-2 font-body text-sm text-on-surface-variant">
                               {writingPreamble.plot_progress.recent_summaries.map((r) => (
-                                <li key={r.chapter_id}>
-                                  第 {r.chapter_id} 章：{r.plot_summary || "（無摘要）"}
+                                <li
+                                  key={r.chapter_id}
+                                  className="flex flex-wrap items-start gap-2 rounded-md border border-outline-variant/10 bg-surface-container-highest/40 px-2 py-1.5"
+                                >
+                                  <span className="min-w-0 flex-1">
+                                    第 {r.chapter_id} 章：{r.plot_summary || "（無摘要）"}
+                                  </span>
+                                  {plotSummarySourceNeedsRegenerate(r.plot_summary_source) ? (
+                                    <button
+                                      type="button"
+                                      className="shrink-0 rounded-md border border-outline-variant/30 px-2 py-0.5 text-[11px] font-medium text-secondary hover:bg-surface-container-highest/80 disabled:opacity-50"
+                                      disabled={regenSummaryBusyChapter !== null || busy}
+                                      onClick={() => void handleRegenerateChapterSummary(r.chapter_id)}
+                                    >
+                                      {regenSummaryBusyChapter === r.chapter_id ? "處理中…" : "重新產生摘要"}
+                                    </button>
+                                  ) : null}
                                 </li>
                               ))}
                             </ul>
@@ -1278,6 +1435,7 @@ export default function App() {
             currentChapterId={selectedChapter?.chapter_id ?? chapterId}
             chapters={chapters}
             chapter={selectedChapter}
+            outputLanguage={normalizeOutputLanguage(storyConfigSnapshot?.output_language ?? "zh-Hant")}
             busy={busy}
             onSelectChapter={async (nextChapterId) => {
               if (!storyId) return;
@@ -1313,7 +1471,13 @@ export default function App() {
             rightRail={
               <div className="flex flex-col gap-4 p-4">
                 <WorkflowMonitor workflow={workflow} variant="compact" />
-                <HitlPanel workflow={workflow} variant="compact" {...hitlHandlers} />
+                <HitlPanel
+                  workflow={workflow}
+                  variant="compact"
+                  busy={busy}
+                  workflowError={workflowHitlActive ? error : ""}
+                  {...hitlHandlers}
+                />
                 <AgentOutputView workflow={workflow} variant="compact" />
               </div>
             }
@@ -1335,7 +1499,7 @@ export default function App() {
       {view === "console" ? (
         <div className="space-y-6 px-4 py-8 md:px-10">
           <WorkflowMonitor workflow={workflow} />
-          <HitlPanel workflow={workflow} {...hitlHandlers} />
+          <HitlPanel workflow={workflow} busy={busy} workflowError={workflowHitlActive ? error : ""} {...hitlHandlers} />
           <AgentOutputView workflow={workflow} />
         </div>
       ) : null}

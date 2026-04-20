@@ -58,9 +58,11 @@ def test_logic_alignment_no_rules_high_complexity_requests_hitl(tmp_path) -> Non
     out, payload, tokens, latency = run_logic_alignment(state, _ctx(tmp_path))
     assert tokens == 0
     assert latency == 0
-    assert out["requires_hitl"] is True
-    assert isinstance(out["hitl_reason"], str) and out["hitl_reason"]
-    assert payload.get("complex_draft_detected") is True
+    # Heuristic mind-game detection is removed; without hard rules and without canon-audit context,
+    # logic_alignment skips without routing to HITL.
+    assert out["requires_hitl"] is False
+    assert out["hitl_reason"] is None
+    assert payload.get("skipped") is True
 
 
 def test_logic_alignment_mock_passthrough_with_rules(tmp_path) -> None:

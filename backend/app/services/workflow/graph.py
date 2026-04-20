@@ -25,6 +25,9 @@ from app.services.workflow.nodes.draft_supervisor import run_draft_supervisor
 from app.services.workflow.nodes.extraction_gate import run_extraction_gate
 from app.services.workflow.nodes.chapter_summarizer import run_chapter_summarizer
 from app.services.workflow.nodes.copyeditor import run_copyeditor
+from app.services.workflow.policy_gates import run_semantic_gate
+from app.services.workflow.output_language import chapter_heading_line
+from app.services.workflow.output_language_gate import run_output_language_gate
 from app.services.workflow.nodes.graph_rag import run_graph_rag
 from app.services.workflow.nodes.logic_alignment import run_logic_alignment
 from app.services.workflow.nodes.plan_supervisor import run_plan_supervisor
@@ -72,6 +75,55 @@ def _has_forbidden_resolution_keywords(text: str) -> bool:
     lowered = (text or "").lower()
     keys = ("精神連結", "神經駭入", "腦機", "mind link", "neural hack", "mental duel")
     return any(k in lowered for k in keys)
+
+
+def _semantic_resolution_cooldown_hitl(context: WorkflowContext, narrative: str) -> bool:
+    if not _has_forbidden_resolution_keywords(narrative):
+        return False
+    gate, _ = run_semantic_gate(
+        context=context,
+        profile_name="plan_supervisor",
+        rule_id="planner_resolution_cooldown_route",
+        fallback_decision="block",
+        fallback_confidence=0.7,
+        prompt=(
+            "Decide whether this plan truly uses a forbidden resolution tactic.\n"
+            "Block only when core resolution depends on mind-link/neural-hack/mental-duel style path.\n"
+            "Return JSON decision allow/warn/block with evidence_snippet and rationale.\n\n"
+            f"narrative_script={narrative[:2500]}"
+        ),
+    )
+    return gate.decision == "block"
+
+
+def _semantic_vibe_cooldown_hitl(context: WorkflowContext, boundary: str, narrative: str) -> bool:
+    boundary_cf = boundary.casefold()
+    narrative_cf = narrative.casefold()
+    has_signal = (
+        "安全屋" in boundary
+        or "密室" in boundary
+        or "總結對話" in narrative
+        or "safe house" in boundary_cf
+        or "locked room" in boundary_cf
+        or "debrief dialogue" in narrative_cf
+    )
+    if not has_signal:
+        return False
+    gate, _ = run_semantic_gate(
+        context=context,
+        profile_name="plan_supervisor",
+        rule_id="planner_ending_vibe_route",
+        fallback_decision="block",
+        fallback_confidence=0.7,
+        prompt=(
+            "Decide whether this chapter ending is SAFE_ROOM_EXPOSITION forbidden vibe.\n"
+            "Block only if ending truly resolves into safe-room debrief exposition.\n"
+            "Return JSON decision allow/warn/block with evidence_snippet and rationale.\n\n"
+            f"ending_boundary_rule={boundary[:1000]}\n"
+            f"narrative_script={narrative[:2500]}"
+        ),
+    )
+    return gate.decision == "block"
 
 
 def _slug(raw: str) -> str:
@@ -220,7 +272,7 @@ def build_chapter_graph(context: WorkflowContext):
         vibe_cooldown = state.get("ending_vibe_cooldown_constraint") or {}
         narrative = str(merged_planner.get("narrative_script") or "")
         boundary = str(merged_planner.get("ending_boundary_rule") or "")
-        if cooldown.get("active") and _has_forbidden_resolution_keywords(narrative):
+        if cooldown.get("active") and _semantic_resolution_cooldown_hitl(context, narrative):
             merged_planner.update(
                 {
                     "requires_hitl": True,
@@ -233,7 +285,7 @@ def build_chapter_graph(context: WorkflowContext):
         if (
             vibe_cooldown.get("active")
             and "SAFE_ROOM_EXPOSITION" in str(vibe_cooldown.get("forbidden_vibes") or [])
-            and ("安全屋" in boundary or "密室" in boundary or "總結對話" in narrative)
+            and _semantic_vibe_cooldown_hitl(context, boundary, narrative)
         ):
             merged_planner.update(
                 {
@@ -253,7 +305,7 @@ def build_chapter_graph(context: WorkflowContext):
         if str(state.get("ai_freedom_level") or "") == "strict" and bind != "FULL":
             tag = (
                 "[大綱模式] 作者大綱未達「具體」長度閾值：AI 可主導補齊結構；"
-                "人類已寫片段仍須遵守；腦補請標 [AI_INVENTION]。"
+                "人類已寫片段仍須遵守；腦補請以 is_ai_invention=true 標記。"
             )
             if tag not in pw_hint:
                 pw_hint.append(tag)
@@ -340,12 +392,16 @@ def build_chapter_graph(context: WorkflowContext):
             not updates.get("requires_hitl")
             and ("final_narrative_script" in output or "final_must_include_beats" in output or "final_ground_truth_events" in output)
         ):
+            final_beats = list(output.get("final_must_include_beats") or [])
             # Overwrite draft fields with aligned final fields.
             updates.update(
                 {
                     "ground_truth_events": list(output.get("final_ground_truth_events") or []),
                     "narrative_script": str(output.get("final_narrative_script") or ""),
-                    "must_include_beats": list(output.get("final_must_include_beats") or []),
+                    "must_include_beats": final_beats,
+                    "must_include_beat_outlines": [
+                        {"text": beat, "is_ai_invention": False, "invention_scope": ""} for beat in final_beats
+                    ],
                 }
             )
 
@@ -379,7 +435,7 @@ def build_chapter_graph(context: WorkflowContext):
             route = "hitl"
             updates = {
                 "requires_hitl": True,
-                "hitl_reason": "Plan_Loop_Exceeded",
+                "hitl_reason": HitlReason.PLAN_LOOP_EXCEEDED,
                 "hitl_decision_mode": "MANUAL_EDIT",
                 "workflow_status": WorkflowStatus.WAITING_HITL.value,
                 "pending_hitl_options": [
@@ -497,7 +553,7 @@ def build_chapter_graph(context: WorkflowContext):
             route = "hitl"
             updates = {
                 "requires_hitl": True,
-                "hitl_reason": "Draft_Loop_Exceeded",
+                "hitl_reason": HitlReason.DRAFT_LOOP_EXCEEDED,
                 "hitl_decision_mode": "DASHBOARD",
                 "workflow_status": WorkflowStatus.WAITING_HITL.value,
                 "pending_hitl_options": [
@@ -598,7 +654,8 @@ def build_chapter_graph(context: WorkflowContext):
             streak = int(state.get("extraction_gate_failure_streak", 0) or 0) + 1
             limit = int(state.get("extraction_hitl_limit", 4) or 4)
             hints = list(gate_out.get("hitl_extraction_remap_hints") or [])
-            if streak > limit:
+            # HITL after extraction_hitl_limit consecutive failures (inclusive: streak == limit triggers).
+            if streak >= limit:
                 route = "hitl"
                 merged = {
                     **gate_out,
@@ -628,9 +685,7 @@ def build_chapter_graph(context: WorkflowContext):
                     "resume_from": "author",
                 }
         else:
-            next_resume = (
-                "copyeditor" if get_settings().copyeditor_enabled else "chapter_summarizer"
-            )
+            next_resume = "copyeditor" if get_settings().copyeditor_enabled else "output_language_gate"
             merged = {
                 **gate_out,
                 "extraction_gate_failure_streak": 0,
@@ -653,7 +708,7 @@ def build_chapter_graph(context: WorkflowContext):
         merged = {
             **out,
             "last_agent": "copyeditor",
-            "resume_from": "chapter_summarizer",
+            "resume_from": "output_language_gate",
         }
         recorder.record_and_update_run(
             "copyeditor",
@@ -661,9 +716,24 @@ def build_chapter_graph(context: WorkflowContext):
             merged,
             {**state, **merged},
             latency_ms=elapsed_ms(start),
-            route_decision="chapter_summarizer",
+            route_decision="output_language_gate",
         )
         return merged
+
+    def output_language_gate_node(state: AgentWorkflowState) -> dict:
+        start = timed()
+        gate_out = run_output_language_gate(dict(state), context)
+        merged = {**dict(state), **gate_out}
+        route = str(gate_out.get("language_gate_route") or "chapter_summarizer")
+        recorder.record_and_update_run(
+            "output_language_gate",
+            dict(state),
+            gate_out,
+            merged,
+            latency_ms=elapsed_ms(start),
+            route_decision=route,
+        )
+        return gate_out
 
     def chapter_summarizer_node(state: AgentWorkflowState) -> dict:
         start = timed()
@@ -717,7 +787,7 @@ def build_chapter_graph(context: WorkflowContext):
         start = timed()
         output = run_state_updater(state, context)
         parsed = StateUpdaterOutput.model_validate(output)
-        title = f"第 {state['chapter_id']} 章"
+        title = chapter_heading_line(int(state["chapter_id"]), context.output_language)
         chapter_content = state["best_draft_content"] or state["current_draft"]
         transaction_payload = {
             "state_updater_output": output,
@@ -871,7 +941,10 @@ def build_chapter_graph(context: WorkflowContext):
             return "author"
         if get_settings().copyeditor_enabled:
             return "copyeditor"
-        return "chapter_summarizer"
+        return "output_language_gate"
+
+    def route_output_language_gate(state: AgentWorkflowState) -> str:
+        return str(state.get("language_gate_route") or "chapter_summarizer")
 
     def route_graph_rag(state: AgentWorkflowState) -> str:
         return state.get("graph_rag_route", "planner")
@@ -902,6 +975,7 @@ def build_chapter_graph(context: WorkflowContext):
     graph.add_node("reader", reader_node)
     graph.add_node("extraction_gate", extraction_gate_node)
     graph.add_node("copyeditor", copyeditor_node)
+    graph.add_node("output_language_gate", output_language_gate_node)
     graph.add_node("chapter_summarizer", chapter_summarizer_node)
     graph.add_node("b_story_resolve", b_story_resolve_node)
     graph.add_node("profile_expander", profile_expander_node)
@@ -923,6 +997,7 @@ def build_chapter_graph(context: WorkflowContext):
             "state_updater": "state_updater",
             "extraction_gate": "extraction_gate",
             "copyeditor": "copyeditor",
+            "output_language_gate": "output_language_gate",
             "chapter_summarizer": "chapter_summarizer",
             "b_story_resolve": "b_story_resolve",
         },
@@ -961,11 +1036,16 @@ def build_chapter_graph(context: WorkflowContext):
         {
             "author": "author",
             "copyeditor": "copyeditor",
-            "chapter_summarizer": "chapter_summarizer",
+            "output_language_gate": "output_language_gate",
             "hitl": "hitl",
         },
     )
-    graph.add_edge("copyeditor", "chapter_summarizer")
+    graph.add_edge("copyeditor", "output_language_gate")
+    graph.add_conditional_edges(
+        "output_language_gate",
+        route_output_language_gate,
+        {"chapter_summarizer": "chapter_summarizer", "hitl": "hitl"},
+    )
     graph.add_edge("chapter_summarizer", "b_story_resolve")
     graph.add_conditional_edges(
         "b_story_resolve",

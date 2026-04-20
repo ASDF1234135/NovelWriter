@@ -18,7 +18,6 @@ from app.domain.schema import (
     HitlDecisionRequest,
     HitlDirectorPatchRequest,
     HitlDraftEditRequest,
-    HitlExtractionHintsRequest,
     HitlExtractionRemapRequest,
     HitlOutlineEditRequest,
     HitlStateInjectionRequest,
@@ -30,7 +29,7 @@ from app.services.graph_store import GraphStore
 from app.services.llm import LLMProviderError
 from app.services.workflow.service import (
     ChapterAlreadyCompletedError,
-    HitlExtractionHintsDisabledError,
+    ChapterSummaryRegenerateFailed,
     HitlNotWaitingError,
     MacroCompileAlreadyRunningError,
     MacroPlanValidationError,
@@ -39,6 +38,7 @@ from app.services.workflow.service import (
 )
 from app.repositories.sqlite.story_repository import StoryRepository
 from app.repositories.sqlite.workflow_repository import WorkflowRepository
+from app.services.workflow.output_language import normalize_output_language
 from app.services.writing_preamble import build_writing_preamble
 
 router = APIRouter()
@@ -75,6 +75,7 @@ def get_story_detail(
         "target_total_words": row["target_total_words"],
         "plan_retry_limit": row["plan_retry_limit"],
         "draft_loop_retry_limit": row["draft_loop_retry_limit"],
+        "output_language": normalize_output_language(str(row.get("output_language") or "")),
         "macro_author_notes": str(row.get("macro_author_notes") or ""),
         "cast_seed": [s.model_dump(mode="json") for s in (row.get("cast_seed") or [])],
         "macro_compile_status": str(row.get("macro_compile_status") or "IDLE"),
@@ -106,6 +107,7 @@ def patch_story(
         "target_total_words": row["target_total_words"],
         "plan_retry_limit": row["plan_retry_limit"],
         "draft_loop_retry_limit": row["draft_loop_retry_limit"],
+        "output_language": normalize_output_language(str(row.get("output_language") or "")),
         "macro_author_notes": str(row.get("macro_author_notes") or ""),
         "cast_seed": [s.model_dump(mode="json") for s in (row.get("cast_seed") or [])],
         "macro_compile_status": str(row.get("macro_compile_status") or "IDLE"),
@@ -240,6 +242,24 @@ def get_writing_preamble(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.post("/stories/{story_id}/chapters/{chapter_id}/regenerate-summary")
+def regenerate_chapter_plot_summary(
+    story_id: str,
+    chapter_id: int,
+    workflow_service: WorkflowService = Depends(get_workflow_service),
+) -> dict:
+    if chapter_id < 1:
+        raise HTTPException(status_code=400, detail="chapter_id must be >= 1")
+    try:
+        return workflow_service.regenerate_chapter_plot_summary(story_id, chapter_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ChapterSummaryRegenerateFailed as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @router.get("/stories/{story_id}/chapters/{chapter_id}/download.txt")
 def download_chapter_txt(
     story_id: str,
@@ -269,6 +289,19 @@ def get_workflow(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.get("/workflows/{run_id}/hitl-actions")
+def list_workflow_hitl_actions(
+    run_id: str,
+    limit: int = 100,
+    offset: int = 0,
+    workflow_service: WorkflowService = Depends(get_workflow_service),
+) -> list[dict]:
+    try:
+        return workflow_service.list_hitl_actions(run_id, limit=limit, offset=offset)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 async def workflow_event_stream(run_id: str, repo: WorkflowRepository) -> AsyncIterator[str]:
     seen = 0
     while True:
@@ -284,7 +317,9 @@ async def workflow_event_stream(run_id: str, repo: WorkflowRepository) -> AsyncI
                 yield f"data: {json.dumps(step, ensure_ascii=False)}\n\n"
             seen = len(steps)
 
-        if run_state.get("workflow_status") in {"COMPLETED", "FAILED"} or run_state.get("requires_hitl"):
+        ws = str(run_state.get("workflow_status") or "")
+        req_hitl = bool(run_state.get("requires_hitl"))
+        if ws in {"COMPLETED", "FAILED"} or ws == "WAITING_HITL" or req_hitl:
             yield f"event: end\ndata: {json.dumps({'status': run_state.get('workflow_status')}, ensure_ascii=False)}\n\n"
             return
 
@@ -312,6 +347,8 @@ def hitl_decision(
         return workflow_service.get_workflow(run_id)
     except HitlNotWaitingError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/workflows/{run_id}/hitl/outline")
@@ -327,6 +364,8 @@ def hitl_outline(
         return workflow_service.get_workflow(run_id)
     except HitlNotWaitingError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/workflows/{run_id}/hitl/state-injection")
@@ -342,6 +381,8 @@ def hitl_state_injection(
         return workflow_service.get_workflow(run_id)
     except HitlNotWaitingError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/workflows/{run_id}/hitl/draft-edit")
@@ -357,6 +398,8 @@ def hitl_draft_edit(
         return workflow_service.get_workflow(run_id)
     except HitlNotWaitingError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/workflows/{run_id}/hitl/director-patch")
@@ -372,23 +415,8 @@ def hitl_director_patch(
         return workflow_service.get_workflow(run_id)
     except HitlNotWaitingError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-
-@router.post("/workflows/{run_id}/hitl/extraction-hints")
-def hitl_extraction_hints(
-    run_id: str,
-    request: HitlExtractionHintsRequest,
-    background_tasks: BackgroundTasks,
-    workflow_service: WorkflowService = Depends(get_workflow_service),
-) -> dict:
-    try:
-        workflow_service.apply_hitl_extraction_hints(run_id, request)
-        background_tasks.add_task(workflow_service.execute_stored_run, run_id)
-        return workflow_service.get_workflow(run_id)
-    except HitlExtractionHintsDisabledError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except HitlNotWaitingError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/workflows/{run_id}/hitl/extraction-remap")
@@ -404,6 +432,8 @@ def hitl_extraction_remap(
         return workflow_service.get_workflow(run_id)
     except HitlNotWaitingError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/workflows/{run_id}/hitl/b-story-judgement")
@@ -420,7 +450,7 @@ def hitl_b_story_judgement(
     except HitlNotWaitingError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/workflows/{run_id}/hitl/anchor-delay")
@@ -438,6 +468,8 @@ def hitl_anchor_delay(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/workflows/{run_id}/hitl/context-prune")
@@ -453,6 +485,8 @@ def hitl_context_prune(
         return workflow_service.get_workflow(run_id)
     except HitlNotWaitingError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/stories/{story_id}/graph")

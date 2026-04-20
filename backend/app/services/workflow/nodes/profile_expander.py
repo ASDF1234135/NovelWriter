@@ -15,6 +15,7 @@ from app.domain.schema import (
 )
 from app.services.llm import MockLLMClient
 from app.services.workflow.context import WorkflowContext
+from app.services.workflow.output_language import augment_profile_system_prompt
 from app.services.workflow.profiles import get_profile
 
 
@@ -82,8 +83,8 @@ def _build_evolution_prompt(
                 "new_speech_style": req.new_speech_style,
             },
             "requirements": [
-                "僅輸出更新後 personality 與 speech_style，其他欄位保持穩定。",
-                "若輸入已提供 new_personality/new_speech_style，優先尊重其意圖。",
+                "Output only updated personality and speech_style; keep other fields stable.",
+                "If new_personality/new_speech_style are provided, honor their intent first.",
             ],
             "chapter_excerpt": chapter_content[:3000],
         },
@@ -103,9 +104,9 @@ def _build_enrich_prompt(state: dict, entity: dict[str, Any], chapter_content: s
                 "summary": entity.get("summary") or "",
             },
             "requirements": [
-                "請輸出完整角色卡欄位，不可留空字串；資訊不足時給保守但可執行的預設。",
-                "personality 需反映行為氣質而非目標；core_motivation 填長線驅動。",
-                "不得輸出 motivation 欄位，僅輸出 personality。",
+                "Emit a full character card; do not leave empty strings—use conservative but playable defaults when data is thin.",
+                "personality should reflect behavioral temperament, not goals; core_motivation is long-arc drive.",
+                "Follow the response schema exactly—no undeclared top-level keys.",
             ],
             "chapter_excerpt": (chapter_content or "")[:3000],
         },
@@ -141,7 +142,7 @@ def _compile_from_extraction(
     if isinstance(context.llm_client, MockLLMClient):
         return base
     prompt = _build_enrich_prompt(state, entity, chapter_content)
-    profile = get_profile("profile_expander")
+    profile = augment_profile_system_prompt(get_profile("profile_expander"), context.output_language)
     for _ in range(2):
         try:
             enriched, _ = context.llm_client.invoke_json(prompt, _ExpandedProfile, profile)
@@ -230,7 +231,9 @@ def run_profile_expander(state: dict, context: WorkflowContext) -> dict:
         new_speech_style = (req.new_speech_style or "").strip()
         if (not new_personality or not new_speech_style) and not isinstance(context.llm_client, MockLLMClient):
             prompt = _build_evolution_prompt(state, current_member, req, chapter_content)
-            profile = get_profile("profile_expander")
+            profile = augment_profile_system_prompt(
+                get_profile("profile_expander"), context.output_language
+            )
             for _ in range(2):
                 try:
                     enriched, _ = context.llm_client.invoke_json(prompt, _ExpandedProfile, profile)

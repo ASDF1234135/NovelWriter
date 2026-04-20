@@ -140,6 +140,7 @@ def test_api_get_story_detail_and_configuration_locked(tmp_path) -> None:
         assert data["target_total_words"] == 5000
         assert data["plan_retry_limit"] == 2
         assert data["draft_loop_retry_limit"] == 1
+        assert data["output_language"] == "zh-Hant"
         assert data["macro_author_notes"] == ""
         assert data["macro_compile_status"] == "IDLE"
         assert data["macro_compile_updated_at"] == ""
@@ -153,6 +154,31 @@ def test_api_get_story_detail_and_configuration_locked(tmp_path) -> None:
 
         r404 = client.get("/api/stories/story_missing_xyz")
         assert r404.status_code == 404
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_api_story_detail_normalizes_output_language_alias(tmp_path) -> None:
+    from fastapi.testclient import TestClient
+
+    from app.dependencies import get_story_repository, get_workflow_repository
+    from app.main import app
+
+    service = build_service(str(tmp_path / "detail_lang_alias_api.sqlite3"))
+    created = service.create_story(
+        StoryInput(title="Lang Alias", premise="p", bible={}, target_total_words=3000),
+    )
+    sid = created["story_id"]
+    with service.story_repository.db.connection() as conn:
+        conn.execute("UPDATE stories SET output_language = ? WHERE story_id = ?", ("zh-CN", sid))
+
+    app.dependency_overrides[get_story_repository] = lambda: service.story_repository
+    app.dependency_overrides[get_workflow_repository] = lambda: service.workflow_repository
+    try:
+        client = TestClient(app)
+        r = client.get(f"/api/stories/{sid}")
+        assert r.status_code == 200
+        assert r.json()["output_language"] == "zh-Hans"
     finally:
         app.dependency_overrides.clear()
 
@@ -225,11 +251,15 @@ def test_api_patch_story_before_run_then_409_after_workflow(tmp_path) -> None:
     app.dependency_overrides[get_workflow_service] = lambda: service
     try:
         client = TestClient(app)
-        r = client.patch(f"/api/stories/{sid}", json={"macro_author_notes": "hint", "premise": "p2"})
+        r = client.patch(
+            f"/api/stories/{sid}",
+            json={"macro_author_notes": "hint", "premise": "p2", "output_language": "zh-Hans"},
+        )
         assert r.status_code == 200
         body = r.json()
         assert body["premise"] == "p2"
         assert body["macro_author_notes"] == "hint"
+        assert body["output_language"] == "zh-Hans"
         assert service.story_repository.get_story(sid)["premise"] == "p2"
 
         service.workflow_repository.create_run(sid, 1, {"story_id": sid, "chapter_id": 1})

@@ -91,6 +91,34 @@ def test_author_payload_redacts_identity_tokens_from_forbidden_reveals() -> None
     assert "[REDACTED_IDENTITY]" in " ".join(payload["author_safe_continuity_notes"])
 
 
+def test_author_payload_does_not_treat_memory_label_as_identity_token() -> None:
+    state = {
+        "narrative_script": "安全劇本",
+        "chapter_start_location": "暗巷",
+        "author_goal": "維持懸疑",
+        "must_include_beats": [],
+        "reader_visible_facts": [],
+        "reader_unresolved_questions": [],
+        "chapter_end_location_hint": "",
+        "ending_state_shift": "",
+        "ending_boundary_rule": "",
+        "forbidden_next_scene_actions": [],
+        "forbidden_reveals": ['Do not reveal true identity marker "Memory 001".'],
+        "tone_direction": "懸疑",
+        "target_word_count": 1200,
+        "current_draft": "",
+        "draft_feedback": [],
+        "reader_feedback": [],
+        "author_safe_continuity_notes": ["Memory 001 is an archive tag, not a person."],
+        "recent_entity_names": ["Memory 001", "灰鴉"],
+        "allowed_identity_reveals_this_chapter": [],
+    }
+    payload = build_author_payload(state).model_dump()
+    assert "Memory 001" in " ".join(payload["author_safe_continuity_notes"])
+    assert "Memory 001" in payload["recent_entity_names"]
+    assert "[REDACTED_IDENTITY]" not in " ".join(payload["author_safe_continuity_notes"])
+
+
 def test_plan_supervisor_payload_includes_anchor_distance() -> None:
     state = {
         "chapter_id": 1,
@@ -288,3 +316,54 @@ def test_author_payload_includes_temporal_active_character_profiles() -> None:
     assert profiles[0]["canonical_name"] == "英雄"
     assert "第2章前" in profiles[0]["past_personality_reference"]
     assert "第8章後" not in profiles[0]["past_personality_reference"]
+
+
+def test_build_author_payload_arc_markers_use_english_when_story_output_language_en() -> None:
+    state = {
+        "chapter_id": 4,
+        "story_output_language": "en",
+        "target_word_count": 2000,
+        "narrative_script": "",
+        "tone_direction": "noir",
+        "draft_feedback": [],
+        "reader_feedback": [],
+        "planned_graph_nodes": [],
+        "cast_slim_view": [
+            {
+                "node_id": "char_hero",
+                "name": "Hero",
+                "personality": "calm",
+                "speech_style": "short",
+                "fatal_flaw": "stubborn",
+                "habit": "taps",
+            }
+        ],
+        "cast_full_view": [
+            {
+                "node_id": "char_hero",
+                "canonical_name": "Hero",
+                "role": "protagonist",
+                "personality": "calm",
+                "speech_style": "short",
+                "arc_history": [
+                    {
+                        "trigger_event_id": "",
+                        "trigger_event_summary": "first loss",
+                        "chapter_id": 3,
+                        "old_personality": "proud",
+                        "new_personality": "calm",
+                        "old_speech_style": "sharp",
+                        "new_speech_style": "short",
+                        "source": "PLANNER",
+                        "reason": "loss",
+                        "updated_at": "2026-04-18T00:00:00+00:00",
+                    },
+                ],
+            }
+        ],
+        "recent_entity_names": ["Hero"],
+    }
+    payload = build_author_payload(state).model_dump()
+    ref = payload["active_character_profiles"][0]["past_personality_reference"]
+    assert "[Before Ch.2]" in ref
+    assert "[After Ch.3]" in ref

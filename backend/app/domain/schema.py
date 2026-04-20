@@ -7,6 +7,8 @@ MacroCastRole = Literal["protagonist", "supporting", "antagonist"]
 
 AiFreedomLevel = Literal["strict", "balanced", "wild"]
 
+StoryOutputLanguage = Literal["en", "zh-Hant", "zh-Hans"]
+
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
@@ -220,6 +222,10 @@ class StoryInput(BaseModel):
     target_total_words: int = 100_000
     plan_retry_limit: int = Field(default=3, ge=0, le=20)
     draft_loop_retry_limit: int = Field(default=3, ge=0, le=20)
+    output_language: StoryOutputLanguage = Field(
+        default="zh-Hant",
+        description="Natural-language output for generated story content, outlines, feedback, and extractions.",
+    )
 
 
 class StoryPatch(BaseModel):
@@ -232,6 +238,10 @@ class StoryPatch(BaseModel):
     draft_loop_retry_limit: int | None = Field(default=None, ge=0, le=20)
     macro_author_notes: str | None = None
     cast_seed: list[StoryCastSeedEntry] | None = None
+    output_language: StoryOutputLanguage | None = Field(
+        default=None,
+        description="When omitted, existing DB value is preserved (PATCH must not null out).",
+    )
 
 
 class AuthorExtractionSurfaceHintEntry(BaseModel):
@@ -483,6 +493,17 @@ class EndingVibe(str, Enum):
     DEVASTATING_LOSS = "DEVASTATING_LOSS"
 
 
+class PlotSummarySource(str, Enum):
+    """Provenance for chapter_summaries.plot_summary (UI + regenerate flow)."""
+
+    CHAPTER_SUMMARIZER_LLM = "CHAPTER_SUMMARIZER_LLM"
+    FALLBACK_EXTRACTION = "FALLBACK_EXTRACTION"
+    FALLBACK_DRAFT = "FALLBACK_DRAFT"
+    FALLBACK_DIRECTIVE = "FALLBACK_DIRECTIVE"
+    PLACEHOLDER = "PLACEHOLDER"
+    UNKNOWN = "UNKNOWN"
+
+
 class BStoryType(str, Enum):
     FETCH_QUEST = "FETCH_QUEST"
     RELATIONSHIP_DRAMA = "RELATIONSHIP_DRAMA"
@@ -595,6 +616,14 @@ class EventOutline(BaseModel):
     event_id: str
     description: str
     caused_by_event_id: Optional[str] = None
+    is_ai_invention: bool = False
+    invention_scope: str = ""
+
+
+class BeatOutline(BaseModel):
+    text: str
+    is_ai_invention: bool = False
+    invention_scope: str = ""
 
 
 class ProposedCharacterProfile(BaseModel):
@@ -648,10 +677,15 @@ class BStorySeed(BaseModel):
 class PlannerOutput(BaseModel):
     ground_truth_events: list[EventOutline]
     narrative_script: str
-    target_word_count: int = Field(..., ge=1, description="本章目標字數（正規化計數語意與 draft 審核一致）。")
+    target_word_count: int = Field(
+        ...,
+        ge=1,
+        description="Chapter length target: English=en word count (whitespace tokens); Chinese=normalized alnum character count; must match draft_supervisor measurement.",
+    )
     chapter_start_location: str = ""
     author_goal: str = ""
     must_include_beats: list[str] = Field(default_factory=list)
+    must_include_beat_outlines: list[BeatOutline] = Field(default_factory=list)
     reader_visible_facts: list[str] = Field(default_factory=list)
     reader_unresolved_questions: list[str] = Field(default_factory=list)
     private_facts_or_secret_actions: list[str] = Field(default_factory=list)
@@ -673,6 +707,14 @@ class PlannerOutput(BaseModel):
         description="本章若開啟全新副線（有獨立 id），最多 2 條；成功定稿後併入 bible。",
     )
     character_evolution_requests: list[CharacterEvolutionRequest] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def sync_beat_fields(self) -> "PlannerOutput":
+        if not self.must_include_beat_outlines and self.must_include_beats:
+            self.must_include_beat_outlines = [BeatOutline(text=beat) for beat in self.must_include_beats if beat]
+        if not self.must_include_beats and self.must_include_beat_outlines:
+            self.must_include_beats = [beat.text for beat in self.must_include_beat_outlines if beat.text]
+        return self
 
 
 class AlignmentOutput(BaseModel):
@@ -997,6 +1039,7 @@ class HitlReason:
     ENDING_VIBE_COOLDOWN_VIOLATION = "Ending_Vibe_Cooldown_Violation"
     CONTEXT_LENGTH_EXCEEDED = "Context_Length_Exceeded"
     ALIGNMENT_RULES_REQUIRED = "Alignment_Rules_Required"
+    OUTPUT_LANGUAGE_MISMATCH = "Output_Language_Mismatch"
 
 
 HitlContextPayloadType = Literal[
@@ -1004,6 +1047,7 @@ HitlContextPayloadType = Literal[
     "extraction_remap",
     "draft_loop",
     "context_prune",
+    "output_language",
     "generic",
 ]
 
@@ -1017,6 +1061,24 @@ class HitlContextMetadata(BaseModel):
         default=None,
         description="Product-tier 0=full .. 2=aggressive when payload_type=context_prune.",
     )
+    expected_output_language: str | None = Field(
+        default=None,
+        description="Story output_language code when payload_type=output_language.",
+    )
+    language_detection_summary: str | None = Field(
+        default=None,
+        description="Brief script-count summary when payload_type=output_language.",
+    )
+
+
+class HitlActionRecord(BaseModel):
+    """One persisted human action during a paused workflow run."""
+
+    action_id: str
+    run_id: str
+    action_type: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    created_at: str
 
 
 class HitlContextPayload(BaseModel):

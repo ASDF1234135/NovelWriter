@@ -1,12 +1,21 @@
 import type { ReactNode } from "react";
-import type { ChapterContent, ChapterSummary } from "../../types";
+import type { ChapterContent, ChapterSummary, StoryOutputLanguage } from "../../types";
 import { chapterStatusLabel } from "../ui-copy/workflowDisplay";
+
+/** Whitespace-separated tokens; aligns with backend English chapter length for typical prose. */
+function englishWordCount(text: string): number {
+  const t = text.trim();
+  if (!t) return 0;
+  return t.split(/\s+/).length;
+}
 
 type Props = {
   storyId: string;
   currentChapterId: number;
   chapters: ChapterSummary[];
   chapter: ChapterContent | null;
+  /** When `en`, header shows word count; otherwise approximate non-whitespace character count. */
+  outputLanguage?: StoryOutputLanguage;
   busy?: boolean;
   onSelectChapter: (chapterId: number) => Promise<void>;
   onDownloadChapter: (chapterId: number) => Promise<void>;
@@ -18,12 +27,16 @@ export function ChapterReader({
   currentChapterId,
   chapters,
   chapter,
+  outputLanguage = "zh-Hant",
   busy,
   onSelectChapter,
   onDownloadChapter,
   rightRail,
 }: Props) {
-  const wc = chapter?.content ? chapter.content.replace(/\s/g, "").length : 0;
+  const content = chapter?.content ?? "";
+  const isEn = outputLanguage === "en";
+  const lengthStat = isEn ? englishWordCount(content) : content.replace(/\s/g, "").length;
+  const lengthLabel = isEn ? "詞數（words）" : "字元量（近似）";
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden lg:flex-row">
@@ -74,7 +87,9 @@ export function ChapterReader({
                 </h1>
                 {chapter ? (
                   <div className="mt-8 flex flex-wrap items-center gap-4 font-label text-xs uppercase tracking-widest text-on-surface-variant">
-                    <span>字元量（近似） {wc.toLocaleString()}</span>
+                    <span>
+                      {lengthLabel} {lengthStat.toLocaleString()}
+                    </span>
                     <span className="h-1 w-1 rounded-full bg-outline-variant" />
                     <span>{chapterStatusLabel(chapter.status)}</span>
                   </div>

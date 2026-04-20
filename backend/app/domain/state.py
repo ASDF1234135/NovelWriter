@@ -4,7 +4,14 @@ from typing import Any, NotRequired, TypedDict
 
 from pydantic import BaseModel, Field
 
-from app.domain.schema import EndingVibe, EventOutline, HitlDecisionMode, LengthAdjustment, MandatoryNewEntity
+from app.domain.schema import (
+    BeatOutline,
+    EndingVibe,
+    EventOutline,
+    HitlDecisionMode,
+    LengthAdjustment,
+    MandatoryNewEntity,
+)
 
 
 class AgentWorkflowState(TypedDict):
@@ -32,6 +39,7 @@ class AgentWorkflowState(TypedDict):
     chapter_start_location: str
     author_goal: str
     must_include_beats: list[str]
+    must_include_beat_outlines: NotRequired[list[dict[str, Any]]]
     reader_visible_facts: list[str]
     reader_unresolved_questions: list[str]
     private_facts_or_secret_actions: list[str]
@@ -124,6 +132,11 @@ class AgentWorkflowState(TypedDict):
     director_state_brief: NotRequired[str]
     human_outline_conflict_notes: NotRequired[list[str]]
     this_chapter_pacing_limit: NotRequired[str]
+    language_gate_route: NotRequired[str]
+    output_language_hitl_waived: NotRequired[bool]
+    hitl_output_language_detail: NotRequired[str]
+    hitl_expected_output_language: NotRequired[str]
+    story_output_language: NotRequired[str]
 
 
 class SafeAuthorPayload(BaseModel):
@@ -131,6 +144,7 @@ class SafeAuthorPayload(BaseModel):
     chapter_start_location: str = ""
     author_goal: str = ""
     must_include_beats: list[str] = Field(default_factory=list)
+    must_include_beat_outlines: list[BeatOutline] = Field(default_factory=list)
     reader_visible_facts: list[str] = Field(default_factory=list)
     reader_unresolved_questions: list[str] = Field(default_factory=list)
     chapter_end_location_hint: str = ""
@@ -230,6 +244,7 @@ class SafeSupervisorPayload(BaseModel):
     ending_boundary_rule: str = ""
     forbidden_next_scene_actions: list[str] = Field(default_factory=list)
     must_include_beats: list[str] = Field(default_factory=list)
+    must_include_beat_outlines: list[BeatOutline] = Field(default_factory=list)
     current_draft: str = ""
     graph_context: str = ""
     vector_context: str = ""
@@ -436,6 +451,11 @@ def normalize_workflow_state(state: dict[str, Any]) -> dict[str, Any]:
         "director_state_brief": "",
         "human_outline_conflict_notes": [],
         "this_chapter_pacing_limit": "",
+        "language_gate_route": "",
+        "output_language_hitl_waived": False,
+        "hitl_output_language_detail": "",
+        "hitl_expected_output_language": "",
+        "story_output_language": "zh-Hant",
     }
     for key, val in defaults.items():
         if key not in state:
@@ -452,9 +472,17 @@ def normalize_workflow_state(state: dict[str, Any]) -> dict[str, Any]:
 
 def apply_length_bounds_to_state(state: dict[str, Any]) -> dict[str, Any]:
     """SSOT: derive normalized length window from target_word_count (single writer)."""
+    from app.core.config import get_settings
+    from app.services.workflow.output_language import default_chapter_target_words, normalize_output_language
+
     tw = int(state.get("target_word_count") or 0)
     if tw < 1:
-        tw = 2500
+        raw = str(state.get("story_output_language") or "").strip()
+        if raw:
+            tw = default_chapter_target_words(normalize_output_language(raw))
+        else:
+            tw = int(get_settings().default_chapter_words)
+    state["target_word_count"] = tw
     state["normalized_length_min"] = int(tw * 0.65)
     state["normalized_length_max"] = int(tw * 1.35)
     return state

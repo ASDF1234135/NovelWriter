@@ -8,6 +8,7 @@ from app.domain.schema import (
     CharacterArcMilestone,
     ConflictType,
     EndingVibe,
+    PlotSummarySource,
     ResolutionMethod,
     StateAnchor,
     StoryCastMemberStored,
@@ -45,9 +46,10 @@ class StoryRepository:
                 """
                 INSERT INTO stories (
                     story_id, title, premise, bible_json, target_total_words,
-                    plan_retry_limit, draft_loop_retry_limit, macro_author_notes, cast_seed_json, created_at
+                    plan_retry_limit, draft_loop_retry_limit, macro_author_notes, cast_seed_json,
+                    output_language, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     story_id,
@@ -59,6 +61,7 @@ class StoryRepository:
                     story_input.draft_loop_retry_limit,
                     story_input.macro_author_notes,
                     self.db.dumps([s.model_dump(mode="json") for s in story_input.cast_seed]),
+                    story_input.output_language,
                     created_at,
                 ),
             )
@@ -110,6 +113,7 @@ class StoryRepository:
                 row["cast_seed"] = [StoryCastSeedEntry.model_validate(x) for x in raw_seed]
             else:
                 row["cast_seed"] = []
+            row.setdefault("output_language", "zh-Hant")
             return row
 
     def try_begin_macro_compile(self, story_id: str) -> bool:
@@ -184,6 +188,9 @@ class StoryRepository:
             seeds = [StoryCastSeedEntry.model_validate(x) for x in raw_seeds]
             fields.append("cast_seed_json = ?")
             values.append(self.db.dumps([s.model_dump(mode="json") for s in seeds]))
+        if "output_language" in data and data["output_language"] is not None:
+            fields.append("output_language = ?")
+            values.append(str(data["output_language"]))
         if not fields:
             return story
         values.append(story_id)
@@ -492,31 +499,42 @@ class StoryRepository:
         conflict_type: ConflictType | str,
         resolution_method: ResolutionMethod | str,
         ending_vibe: EndingVibe | str = EndingVibe.ON_THE_MOVE,
+        plot_summary_source: PlotSummarySource | str = PlotSummarySource.CHAPTER_SUMMARIZER_LLM,
     ) -> None:
         created_at = datetime.now(UTC).isoformat()
         ctype = conflict_type.value if hasattr(conflict_type, "value") else str(conflict_type)
         rmethod = resolution_method.value if hasattr(resolution_method, "value") else str(resolution_method)
         evibe = ending_vibe.value if hasattr(ending_vibe, "value") else str(ending_vibe)
+        psrc = (
+            plot_summary_source.value
+            if hasattr(plot_summary_source, "value")
+            else str(plot_summary_source)
+        )
         with self.db.connection() as conn:
             conn.execute(
                 """
-                INSERT INTO chapter_summaries (story_id, chapter_id, plot_summary, conflict_type, resolution_method, ending_vibe, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO chapter_summaries (
+                    story_id, chapter_id, plot_summary, conflict_type, resolution_method,
+                    ending_vibe, plot_summary_source, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(story_id, chapter_id) DO UPDATE SET
                     plot_summary = excluded.plot_summary,
                     conflict_type = excluded.conflict_type,
                     resolution_method = excluded.resolution_method,
                     ending_vibe = excluded.ending_vibe,
+                    plot_summary_source = excluded.plot_summary_source,
                     created_at = excluded.created_at
                 """,
-                (story_id, int(chapter_id), plot_summary, ctype, rmethod, evibe, created_at),
+                (story_id, int(chapter_id), plot_summary, ctype, rmethod, evibe, psrc, created_at),
             )
 
     def get_recent_chapter_summaries(self, story_id: str, before_chapter_id: int, limit: int = 3) -> list[dict]:
         with self.db.connection() as conn:
             rows = conn.execute(
                 """
-                SELECT chapter_id, plot_summary, conflict_type, resolution_method, ending_vibe, created_at
+                SELECT chapter_id, plot_summary, conflict_type, resolution_method, ending_vibe,
+                       plot_summary_source, created_at
                 FROM chapter_summaries
                 WHERE story_id = ? AND chapter_id < ?
                 ORDER BY chapter_id DESC
@@ -535,7 +553,9 @@ class StoryRepository:
                 """
                 SELECT COUNT(*) AS c
                 FROM chapter_summaries
-                WHERE story_id = ? AND chapter_id < ?
+                WHERE story_id = ?
+                  AND chapter_id < ?
+                  AND trim(plot_summary) != ''
                 """,
                 (story_id, int(before_chapter_id)),
             ).fetchone()
@@ -609,7 +629,8 @@ class StoryRepository:
         with self.db.connection() as conn:
             rows = conn.execute(
                 """
-                SELECT chapter_id, plot_summary, conflict_type, resolution_method, ending_vibe, created_at
+                SELECT chapter_id, plot_summary, conflict_type, resolution_method, ending_vibe,
+                       plot_summary_source, created_at
                 FROM chapter_summaries
                 WHERE story_id = ?
                   AND chapter_id >= ?

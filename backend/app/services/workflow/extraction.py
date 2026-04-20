@@ -29,70 +29,88 @@ from app.domain.schema import (
 )
 from app.services.llm import MockLLMClient
 from app.services.workflow.context import WorkflowContext
+from app.services.workflow.event_normalization import is_standard_event_id
+from app.services.workflow.output_language import augment_profile_system_prompt
 from app.services.workflow.profiles import get_profile
+from app.services.workflow.relation_direction_rules import relation_direction_is_valid
 
 logger = get_logger(__name__)
+
+# Max chars for EVENT human-readable labels in graph mutations and fallback relations (replaces harsh :40 cuts).
+EVENT_DESCRIPTION_DISPLAY_MAX = 500
+
+
+def clip_event_description_for_storage(text: str, max_len: int = EVENT_DESCRIPTION_DISPLAY_MAX) -> str:
+    """Trim long planner/event descriptions for storage while keeping full sentences when possible."""
+    d = (text or "").strip()
+    if not d:
+        return ""
+    if len(d) <= max_len:
+        return d
+    return d[: max_len - 1] + "…"
 
 
 # Shared guideline strings (relation step + legacy test prompt)
 RELATION_EXTRACTION_GUIDELINES: list[str] = [
-    "只抽取章節正文中明確出現或可直接由章節確認的實體與關係。",
-    "relation_type 只能使用既有枚舉值。",
-    "若無法確定 relation 的方向或語義，寧可不輸出該 relation。以下是你可以使用的relation_type以及使用條件：\n",
-    "LOCATED_IN：表示某角色、人格、物品或事件位於某地點；方向必須是 CHARACTER/PERSONA/ITEM/EVENT -> LOCATION。",
-    "HAS_ITEM：表示角色、人格或地點持有/收藏某物品；方向必須是 CHARACTER/PERSONA/LOCATION -> ITEM。",
-    "HAS_RELATION：表示角色/人格/組織概念之間存在一般關聯；若使用此關係，source 與 target 必須都是非 EVENT、非 EPOCH 的穩定節點，且 context_details 要寫清楚關係內容。",
-    "PARTICIPATED_IN：表示角色或人格參與事件；方向必須是 CHARACTER/PERSONA -> EVENT。",
-    "IS_ACTUALLY：表示表層身份/偽裝身份實際對應到底層真實身份；方向必須是 PERSONA -> CHARACTER，不能反過來。",
-    "HAS_ATTRIBUTE：表示某節點具有可直接觀察的屬性概念；方向建議是 CHARACTER/PERSONA/ITEM/LOCATION/EVENT -> CONCEPT，且 target 應是屬性或狀態概念，不要拿角色或地點充當屬性。",
-    "BELIEVED_AS：僅限「身分偽裝／被誤認為某標籤、概念或人格面具」等錯誤認知；target 應優先為 CONCEPT 或 PERSONA（錯誤以為的身分標籤），context_details 必須寫明誤認內容。",
-    "KNOWS_ABOUT：表示某角色/人格知道某個角色、物品、地點、事件或概念；方向必須是 CHARACTER/PERSONA -> ANY_NODE。KNOWS_ABOUT 僅能用於『掌握重大秘密、情報、隱藏身份或規則』。禁止將一般的對話、看見或認識標記為 KNOWS_ABOUT。",
-    "BELONGS_TO_EPOCH：表示事件屬於某個時代；方向必須是 EVENT -> EPOCH。",
-    "HAPPENED_BEFORE：表示事件或狀態在時間上早於另一事件或狀態；方向建議是 EVENT/CONCEPT -> EVENT/CONCEPT，且 source 較早、target 較晚。",
-    "CAUSED：表示因果關係；方向必須是 EVENT -> EVENT，且 source 是原因、target 是結果。",
-    "ENFORCED_IN：表示規則的生效範圍；方向必須是 RULE -> LOCATION 或 RULE -> EPOCH，且需與當前敘事時代的 valid_epoch 一致（由系統寫入）。",
-    "RESTRICTS：表示規則限制的對象；方向必須是 RULE -> CHARACTER / PERSONA / ITEM / CONCEPT。",
-    "EXEMPT_FROM：表示不受該規則約束的角色；方向必須是 RULE -> CHARACTER 或 RULE -> PERSONA（豁免名單）。\n\n",
-    "注意事項："
-    "【權限標籤鐵律】is_truth 與 is_public 是不同維度：真實不代表公開。",
-    "【BELIEVED_AS使用鐵律】禁止將信任、依賴、敵友、情感等一般角色間關係標成 BELIEVED_AS，請改用 HAS_RELATION 並在 context_details 寫明。若為易容／替身且表裡身分皆為具名角色，優先 IS_ACTUALLY（PERSONA→CHARACTER）或建立代表錯誤標籤的 CONCEPT，避免 CHARACTER→CHARACTER 的模糊 BELIEVED_AS。",
-    "【因果與時序鐵律】只有當事件 A 是事件 B 發生的「直接物理或邏輯必要條件」時（例：按下開關 CAUSED 爆炸），才能使用 CAUSED。若僅為時間先後發生（例：喝水後走路），絕對禁止使用 CAUSED，請改用 HAPPENED_BEFORE 或不建立關係。",
-    "【持有物過濾】禁止建立角色或地點對「日常消耗品、無意義背景裝飾」的 HAS_ITEM 關係。",
-    "【公開情報】只有大眾皆可直接觀察到的客觀現象、公開互動、公開持有、公開位置，才能設為 is_public=true。",
-    "任何秘密行動、獨自發現的線索、暗中監視、私下知情、內心誤認或隱密移動，is_public 必須為 false。",
-    "若 relation 僅能由單一 POV、少數知情者或參與者得知，預設用 is_public=false，不要因為它真實存在就設成公開。",
-    "【空間移動鐵律】若正文清楚寫出角色移動到新地點，必須抽出新 LOCATION（若不存在）與新的 LOCATED_IN 關係。",
-    "【修辭過濾】忽略文學修辭（比喻、擬人、誇飾、象徵）造成的假實體關係；僅抽取字面可驗證事實與角色真實認知。",
-    "若句子含「像、彷彿、宛如、如同、好似」等比喻觸發詞，除非同段落有可驗證事實錨點，否則不要輸出該關係。",
-    "【ID填寫規則】端點請使用 canonical_entities 中的 node_id 或 ground_truth_events 的 event_id。",
-    "【Tags填寫規則】tags：可選，為關係貼短標籤（如 secret、combat）；勿發明新的 relation_type。",
-    "【metadata填寫規則】metadata：可選，JSON 相容的鍵值（如強度、期限）；長敘事請寫在 context_details。",
+    "Extract only entities and relations explicitly present in or directly confirmable from the chapter text.",
+    "relation_type must use only existing enum values.",
+    "If direction or semantics are uncertain, omit the relation. Allowed relation_type tokens and usage:\n",
+    "LOCATED_IN: a character, persona, item, or event is at a location; direction must be CHARACTER/PERSONA/ITEM/EVENT -> LOCATION.",
+    "HAS_ITEM: a character, persona, or location holds/stores an item; direction must be CHARACTER/PERSONA/LOCATION -> ITEM.",
+    "HAS_RELATION: general association; if used, source and target must be stable non-EVENT, non-EPOCH nodes, and context_details must explain the relation.",
+    "PARTICIPATED_IN: a character or persona participates in an event; direction must be CHARACTER/PERSONA -> EVENT.",
+    "IS_ACTUALLY: surface/disguise maps to underlying true identity; direction must be PERSONA -> CHARACTER, never reversed.",
+    "HAS_ATTRIBUTE: a node has an observable attribute concept; direction should be CHARACTER/PERSONA/ITEM/LOCATION/EVENT -> CONCEPT; target must be an attribute/state concept, not a character/location posing as an attribute.",
+    "BELIEVED_AS: only mistaken identity / misread-as-label-or-persona-mask; target should prefer CONCEPT or PERSONA (wrong label); context_details must spell out the misbelief.",
+    "KNOWS_ABOUT: a character/persona knows another node; direction must be CHARACTER/PERSONA -> ANY_NODE. KNOWS_ABOUT only for major secrets, intel, hidden identities, or rules—not casual chat, seeing, or acquaintance.",
+    "BELONGS_TO_EPOCH: an event belongs to an era; direction must be EVENT -> EPOCH.",
+    "HAPPENED_BEFORE: one event/state is earlier than another; direction should be EVENT/CONCEPT -> EVENT/CONCEPT with source earlier and target later.",
+    "CAUSED: causality; direction must be EVENT -> EVENT with source cause and target effect.",
+    "ENFORCED_IN: where a rule applies; direction must be RULE -> LOCATION or RULE -> EPOCH, consistent with narrative valid_epoch (system-filled).",
+    "RESTRICTS: what a rule constrains; direction must be RULE -> CHARACTER / PERSONA / ITEM / CONCEPT.",
+    "EXEMPT_FROM: characters exempt from a rule; direction must be RULE -> CHARACTER or RULE -> PERSONA (exemption list).\n\n",
+    "Notes:"
+    "Truth vs publicity: is_truth and is_public are different axes—true does not imply public.",
+    "BELIEVED_AS discipline: do not label trust, dependency, enmity, or emotion as BELIEVED_AS—use HAS_RELATION with context_details. For disguise/doubles with both sides named, prefer IS_ACTUALLY (PERSONA→CHARACTER) or a CONCEPT for the wrong label; avoid ambiguous CHARACTER→CHARACTER BELIEVED_AS.",
+    "Causality: use CAUSED only when A is a direct physical/logical prerequisite for B (e.g., switch flip CAUSED explosion). For mere temporal order, never use CAUSED—use HAPPENED_BEFORE or omit.",
+    "HAS_ITEM filter: no HAS_ITEM for mundane consumables or meaningless background props.",
+    "Public facts: is_public=true only for objectively observable public interaction, possession, or position.",
+    "Secret moves, solo clues, surveillance, private knowledge, inner misbelief, or covert travel must use is_public=false.",
+    "If only one POV or few participants could know it, default is_public=false—do not mark public just because it is true.",
+    "Movement: if the text clearly moves a character to a new place, emit a new LOCATION if needed and a new LOCATED_IN relation.",
+    "Rhetoric filter: ignore metaphor/personification/hyperbole/symbolism; extract only literal verifiable facts and character-true beliefs.",
+    "If a sentence uses simile triggers, unless the same paragraph has a verifiable factual anchor, omit that relation.",
+    "IDs: endpoints must use node_id from canonical_entities or event_id from ground_truth_events.",
+    "tags: optional short labels (e.g. secret, combat); never invent a new relation_type string.",
+    "metadata: optional JSON-compatible key-values; longer narrative belongs in context_details.",
 ]
 
 ENTITY_EXTRACTION_GUIDELINES: list[str] = [
-    "只抽取章節正文可直接支持的實體，不得臆測。",
-    "若與 existing_node_candidates 中節點同名或別名相符，請在 suggested_node_id 填寫該 node_id；否則 suggested_node_id 留空。",
-    "不要自行發明 node_id；最終 ID 由系統決定。",
-    "canonical_name 必須簡短(10 個字以內)、可作為圖譜主名稱。例如：'諾亞在混亂的儀器堆中探索，在一台閃爍著「提取完成」紅光的終端機旁，發現了一本筆記本'，此事件canonical_name應被紀錄為'發現筆記本'，並將詳細內容寫在metadata中。",
-    "【零噪音鐵律】嚴禁抽取背景裝飾、日常消耗品（如罐頭、香菸）、環境痕跡（如血指印），以及抽象的敘事視角（如「旁觀者」）。只抽取真正推動劇情、具備特殊功能或角色反覆使用的關鍵實體。",
-    "CONCEPT 僅限世界觀設定、特殊專有名詞、陣營、制度或科技法則。",
-    "【RULE（規則）節點抽取鐵律】凡帶有必須／禁止／條件與懲罰的法律、遊戲機制、場域限制、系統協議，必須抽為 RULE；純名詞解釋、力量體系名稱、陣營標籤仍用 CONCEPT。",
-    "每個 RULE 必須至少一條 ENFORCED_IN 連到正文可指認的 LOCATION；若無法指認具體地點，可連到 loc_unknown，並在該邊的 context_details 簡述原因。",
-    "RULE 的 description 寫規則全文；penalty 寫違規代價（可空）；is_active 預設 true。",
-    "禁止把一般情緒、身體部位、短暫生理不適、狀態形容詞、文學意象抽為 CONCEPT。",
-    "若無符合條件的 CONCEPT，請輸出空缺，不要硬湊。",
-    "優先對齊已知實體字典 existing_node_candidates；只有明確不在字典中才建立新候選。",
-    "若正文使用描述性稱呼（如黑髮年輕人），請優先映射到既有角色 node_id，並將稱呼放入 aliases。",
-    "【嚴格骨架】禁止發明新的 node_type；細分類用 tags（例：ITEM + tags [\"weapon\",\"illegal\"]），勿輸出 node_type=自造字串。",
-    "metadata：可選，用於數值或結構化細節（如 bullet_count、溫度）；須為 JSON 可序列化；長描述請用 summary 或既有欄位。",
-    "無法穩定歸入角色/地點/物品/時代/事件/規則時，用 CONCEPT，並以 tags 與 metadata 補足語義。",
+    "Extract only entities directly supported by the chapter text—no guessing.",
+    "If a name/alias matches existing_node_candidates, set suggested_node_id to that node_id; otherwise leave suggested_node_id empty.",
+    "Do not invent node_id values; the system assigns final ids.",
+    "canonical_name must be short (within ~10 graphemes) for CHARACTER/LOCATION/ITEM/RULE/PERSONA; put longer prose in summary/metadata.",
+    "ground_truth_events (provided separately) lists this chapter's planner beats with stable event_id values. When you extract an EVENT that corresponds to one of those beats, use a short intentional title for canonical_name and put the full beat meaning in summary—do not copy arbitrary mid-sentence fragments as the title.",
+    "If an existing_node_candidates row matches a ground_truth_events.event_id, set suggested_node_id to that node_id.",
+    "Zero-noise rule: do not extract background decor, mundane consumables (cans, cigarettes), ambient traces (bloody fingerprints), or abstract narrative viewpoints ('the observer'). Only plot-driving entities with special function or repeated use.",
+    "CONCEPT is only for worldbuilding terms, factions, institutions, or sci-fi/fantasy laws.",
+    "RULE extraction: laws/game rules/area restrictions/system protocols with must/forbid/if/then/penalty must become RULE; pure glossaries, power-system names, or faction labels stay CONCEPT.",
+    "Each RULE needs at least one ENFORCED_IN edge to a LOCATION identifiable in text; if none, link to loc_unknown and explain briefly in that edge's context_details.",
+    "RULE.description holds the full rule text; penalty is the cost of violation (may be empty); is_active defaults true.",
+    "Do not extract generic emotion, body parts, transient discomfort, adjectives, or literary images as CONCEPT.",
+    "If no CONCEPT qualifies, leave the slot empty—do not force one.",
+    "Prefer aligning to existing_node_candidates; create a new candidate only when clearly absent from the dictionary.",
+    "If the prose uses descriptive epithets ('the dark-haired youth'), map to an existing character node_id when possible and put the epithet in aliases.",
+    "Strict schema: never invent a new node_type string; subtype with tags (e.g. ITEM + tags [\"weapon\",\"illegal\"]).",
+    "metadata: optional numeric/structured detail (bullet_count, temperature); must be JSON-serializable; long prose goes in summary or other allowed fields.",
+    "If classification is unstable across CHARACTER/LOCATION/ITEM/EPOCH/EVENT/RULE, use CONCEPT and disambiguate with tags/metadata.",
 ]
 
 MEMORY_EXTRACTION_GUIDELINES: list[str] = [
-    "chapter_memory.summary 必須是安全的表層摘要，不可寫入底層真相或 planner 的 private_facts。",
-    "latest_location 用讀者可理解的地點描述，不需輸出 node_id。",
-    "若章節有多場景，標出主要角色章末停留的有效位置；不明確則 latest_location 可留空。",
-    "ending_vibe 必須在 ACTION_CLIFFHANGER / SAFE_ROOM_EXPOSITION / ON_THE_MOVE / DEVASTATING_LOSS 中擇一。",
+    "chapter_memory.summary must be a safe surface summary—no ground-truth leaks or planner private_facts.",
+    "latest_location is a reader-understandable place description; no node_id required.",
+    "If multiple scenes, capture the main characters' effective end position; leave latest_location blank if unclear.",
+    "ending_vibe must be one of ACTION_CLIFFHANGER / SAFE_ROOM_EXPOSITION / ON_THE_MOVE / DEVASTATING_LOSS.",
 ]
 
 
@@ -285,7 +303,7 @@ def _chapter_text_for_memory(full: str, budget: int) -> str:
     mid_budget = max(0, budget - len(head) - len(tail) - 80)
     mid = _paragraph_sample_middle(full, mid_budget)
     return (
-        "[以下為節選，摘要請保守、勿臆測未出現內容]\n\n"
+        "[Excerpt below—keep summaries conservative; do not infer unseen content.]\n\n"
         + head
         + "\n\n---\n\n"
         + mid
@@ -304,6 +322,8 @@ def _chapter_text_for_relations(full: str, events: list[EventOutline], fallback_
         idx = full.find(key)
         if idx < 0:
             idx = full.find(desc[:20])
+        if idx < 0 and len(desc) > 40:
+            idx = full.find(desc[: min(120, len(desc))])
         if idx >= 0:
             start = max(0, idx - 800)
             end = min(len(full), idx + len(desc) + 800)
@@ -326,7 +346,25 @@ def _highest_signal_middle_window(full: str, budget: int) -> str:
     for p in paras:
         score = sum(1 for m in re.finditer(r"\b[A-Z][a-zA-Z]{2,}\b", p))
         score += len(re.findall(r"[「『\"]", p))
-        score += sum(1 for kw in ("王都", "城門", "巷", "宮", "門", "街", "屋", "站") if kw in p)
+        score += sum(
+            1
+            for kw in (
+                "王都",
+                "城門",
+                "巷",
+                "宮",
+                "門",
+                "街",
+                "屋",
+                "站",
+                "capital",
+                "harbor",
+                "manor",
+                "gate",
+                "street",
+            )
+            if kw in p
+        )
         scored.append((score, p))
     scored.sort(key=lambda x: -x[0])
     picked: list[str] = []
@@ -413,7 +451,7 @@ def canonicalize_entity_candidates(
             node_type=nt,
             canonical_name=display_name,
             aliases=merged_aliases,
-            summary=c.summary or f"章節提及 {display_name}。",
+            summary=c.summary or f"Mentioned in chapter: {display_name}.",
             properties=dict(c.properties),
             tags=list(c.tags),
             metadata=dict(c.metadata),
@@ -487,57 +525,6 @@ def _resolve_relation_endpoint(
     return ""
 
 
-def _relation_direction_valid(
-    relation_type: EdgeType,
-    source_id: str,
-    target_id: str,
-    node_types: dict[str, NodeType],
-) -> bool:
-    source_type = node_types.get(source_id)
-    target_type = node_types.get(target_id)
-    if source_type is None or target_type is None:
-        return True
-    direction_rules: dict[EdgeType, tuple[set[NodeType], set[NodeType]]] = {
-        EdgeType.HAS_ITEM: (
-            {NodeType.CHARACTER, NodeType.PERSONA, NodeType.LOCATION},
-            {NodeType.ITEM},
-        ),
-        EdgeType.LOCATED_IN: (
-            {NodeType.CHARACTER, NodeType.PERSONA, NodeType.ITEM, NodeType.EVENT},
-            {NodeType.LOCATION},
-        ),
-        EdgeType.PARTICIPATED_IN: (
-            {NodeType.CHARACTER, NodeType.PERSONA},
-            {NodeType.EVENT},
-        ),
-        EdgeType.BELONGS_TO_EPOCH: (
-            {NodeType.EVENT},
-            {NodeType.EPOCH},
-        ),
-        EdgeType.CAUSED: (
-            {NodeType.EVENT},
-            {NodeType.EVENT},
-        ),
-        EdgeType.ENFORCED_IN: (
-            {NodeType.RULE},
-            {NodeType.LOCATION, NodeType.EPOCH},
-        ),
-        EdgeType.RESTRICTS: (
-            {NodeType.RULE},
-            {NodeType.CHARACTER, NodeType.PERSONA, NodeType.ITEM, NodeType.CONCEPT},
-        ),
-        EdgeType.EXEMPT_FROM: (
-            {NodeType.RULE},
-            {NodeType.CHARACTER, NodeType.PERSONA},
-        ),
-    }
-    allowed = direction_rules.get(relation_type)
-    if allowed is None:
-        return True
-    allowed_source, allowed_target = allowed
-    return source_type in allowed_source and target_type in allowed_target
-
-
 def _validation_gate(
     output: ChapterExtractionOutput,
     state: dict,
@@ -546,7 +533,12 @@ def _validation_gate(
 ) -> ChapterExtractionOutput:
     existing_ids = {n.node_id for n in graph_snapshot.nodes}
     entity_ids = {e.node_id for e in output.entities}
-    event_ids = {ev.event_id for ev in events}
+    chapter_id = int(state.get("chapter_id") or 0)
+    standard_event_ids = {ev.event_id for ev in events if is_standard_event_id(ev.event_id, chapter_id=chapter_id)}
+    event_ids = standard_event_ids or {ev.event_id for ev in events}
+    malformed_event_ids = [ev.event_id for ev in events if ev.event_id not in event_ids]
+    if malformed_event_ids:
+        logger.warning("validation_gate_nonstandard_event_ids", extra={"chapter_id": chapter_id, "event_ids": malformed_event_ids})
     required = {
         state.get("active_epoch_id", ""),
         state.get("pov_character_id", ""),
@@ -579,7 +571,7 @@ def _validation_gate(
             continue
         if sid not in known_ids or tid not in known_ids:
             continue
-        if not _relation_direction_valid(rel.relation_type, sid, tid, node_types):
+        if not relation_direction_is_valid(rel.relation_type, sid, tid, node_types):
             continue
         details = (rel.context_details or "").casefold()
         if rel.relation_type in {EdgeType.BELIEVED_AS, EdgeType.HAS_ATTRIBUTE} and any(t in details for t in figurative_tokens):
@@ -640,12 +632,13 @@ def _build_entity_prompt(ctx: ExtractionContext) -> str:
             "story_id": ctx.state["story_id"],
             "chapter_id": ctx.state["chapter_id"],
             "existing_node_candidates": existing,
+            "ground_truth_events": [e.model_dump(mode="json") for e in ctx.events],
             "author_surface_hints": ctx.author_surface_hints,
             "guidelines": ENTITY_EXTRACTION_GUIDELINES
             + [
-                "author_surface_hints 為主筆登記的 node_id 與正文中「精確子字串」稱呼；"
-                "抽取時應把對應實體對齊到該 node_id，並可把這些字串納入 aliases。",
-                "existing_node_candidates 即為已知實體字典（Entity Glossary）；抽取時先比對再新增。",
+                "author_surface_hints lists node_id values and exact substring surface forms from the author; "
+                "align extracted entities to those node_id values when matched, and you may add those strings to aliases.",
+                "existing_node_candidates is the Entity Glossary—match before creating new candidates.",
             ],
             "chapter_excerpt": ctx.chapter_text_for_entities,
             "prompt_char_budget": len(ctx.chapter_text_for_entities),
@@ -742,13 +735,17 @@ def extract_chapter_artifacts(
     memory_latency = 0
 
     def run_entity() -> tuple[EntityExtractionOutput, int, int]:
-        profile = get_profile("entity_extractor")
+        profile = augment_profile_system_prompt(
+            get_profile("entity_extractor"), context.output_language
+        )
         prompt = _build_entity_prompt(ctx)
         out, res = context.llm_client.invoke_json(prompt, EntityExtractionOutput, profile)
         return out, res.latency_ms, res.token_usage
 
     def run_memory() -> tuple[ChapterMemoryExtractionOutput, int, int]:
-        profile = get_profile("chapter_memory_extractor")
+        profile = augment_profile_system_prompt(
+            get_profile("chapter_memory_extractor"), context.output_language
+        )
         prompt = _build_memory_prompt(ctx)
         out, res = context.llm_client.invoke_json(prompt, ChapterMemoryExtractionOutput, profile)
         return out, res.latency_ms, res.token_usage
@@ -817,7 +814,9 @@ def extract_chapter_artifacts(
     settings = get_settings()
     batch_size = settings.extraction_relation_entity_batch_size
     relations: list[ExtractedRelation] = []
-    rel_profile = get_profile("relation_extractor")
+    rel_profile = augment_profile_system_prompt(
+        get_profile("relation_extractor"), context.output_language
+    )
 
     if not canonical_rows:
         relations = []
@@ -952,7 +951,7 @@ def _fallback_extract(
                     node_type=node.node_type,
                     canonical_name=node.canonical_name,
                     aliases=list(getattr(node, "aliases", [])),
-                    summary=f"章節明確提及 {node.canonical_name}。",
+                    summary=f"Explicitly mentioned in chapter: {node.canonical_name}.",
                 )
             )
             entity_names.append(node.canonical_name)
@@ -964,8 +963,8 @@ def _fallback_extract(
             ExtractedEntity(
                 node_type=NodeType.CHARACTER,
                 canonical_name=candidate,
-                summary=f"{candidate} 在本章被提及。",
-                properties={"description": f"{candidate} 在本章參與情節。"},
+                summary=f"{candidate} is mentioned in this chapter.",
+                properties={"description": f"{candidate} participates in the chapter plot."},
             )
         )
         entity_names.append(candidate)
@@ -983,7 +982,7 @@ def _fallback_extract(
                 ExtractedEntity(
                     node_type=NodeType.LOCATION,
                     canonical_name=location_name,
-                    summary=f"{location_name} 是本章主要場景。",
+                    summary=f"{location_name} is a primary scene in this chapter.",
                 )
             )
             entity_names.append(location_name)
@@ -999,8 +998,11 @@ def _fallback_extract(
                         source_name=entity.canonical_name,
                         relation_type=EdgeType.PARTICIPATED_IN,
                         target_node_id=event.event_id,
-                        target_name=event.description[:40],
-                        context_details=f"{entity.canonical_name} 參與了事件：{event.description[:80]}",
+                        target_name=clip_event_description_for_storage(event.description),
+                        context_details=(
+                            f"{entity.canonical_name} participated in event: "
+                            f"{clip_event_description_for_storage(event.description)}"
+                        ),
                         is_truth=True,
                         is_public=False,
                     )
@@ -1016,14 +1018,16 @@ def _fallback_extract(
                     source_name=entity.canonical_name,
                     relation_type=EdgeType.LOCATED_IN,
                     target_name=location_name,
-                    context_details=f"{entity.canonical_name} 在本章章末停留於 {location_name}。",
+                    context_details=f"{entity.canonical_name} ends the chapter at {location_name}.",
                     is_truth=True,
                     is_public=False,
                 )
             )
 
     summary = normalized_content[:240]
-    unresolved_threads = [events[-1].description[:120]] if events else []
+    unresolved_threads = (
+        [clip_event_description_for_storage(events[-1].description, max_len=600)] if events else []
+    )
     return ChapterExtractionOutput(
         entities=entities,
         relations=relations,
@@ -1042,7 +1046,11 @@ def _infer_capitalized_names(text: str) -> list[str]:
 
 
 def _infer_location_name(text: str) -> str:
-    match = re.search(r"(王都|城門|聖所|邊境|西區|北坡)", text)
+    match = re.search(
+        r"(王都|城門|聖所|邊境|西區|北坡|capital|harbor|sanctuary|border|district)",
+        text,
+        re.IGNORECASE,
+    )
     return match.group(1) if match else ""
 
 
@@ -1091,12 +1099,51 @@ def _is_valid_world_concept(name: str, summary: str, excerpt: str) -> bool:
     if not nm:
         return False
     # Reject obvious figurative / body / emotion-only concepts.
-    blocked = ("肌肉", "恐懼", "驚訝", "悲傷", "白沫", "痛苦", "不適", "緊張", "瞳孔", "眼淚")
+    blocked = (
+        "肌肉",
+        "恐懼",
+        "驚訝",
+        "悲傷",
+        "白沫",
+        "痛苦",
+        "不適",
+        "緊張",
+        "瞳孔",
+        "眼淚",
+        "muscle",
+        "fear",
+        "grief",
+        "foam",
+        "pain",
+        "tension",
+        "pupil",
+        "tear",
+    )
     if any(tok in nm for tok in blocked):
         return False
     evidence_text = f"{summary or ''} {excerpt[:1200]}"
     # Keep only concepts with definitional signal in nearby text.
-    definitional_signals = ("稱為", "被稱為", "是一種", "規則", "法則", "機制", "組織", "陣營", "能力", "代號")
+    definitional_signals = (
+        "稱為",
+        "被稱為",
+        "是一種",
+        "規則",
+        "法則",
+        "機制",
+        "組織",
+        "陣營",
+        "能力",
+        "代號",
+        "known as",
+        "called",
+        "refers to",
+        "rule",
+        "law",
+        "mechanism",
+        "faction",
+        "protocol",
+        "codename",
+    )
     return any(sig in evidence_text for sig in definitional_signals)
 
 

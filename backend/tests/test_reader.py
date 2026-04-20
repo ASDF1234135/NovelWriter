@@ -21,6 +21,7 @@ class FakeJsonLLMClient:
 class DummyContext:
     def __init__(self, payload: ReaderOutput) -> None:
         self.llm_client = FakeJsonLLMClient(payload)
+        self.output_language = "zh-Hant"
 
 
 def test_reader_approval_uses_score_threshold_not_provider_flag() -> None:
@@ -55,7 +56,7 @@ def test_reader_failed_score_keeps_modification_feedback() -> None:
                 is_approved=True,
                 literary_score=55,
                 suggestion_type=SuggestionType.NONE,
-                critique="節奏偏平，畫面與情緒層次可再加強。",
+                critique="Pacing feels flat; imagery and emotional layering could deepen.",
             )
         ),
     )
@@ -63,7 +64,7 @@ def test_reader_failed_score_keeps_modification_feedback() -> None:
     assert output["is_approved"] is False
     assert output["literary_score"] == 55
     assert output["suggestion_type"] == SuggestionType.MODIFY.value
-    assert output["critique"] == "節奏偏平，畫面與情緒層次可再加強。"
+    assert output["critique"] == "Pacing feels flat; imagery and emotional layering could deepen."
 
 
 def test_reader_short_llm_critique_gets_fallback_hint() -> None:
@@ -83,4 +84,4 @@ def test_reader_short_llm_critique_gets_fallback_hint() -> None:
     )
 
     assert output["is_approved"] is False
-    assert "節奏是否拖沓" in output["critique"]
+    assert "pacing drag" in output["critique"].casefold()

@@ -35,8 +35,8 @@ def test_extraction_prompt_documents_all_edge_types() -> None:
     assert "RESTRICTS" in prompt
     assert "EXEMPT_FROM" in prompt
     assert "RULE" in prompt
-    assert "權限標籤鐵律" in prompt
-    assert "忽略文學修辭" in prompt
+    assert "Truth vs publicity" in prompt
+    assert "Rhetoric filter" in prompt
     assert "planner_visibility_contract" in prompt
     assert "守衛長官暗中監視" in prompt
 
@@ -59,7 +59,7 @@ def test_believed_as_guideline_forbids_interpersonal_misuse() -> None:
         events=[],
     )
     assert "BELIEVED_AS" in prompt
-    assert "禁止將信任" in prompt
+    assert "do not label trust" in prompt
     assert "HAS_RELATION" in prompt
     assert "IS_ACTUALLY" in prompt
 

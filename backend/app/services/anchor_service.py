@@ -17,12 +17,49 @@ from app.domain.schema import (
     StoryInput,
     VolumePlan,
 )
+from app.core.config import get_settings
 from app.services.llm import LLMClient, MockLLMClient
 from app.services.workflow.constants import MAX_ANCHORS_PER_VOLUME, MIN_ANCHORS_PER_VOLUME
+from app.services.workflow.output_language import (
+    OUTPUT_LANGUAGE_LABEL,
+    augment_profile_system_prompt,
+    default_chapter_target_words,
+    normalize_output_language,
+)
 from app.services.workflow.profiles import get_profile
 
 logger = logging.getLogger(__name__)
 _BIBLE_PRIMARY_OPTIONAL_KEYS = frozenset({"theme", "narrative_pov", "writing_style"})
+
+# Heuristic: codepoints that usually indicate Traditional Chinese when Mainland Simplified is required.
+# (Distinct from common simplified forms; intentionally biased toward high-frequency editorial variants.)
+_CJK_TRADITIONAL_STRONG_CHARS = frozenset(
+    "這與國時會說對從種經長門問間題關聽見個們體員為點應該計記認護達遠運邊選過開來還裡麼"
+    "騎號雖電龍鳥魚馬顯頭願風飛養聲壓夠婦屆層幫幹廣廳後徵復徹懲憑慮據擇擊擴擾攜敵數斷"
+    "晝曆東極樣機檢歡歲殘殺氣汙決沒況洩洶涼淚淺測湧滯漸潛潔災無煙熱燙爭狀狹獲獸獻獵環"
+    "畫當疊確碼磚祕祿禮禱禦禪離積穩竊竄筆節範簽籃籌紛納紐純終絕給網緊緣總縱繁織繪繼續"
+    "罰罷羅義習職聰聯節點敘稱線審攤鑲鐘鐵銀銅錢鎖鏡鐵鑰門閱開關閣隊階際陳險隱霧靜韋頂顆題額顏顫"
+    "餵館餅養餘駕騰騷驗驅驅體鬥鬧魘鴉鴿麗黨齡齊龍龜"
+)
+# Heuristic: simplified-preferring codepoints when Traditional Chinese is required (unified zh-Hant).
+_CJK_SIMPLIFIED_STRONG_CHARS = frozenset(
+    "这国时说对从种经长门问间题关听见个们体员为点应该计记认护达远运边选过来还里么"
+    "专东丝严丧临举义乐乡亿仅众优伞伟传伦伪侠侦侨俭债倾储兰兴养冲决况冻净凉凑凛凯击划刘创删剑劲勋"
+    "华卖卢历厉压厌厕县参变叽吗听呐呜咙唤啧啬啮啸团围圆圣坏块坚坛坞垦堕墙增壳壶复够夹奥妇姗婴妈婆"
+    "寻导将尔岁帮庆庐库庙庞异张弹强彦彻径忧怀恳恶悬悯惊惕惫惩惭惮愤憋懒护择挝拣拥拨挣挤挥捞损换捣"
+    "握掷掺揽敌敛斋斑斩断旷显曾朋服望期杨杰极构枪枫柜柠标栈栋栏树桦检棱椰概榆榈槽樊樟横樱橄橇橙橘"
+    "檐橱毡毯毽汇汉污汹泛泞泽洁测浒浓浦涝润涧涨淑淌淬淡深混淹渠渗温渴渺湿溃溅溉滥滩滚滞澳激灌灭灯"
+    "灵灶炖炮炼烁炽烛烘烩烬烫焊焕焖焘爷牍牺犁犊狎狈狭狮狱猎猕猜猪猬献獭玛环现琐琼瓯畅畴疗疟疡疮疯"
+    "痪痹瘟瘤癣皑皱盏盐监盖盗盘睐睑睛瞄矫矶矿码砥砾础确硷碍碑碰碱祸禅秃秆秽穷窍窑筑筒筛箩篓简签篮"
+    "篱粮粱粹系紧累絷纠纽纺绑绒结绘绚络绝绞绢综绽缀缕编缭缮缰缴网罗罚罢羟翘翻耆聊聪联聋肾胀胆胜脉"
+    "胰脏胳脐脑脓脸腾腰腺腮膛舒舔舜舞航般舵舶舫艇艰艳艺节芦芜苇苞荨荡荫荧莺萨落蓝蓟蕴蘑虏虑虾蚂蚀"
+    "蚱蚌蝇融衅衔补衬袜袭裆裢裤褛褴见观规觅视览觉觑觇计订讣认讨讪训议记讲讶许讹论讽设访诀证评识诉"
+    "诊试诗诚话诞诠询该详诫诬诱请诺读课谁调谅谈谊谋谐谓谚谢谣谦谨谩谭谱谴贞负贡财责贤败账质贩贫购贯"
+    "贰贱贴贻贼贿赁赂赃赊赋赌赎赐赔赖赘赚赛赞赠赡赢赵赶趋趟趴践跷跃跄踢踩踱蹿躯轧轨转轮软轰轴轻载轿"
+    "较辆辈辉辊辍辐辑辕辙辽达迁过迈运进远违连迟适逊递逻遗遥邀邪邮邹郑郸酝酱酿醋释鉴钙钝钞钠钥钧钩钾"
+    "铀铁铂铃铄铅铆铲银铸铺链销锁锐错锚锤锥锨键锯锹锻镇镐镰镶闸闹闺闽阀阁阂阅阔阚阴阵际陨险隐雾静靥"
+    "韦韧韩韵颂预领颗颚额颤飞饵馆馈馔驮驱验骏骑骚"
+)
 
 MACRO_AUTHOR_NOTES_MAX = 8192
 CAST_SHORT_BIO_MAX = 500
@@ -128,13 +165,27 @@ def _merge_cast_llm_with_seed(raw: list[MacroCastMember], seeds: list[StoryCastS
 
 
 class AnchorService:
+    @staticmethod
+    def _macro_chapter_unit_and_words_per_volume(story_input: StoryInput) -> tuple[int, int]:
+        settings = get_settings()
+        ol = normalize_output_language(story_input.output_language)
+        if ol == "en":
+            chapter_unit = max(1, int(settings.macro_english_chapter_unit))
+        else:
+            chapter_unit = max(1, default_chapter_target_words(ol))
+        words_per_volume = max(1, int(settings.macro_chapters_per_volume) * chapter_unit)
+        return chapter_unit, words_per_volume
+
     def compile_macro_plan(
         self, story_id: str, story_input: StoryInput, llm_client: LLMClient | None = None
     ) -> tuple[list[VolumePlan], list[StateAnchor], list[StoryCastMemberStored], list[dict[str, Any]], dict[str, Any]]:
-        fixed_total_chapters = max(12, story_input.target_total_words // 2500)
-        fixed_total_volumes = max(3, int(math.ceil(story_input.target_total_words / 25000)))
+        chapter_unit, words_per_volume = self._macro_chapter_unit_and_words_per_volume(story_input)
+        fixed_total_chapters = max(12, story_input.target_total_words // chapter_unit)
+        fixed_total_volumes = max(3, int(math.ceil(story_input.target_total_words / words_per_volume)))
         if llm_client is not None and not isinstance(llm_client, MockLLMClient):
-            profile = get_profile("macro_planner")
+            profile = augment_profile_system_prompt(
+                get_profile("macro_planner"), story_input.output_language
+            )
             notes = clamp_macro_author_notes(story_input.macro_author_notes)
             notes_keypoints = extract_notes_keypoints(notes)
             keypoint_ids = [kp["id"] for kp in notes_keypoints]
@@ -156,18 +207,31 @@ class AnchorService:
                             return False
                 return True
 
+            def _validate_output_language(output: MacroPlanOutput) -> str | None:
+                return self._detect_macro_output_language_mismatch(output, story_input.output_language)
+
             # Retry if the model violates (1) fixed volumes count or (2) notes_links enforcement.
             structured_output: MacroPlanOutput | None = None
+            language_mismatch_detail: str | None = None
             for _attempt in range(2):
                 prompt = self._build_macro_prompt(
                     story_input,
                     fixed_total_chapters=fixed_total_chapters,
                     fixed_total_volumes=fixed_total_volumes,
                 )
+                if language_mismatch_detail:
+                    prompt = (
+                        f"{prompt}\n\n"
+                        "Previous output violated the configured output language requirement. "
+                        f"Rewrite all natural-language values so they are entirely in "
+                        f"{OUTPUT_LANGUAGE_LABEL.get(normalize_output_language(story_input.output_language), 'the configured language')}. "
+                        f"Issue: {language_mismatch_detail}"
+                    )
                 structured_output, _ = llm_client.invoke_json(prompt, MacroPlanOutput, profile)
                 ok_volumes = len(structured_output.volumes or []) == fixed_total_volumes
                 ok_notes = _validate_notes_links(structured_output)
-                if ok_volumes and ok_notes:
+                language_mismatch_detail = _validate_output_language(structured_output)
+                if ok_volumes and ok_notes and language_mismatch_detail is None:
                     break
 
             if structured_output is None:
@@ -188,91 +252,147 @@ class AnchorService:
 
             if enforce_notes_links and not _validate_notes_links(structured_output):
                 raise ValueError("macro compile notes_links enforcement failed (cast/anchor missing KP references)")
+            final_language_mismatch = _validate_output_language(structured_output)
+            if final_language_mismatch:
+                raise ValueError(f"macro compile output language mismatch: {final_language_mismatch}")
 
             return self._normalize_macro_plan(
                 story_id, structured_output, fixed_total_chapters, story_input.target_total_words, story_input
             )
         return self._build_mock_macro_plan(story_id, story_input)
 
+    @staticmethod
+    def _is_cjk_letter(ch: str) -> bool:
+        if len(ch) != 1:
+            return False
+        o = ord(ch)
+        return (0x3400 <= o <= 0x4DBF) or (0x4E00 <= o <= 0x9FFF) or (0xF900 <= o <= 0xFAFF)
+
+    def _script_letter_counts(self, text: str) -> tuple[int, int]:
+        cjk = 0
+        latin = 0
+        for ch in text:
+            if ch.isascii() and ch.isalpha():
+                latin += 1
+            elif ch.isalpha() and self._is_cjk_letter(ch):
+                cjk += 1
+        return cjk, latin
+
+    def _collect_macro_output_text(self, output: MacroPlanOutput) -> str:
+        parts: list[str] = []
+
+        def _walk(value: Any) -> None:
+            if isinstance(value, str):
+                s = value.strip()
+                if s:
+                    parts.append(s)
+            elif isinstance(value, dict):
+                for v in value.values():
+                    _walk(v)
+            elif isinstance(value, list):
+                for v in value:
+                    _walk(v)
+
+        _walk(output.model_dump(mode="json"))
+        return "\n".join(parts)
+
+    def _detect_macro_output_language_mismatch(self, output: MacroPlanOutput, output_language: str) -> str | None:
+        text = self._collect_macro_output_text(output)
+        if len(text) < 80:
+            return None
+        norm = normalize_output_language(output_language)
+        cjk, latin = self._script_letter_counts(text)
+        total = cjk + latin
+        if total < 40:
+            return None
+        cjk_ratio = cjk / total
+        if norm == "en":
+            if cjk >= 24 and cjk_ratio >= 0.22:
+                return f"expected English but counted many CJK letters ({cjk} CJK, {latin} Latin; ratio {cjk_ratio:.0%})."
+            return None
+        if norm in ("zh-Hant", "zh-Hans"):
+            # Structured JSON still carries English role tokens and anchor codes (e.g. protagonist, "v1"),
+            # which inflate Latin counts; do not treat as mismatch if prose-scale CJK is clearly present.
+            if latin >= 90 and cjk_ratio <= 0.14 and cjk < 45:
+                return (
+                    f"expected {OUTPUT_LANGUAGE_LABEL.get(norm, norm)} but output looks mostly Latin "
+                    f"({cjk} CJK, {latin} Latin; ratio {cjk_ratio:.0%})."
+                )
+            if norm == "zh-Hans":
+                trad = self._zh_hans_traditional_script_mismatch(text, cjk)
+                if trad:
+                    return trad
+            elif norm == "zh-Hant":
+                simp = self._zh_hant_simplified_script_mismatch(text, cjk)
+                if simp:
+                    return simp
+            return None
+        return None
+
+    @staticmethod
+    def _zh_hans_traditional_script_mismatch(text: str, cjk: int) -> str | None:
+        if cjk < 28:
+            return None
+        hits = sum(1 for ch in text if ch in _CJK_TRADITIONAL_STRONG_CHARS)
+        ratio = hits / cjk
+        if hits >= 14 and ratio >= 0.025:
+            return (
+                "expected Simplified Chinese but output contains many Traditional-form CJK characters "
+                f"({hits} likely-Traditional indicators in {cjk} CJK letters, ~{ratio:.1%})."
+            )
+        if hits >= 28:
+            return (
+                "expected Simplified Chinese but output contains many Traditional-form CJK characters "
+                f"({hits} likely-Traditional indicators in {cjk} CJK letters)."
+            )
+        return None
+
+    @staticmethod
+    def _zh_hant_simplified_script_mismatch(text: str, cjk: int) -> str | None:
+        if cjk < 28:
+            return None
+        hits = sum(1 for ch in text if ch in _CJK_SIMPLIFIED_STRONG_CHARS)
+        ratio = hits / cjk
+        if hits >= 14 and ratio >= 0.025:
+            return (
+                "expected Traditional Chinese but output contains many Simplified-form CJK characters "
+                f"({hits} likely-Simplified indicators in {cjk} CJK letters, ~{ratio:.1%})."
+            )
+        if hits >= 28:
+            return (
+                "expected Traditional Chinese but output contains many Simplified-form CJK characters "
+                f"({hits} likely-Simplified indicators in {cjk} CJK letters)."
+            )
+        return None
+
     def _build_mock_macro_plan(
         self, story_id: str, story_input: StoryInput
     ) -> tuple[list[VolumePlan], list[StateAnchor], list[StoryCastMemberStored], list[dict[str, Any]], dict[str, Any]]:
-        total_chapters = max(12, story_input.target_total_words // 2500)
-        volume_breaks = [1, total_chapters // 3, (total_chapters // 3) * 2, total_chapters]
-        total_words = max(12_000, story_input.target_total_words)
-        budget_one = int(total_words * 0.28)
-        budget_two = int(total_words * 0.33)
-        budget_three = total_words - budget_one - budget_two
-
-        v1_end = max(4, volume_breaks[1])
-        v2_end = max(8, volume_breaks[2])
-        v1_start, v1_end = 1, v1_end
-        v2_start, v2_end = max(5, volume_breaks[1] + 1), v2_end
-        v3_start, v3_end = max(9, volume_breaks[2] + 1), total_chapters
-
-        vol1_drafts = self._default_nested_anchors_for_range(
-            "卷一：命運啟動",
-            f"建立世界與主角困境，鋪設核心衝突。{story_input.premise}",
-            v1_start,
-            v1_end,
-            beat_prefix="啟程",
+        chapter_unit, words_per_volume = self._macro_chapter_unit_and_words_per_volume(story_input)
+        total_chapters = max(12, story_input.target_total_words // chapter_unit)
+        fixed_total_volumes = max(3, int(math.ceil(story_input.target_total_words / words_per_volume)))
+        volume_drafts = self._fallback_volume_plan_drafts_by_count(
+            story_input=story_input,
+            total_chapters=total_chapters,
+            volume_count=fixed_total_volumes,
+            notes_keypoint_ids=None,
         )
-        vol2_drafts = self._default_nested_anchors_for_range(
-            "卷二：真相逼近",
-            "讓角色面對代價，逐步逼近錨點與秘密。",
-            v2_start,
-            v2_end,
-            beat_prefix="逼近",
-        )
-        vol3_drafts = self._default_nested_anchors_for_range(
-            "卷三：決戰與回收",
-            "回收伏筆並完成主線收束。",
-            v3_start,
-            v3_end,
-            beat_prefix="終局",
-        )
-
         mock_bible = self._fallback_bible_from_premise(story_input)
         plan = MacroPlanOutput(
             bible=mock_bible,
             cast=[],
-            volumes=[
-                MacroVolumePlanDraft(
-                    title="卷一：命運啟動",
-                    summary=f"建立世界與主角困境，鋪設核心衝突。{story_input.premise}",
-                    chapter_start=v1_start,
-                    chapter_end=v1_end,
-                    target_volume_words=budget_one,
-                    anchors=vol1_drafts,
-                ),
-                MacroVolumePlanDraft(
-                    title="卷二：真相逼近",
-                    summary="讓角色面對代價，逐步逼近錨點與秘密。",
-                    chapter_start=v2_start,
-                    chapter_end=v2_end,
-                    target_volume_words=budget_two,
-                    anchors=vol2_drafts,
-                ),
-                MacroVolumePlanDraft(
-                    title="卷三：決戰與回收",
-                    summary="回收伏筆並完成主線收束。",
-                    chapter_start=v3_start,
-                    chapter_end=v3_end,
-                    target_volume_words=budget_three,
-                    anchors=vol3_drafts,
-                ),
-            ],
+            volumes=volume_drafts,
         )
         return self._normalize_macro_plan(story_id, plan, total_chapters, story_input.target_total_words, story_input)
 
     def _fallback_bible_from_premise(self, story_input: StoryInput) -> dict[str, Any]:
         return {
-            "story_genre": "未指定",
-            "writing_style": "敘事清晰、節奏穩健",
-            "narrative_pov": "第三人稱有限視角",
-            "tone": "依 premise 自然延伸",
-            "world_rules": ["規則將隨章節展開補齊"],
-            "factions": ["依故事自然浮現的勢力"],
+            "story_genre": "unspecified",
+            "writing_style": "clear narration, steady pacing",
+            "narrative_pov": "third-person limited",
+            "tone": "derive naturally from premise",
+            "world_rules": ["Rules will be refined as chapters progress"],
+            "factions": ["Factions emerge naturally from the story"],
             "premise_seed": (story_input.premise or "")[:800],
         }
 
@@ -314,9 +434,9 @@ class AnchorService:
             positions = [chapter_end, chapter_end, chapter_end]
 
         templates = [
-            (f"{beat_prefix}：局勢推進", f"在《{volume_title}》中段前完成一次可觀的劇情推進。", {"beat": 1}),
-            (f"{beat_prefix}：壓力升級", f"角色在《{volume_title}》中面臨更高風險或更強阻力。", {"beat": 2}),
-            (f"{beat_prefix}：卷內收束", f"完成《{volume_title}》的階段性目標並銜接下一階段。", {"beat": 3}),
+            (f"{beat_prefix}: Push the board", f"Before the midpoint of “{volume_title}”, land one clear plot advance.", {"beat": 1}),
+            (f"{beat_prefix}: Raise the pressure", f"Inside “{volume_title}”, expose the cast to higher risk or stronger opposition.", {"beat": 2}),
+            (f"{beat_prefix}: Close the volume beat", f"Hit a volume-scale milestone in “{volume_title}” and hand off to the next phase.", {"beat": 3}),
         ]
         return [
             MacroNestedAnchorDraft(
@@ -341,13 +461,26 @@ class AnchorService:
         target_chapters_per_volume = fixed_total_chapters / max(1, fixed_total_volumes)
         cast_seed_payload = [s.model_dump(mode="json") for s in story_input.cast_seed]
         cast_req: list[str] = [
-            "cast：人數不限，但每位都必須是貫穿主線的核心人物；禁止一次性路人、過渡工具人進入 cast。",
-            "全書結構上僅允許 1 位 protagonist、0-1 位 antagonist，其餘為主要 supporting（後端會對重複角色類型做調整）；錨點敘述優先使用 canonical_name。",
+            "cast: any headcount, but everyone listed must be core to the spine across the series - no one-off walk-ons or pure transition tools.",
+            "Globally allow exactly 1 protagonist, 0–1 antagonist, with the remainder as major supporting (backend may coerce duplicate role labels); prefer canonical_name in anchor prose.",
         ]
         if cast_seed_payload:
             cast_req.append(
-                "cast_seed 為使用者指定的核心名單：其中每個 canonical_name 不得改名、不得合併、不得遺漏；"
-                "你仍須為每位補齊 short_bio、core_motivation、notes_links 等欄位；可在不違反上述前提下新增其他核心人物。"
+                "cast_seed is the user's locked core roster: every canonical_name must be preserved (no renames, merges, or omissions); "
+                "still enrich each row with short_bio, core_motivation, notes_links, etc.; you may add other core figures without breaking those constraints."
+            )
+        ol = normalize_output_language(story_input.output_language)
+        script_shape_req: list[str] = []
+        if ol == "zh-Hans":
+            script_shape_req.append(
+                "Author text in title / premise / macro_author_notes may be Traditional Chinese, mixed script, or Latin; "
+                "still write every JSON string in Mainland China normative Simplified Chinese (大陆规范简体字). "
+                "Do not mirror the author's Traditional character forms."
+            )
+        elif ol == "zh-Hant":
+            script_shape_req.append(
+                "Author text may be Simplified Chinese, mixed, or Latin; unify every JSON string to standard Traditional Chinese (繁體中文) for this story. "
+                "Avoid simplified-only character forms where Traditional orthography differs from Simplified."
             )
         return json.dumps(
             {
@@ -368,7 +501,7 @@ class AnchorService:
                         "writing_note": "string[]",
                         "world_rules": "string[]",
                         "factions": "string[]",
-                        "extra": "optional object — custom world metadata only; do not duplicate theme / narrative_pov / writing_style here",
+                        "extra": "optional object - custom world metadata only; do not duplicate theme / narrative_pov / writing_style here",
                     },
                     "cast": [
                         {
@@ -378,12 +511,12 @@ class AnchorService:
                             "aliases": "string[] optional",
                             "age": "string optional",
                             "personality": "string optional",
-                            "core_motivation": "string — primary drive across the series",
-                            "core_value": "string optional — guiding principle / core value",
-                            "notes_links": "string[] optional — select from notes_keypoints ids (e.g. KP1, KP2) when macro_author_notes is non-empty",
-                            "speech_style": "string optional — sparing verbal tic, not every sentence",
+                            "core_motivation": "string - primary drive across the series",
+                            "core_value": "string optional - guiding principle / core value",
+                            "notes_links": "string[] optional - select from notes_keypoints ids (e.g. KP1, KP2) when macro_author_notes is non-empty",
+                            "speech_style": "string optional - sparing verbal tic, not every sentence",
                             "fatal_flaw": "string optional",
-                            "quirks_and_habits": "string optional — observable habits, sparing",
+                            "quirks_and_habits": "string optional - observable habits, sparing",
                         }
                     ],
                     "initial_b_stories": [
@@ -391,7 +524,7 @@ class AnchorService:
                             "id": "string",
                             "desc": "string",
                             "type": "BStoryType enum string",
-                            "resolution_condition": "string — objective completion criteria",
+                            "resolution_condition": "string - objective completion criteria",
                         }
                     ],
                     "volumes": [
@@ -408,62 +541,63 @@ class AnchorService:
                                     "target_state": "object",
                                     "chapter_target": "int",
                                     "priority": "int optional",
-                                    "notes_links": "string[] optional — select from notes_keypoints ids (e.g. KP1, KP2) when macro_author_notes is non-empty",
+                                    "notes_links": "string[] optional - select from notes_keypoints ids (e.g. KP1, KP2) when macro_author_notes is non-empty",
                                 }
                             ],
                         }
                     ],
                 },
                 "requirements": [
-                    f"總章數固定為 {fixed_total_chapters} 章，必須嚴格依此規劃。",
-                    f"總 volumes 固定為 {fixed_total_volumes} 個，必須嚴格依此輸出（不可少/不可多）。",
-                    f"每個 volume 的 chapter_start / chapter_end 長度目標約為每卷 {target_chapters_per_volume:.1f} 章（允許小誤差；後端會重整為連續覆蓋）。",
-                    "每個 volume 需有連續不重疊的 chapter_start / chapter_end，且涵蓋 1 到總章數。",
-                    f"每個 volume 都必須提供 target_volume_words，且所有 volume 的字數總和應接近 {story_input.target_total_words}。",
-                    f"**每個 volume 的 anchors 陣列必須含 {MIN_ANCHORS_PER_VOLUME}-{MAX_ANCHORS_PER_VOLUME} 個元素**；"
-                    "每個 anchor 的 chapter_target 必須落在該 volume 的 chapter_start 與 chapter_end 之間（含）。",
-                    "你必須輸出 bible：具體、可執行，並與 volumes、anchors、cast 一致；可在 bible 內合理擴充額外鍵。",
-                    "theme / narrative_pov / writing_style 是 bible 主欄位（可選）；若要提供，請直接放在 bible 頂層，不要放進 extra。",
-                    "extra 只能放其他補充鍵；禁止重複 theme、narrative_pov、writing_style（若重複，後端會忽略 extra 同名鍵）。",
-                    "若 macro_author_notes 非空，bible 與劇情規劃必須尊重其中設定。",
-                    "若 macro_author_notes 非空：每個 cast 成員 notes_links 必須為非空陣列，且內容只能選自 notes_keypoints 的 id（如 KP1, KP2）；"
-                    "每個 volume anchor notes_links 亦必須為非空陣列，且同樣只能選自 notes_keypoints 的 id。",
-                    "每個 anchor 的 target_state 必須具體可追蹤。",
-                    "不要把 anchors 放在 volumes 外層；只能嵌套在對應 volume 內。",
+                    f"Total chapters is fixed at {fixed_total_chapters}; plan strictly to that count.",
+                    f"Total volumes is fixed at {fixed_total_volumes}; emit exactly that many (no fewer, no more).",
+                    f"Each volume's chapter_start/chapter_end span should target ~{target_chapters_per_volume:.1f} chapters on average (small drift OK; backend will re-normalize continuous coverage).",
+                    "Each volume must have contiguous, non-overlapping chapter_start/chapter_end ranges covering 1 through total chapters.",
+                    f"Each volume must include target_volume_words, and the sum across volumes should approximate {story_input.target_total_words}.",
+                    f"**Each volume anchors array must contain {MIN_ANCHORS_PER_VOLUME}-{MAX_ANCHORS_PER_VOLUME} items**; "
+                    "each anchor.chapter_target must fall between that volume's chapter_start and chapter_end (inclusive).",
+                    "You must output bible: concrete, executable, and consistent with volumes, anchors, and cast; you may add reasonable extra keys inside bible.",
+                    "theme / narrative_pov / writing_style are optional bible top-level fields - if present, place them at bible root, not inside extra.",
+                    "extra may only hold other supplemental keys; do not duplicate theme / narrative_pov / writing_style (backend will drop duplicate keys from extra).",
+                    "When macro_author_notes is non-empty, bible and plot planning must respect it.",
+                    "When macro_author_notes is non-empty: each cast member notes_links must be a non-empty array whose entries are only ids from notes_keypoints (e.g. KP1, KP2); "
+                    "each volume anchor notes_links must likewise be non-empty and drawn only from notes_keypoints ids.",
+                    "Each anchor.target_state must be concrete and trackable.",
+                    "Do not place anchors outside volumes; nest anchors only inside their owning volume.",
+                    *script_shape_req,
                     *cast_req,
-                    "initial_b_stories（可選）：僅允許貫穿全書的長線心魔或終極目標拆解；禁止短期戰術任務（如單章找人、開鎖）。每條必含 resolution_condition。",
-                    "speech_style / quirks_and_habits 僅作偶爾點綴，不可設計成每句口頭禪。",
+                    "initial_b_stories (optional): only series-long obsessions or terminal-goal decompositions - no short tactical errands (single-chapter fetch, lockpick, etc.). Each row needs resolution_condition.",
+                    "speech_style / quirks_and_habits are occasional flavor - do not design them as every-line catchphrases.",
                 ],
             },
             ensure_ascii=False,
         )
 
     def _default_cast_drafts(self, story_input: StoryInput) -> list[MacroCastMember]:
-        lead = (story_input.title or "").strip()[:64] or "主角"
+        lead = (story_input.title or "").strip()[:64] or "Protagonist"
         return [
             MacroCastMember(
                 canonical_name=lead,
                 role="protagonist",
                 short_bio=(story_input.premise or "")[:240],
-                personality="在壓力下保持克制但執著。",
-                core_motivation="在當前處境中求存並改變局面。",
-                core_value="在當下活下去並主動改變局勢。",
+                personality="Restrained under pressure, but stubborn once committed.",
+                core_motivation="Survive the present predicament and change the board.",
+                core_value="Stay alive now while actively reshaping the situation.",
             ),
             MacroCastMember(
-                canonical_name="主要反派",
+                canonical_name="Primary antagonist",
                 role="antagonist",
-                short_bio="與主角目標對立的核心對手。",
-                personality="冷靜、控制慾強，擅長操控局勢。",
-                core_motivation="鞏固自身秩序並壓制主角。",
-                core_value="維持既定秩序並消滅威脅。",
+                short_bio="The principal opponent aligned against the protagonist's goal.",
+                personality="Cool, controlling, good at bending situations.",
+                core_motivation="Fortify their order and suppress the protagonist.",
+                core_value="Preserve the established order and eliminate threats.",
             ),
             MacroCastMember(
-                canonical_name="重要配角",
+                canonical_name="Key supporting ally",
                 role="supporting",
-                short_bio="與主線密切相關的核心人物。",
-                personality="務實但情緒敏銳，容易被信念牽動。",
-                core_motivation="協助或阻擾主角，推動衝突。",
-                core_value="在風險與選擇間維持自我立場。",
+                short_bio="A core figure tightly coupled to the main spine.",
+                personality="Pragmatic but emotionally acute; convictions tug hard.",
+                core_motivation="Help or hinder the protagonist to move the conflict.",
+                core_value="Hold a personal line between risk and choice.",
             ),
         ]
 
@@ -649,8 +783,8 @@ class AnchorService:
             ch = min(max(ch, volume.chapter_start), volume.chapter_end)
             clamped.append(
                 MacroNestedAnchorDraft(
-                    title=f"{volume.title} 補位節點 {pad_i + 1}",
-                    description=f"在本卷內第 {ch} 章前後需達成的劇情節點（系統補齊）。",
+                    title=f"{volume.title} padding beat {pad_i + 1}",
+                    description=f"Plot beat to land around chapter {ch} inside this volume (system-padded).",
                     target_state={"volume.placeholder": pad_i + 1},
                     chapter_target=ch,
                     priority=90 + pad_i,
@@ -668,28 +802,30 @@ class AnchorService:
         v3 = (split_two + 1, total_chapters)
         return [
             MacroVolumePlanDraft(
-                title="卷一：命運啟動",
-                summary="建立世界與主角困境，鋪設核心衝突。",
+                title="Volume I: The spark",
+                summary="Establish the world and the protagonist's bind; lay the core conflict.",
                 chapter_start=v1[0],
                 chapter_end=v1[1],
                 target_volume_words=0,
-                anchors=self._default_nested_anchors_for_range("卷一：命運啟動", "", v1[0], v1[1], beat_prefix="卷一"),
+                anchors=self._default_nested_anchors_for_range("Volume I: The spark", "", v1[0], v1[1], beat_prefix="Vol I"),
             ),
             MacroVolumePlanDraft(
-                title="卷二：真相逼近",
-                summary="讓角色面對代價，逐步逼近錨點與秘密。",
+                title="Volume II: Closing in",
+                summary="Force costs on the cast while closing on anchors and secrets.",
                 chapter_start=v2[0],
                 chapter_end=v2[1],
                 target_volume_words=0,
-                anchors=self._default_nested_anchors_for_range("卷二：真相逼近", "", v2[0], v2[1], beat_prefix="卷二"),
+                anchors=self._default_nested_anchors_for_range("Volume II: Closing in", "", v2[0], v2[1], beat_prefix="Vol II"),
             ),
             MacroVolumePlanDraft(
-                title="卷三：決戰與回收",
-                summary="回收伏筆並完成主線收束。",
+                title="Volume III: Collide and collect",
+                summary="Pay off seeds and close the main spine.",
                 chapter_start=v3[0],
                 chapter_end=v3[1],
                 target_volume_words=0,
-                anchors=self._default_nested_anchors_for_range("卷三：決戰與回收", "", v3[0], v3[1], beat_prefix="卷三"),
+                anchors=self._default_nested_anchors_for_range(
+                    "Volume III: Collide and collect", "", v3[0], v3[1], beat_prefix="Vol III"
+                ),
             ),
         ]
 
@@ -721,14 +857,14 @@ class AnchorService:
                 ch_end = ch_start
 
             idx = i + 1
-            volume_title = f"卷{idx}：階段推進"
-            volume_summary = f"承接前情並推進主題（{story_input.premise[:40]}）。"
+            volume_title = f"Volume {idx}: staged advance"
+            volume_summary = f"Carry prior momentum and push the theme ({story_input.premise[:40]})."
             anchors = self._default_nested_anchors_for_range(
                 volume_title,
                 volume_summary,
                 ch_start,
                 ch_end,
-                beat_prefix=f"卷{idx}",
+                beat_prefix=f"Vol{idx}",
             )
             if notes_keypoint_ids:
                 # Assign at least one keypoint id to each anchor for enforcement.

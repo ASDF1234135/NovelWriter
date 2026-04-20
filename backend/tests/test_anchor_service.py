@@ -216,6 +216,264 @@ class FakeStructuredLLMClientWithNotesLinks(FakeStructuredLLMClient):
         )()
 
 
+class FakeStructuredLLMClientRetryLanguage:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def invoke(self, prompt: str):
+        raise NotImplementedError()
+
+    def invoke_text(self, prompt: str, profile: AgentPromptProfile):
+        raise NotImplementedError()
+
+    def invoke_json(self, prompt: str, response_model, profile: AgentPromptProfile):
+        self.calls += 1
+        if self.calls == 1:
+            output = MacroPlanOutput(
+                bible={"story_genre": "fantasy", "writing_style": "clean"},
+                cast=[MacroCastMember(canonical_name="Kaelen", role="protagonist", short_bio="exiled knight")],
+                volumes=[
+                    MacroVolumePlanDraft(
+                        title="Volume I",
+                        summary="Investigate the royal murder in the capital.",
+                        chapter_start=1,
+                        chapter_end=4,
+                        target_volume_words=10000,
+                        anchors=[
+                            MacroNestedAnchorDraft(
+                                title="Clue appears",
+                                description="The first clue points to the palace.",
+                                target_state={"step": 1},
+                                chapter_target=2,
+                                priority=1,
+                            ),
+                            MacroNestedAnchorDraft(
+                                title="Ally joins",
+                                description="A court informant joins the investigation.",
+                                target_state={"step": 2},
+                                chapter_target=3,
+                                priority=2,
+                            ),
+                            MacroNestedAnchorDraft(
+                                title="Trap closes",
+                                description="The protagonist is framed by the antagonist.",
+                                target_state={"step": 3},
+                                chapter_target=4,
+                                priority=3,
+                            ),
+                        ],
+                    ),
+                    MacroVolumePlanDraft(
+                        title="Volume II",
+                        summary="Counterattack with hidden evidence.",
+                        chapter_start=5,
+                        chapter_end=8,
+                        target_volume_words=10000,
+                        anchors=[],
+                    ),
+                    MacroVolumePlanDraft(
+                        title="Volume III",
+                        summary="Expose the real mastermind.",
+                        chapter_start=9,
+                        chapter_end=12,
+                        target_volume_words=10000,
+                        anchors=[],
+                    ),
+                ],
+            )
+        else:
+            output = MacroPlanOutput(
+                bible={"story_genre": "奇幻", "writing_style": "简洁叙事"},
+                cast=[MacroCastMember(canonical_name="凯伦", role="protagonist", short_bio="被流放的骑士。")],
+                volumes=[
+                    MacroVolumePlanDraft(
+                        title="第一卷",
+                        summary="主角回到王都追查命案。",
+                        chapter_start=1,
+                        chapter_end=4,
+                        target_volume_words=10000,
+                        anchors=[
+                            MacroNestedAnchorDraft(
+                                title="线索出现",
+                                description="第一条线索指向王宫。",
+                                target_state={"step": 1},
+                                chapter_target=2,
+                                priority=1,
+                            ),
+                            MacroNestedAnchorDraft(
+                                title="盟友加入",
+                                description="宫廷线人加入调查。",
+                                target_state={"step": 2},
+                                chapter_target=3,
+                                priority=2,
+                            ),
+                            MacroNestedAnchorDraft(
+                                title="陷阱收紧",
+                                description="主角被反派栽赃。",
+                                target_state={"step": 3},
+                                chapter_target=4,
+                                priority=3,
+                            ),
+                        ],
+                    ),
+                    MacroVolumePlanDraft(
+                        title="第二卷",
+                        summary="利用隐藏证据反击。",
+                        chapter_start=5,
+                        chapter_end=8,
+                        target_volume_words=10000,
+                        anchors=[],
+                    ),
+                    MacroVolumePlanDraft(
+                        title="第三卷",
+                        summary="揭露真正幕后黑手。",
+                        chapter_start=9,
+                        chapter_end=12,
+                        target_volume_words=10000,
+                        anchors=[],
+                    ),
+                ],
+            )
+        return response_model.model_validate(output.model_dump(mode="json")), type(
+            "LLMResultStub",
+            (),
+            {"content": "", "token_usage": 42, "latency_ms": 15},
+        )()
+
+
+class FakeStructuredLLMClientWrongLanguageOnly(FakeStructuredLLMClientRetryLanguage):
+    def invoke_json(self, prompt: str, response_model, profile: AgentPromptProfile):
+        self.calls += 1
+        output = MacroPlanOutput(
+            bible={"story_genre": "fantasy", "writing_style": "clean"},
+            cast=[MacroCastMember(canonical_name="Kaelen", role="protagonist", short_bio="exiled knight")],
+            volumes=[
+                MacroVolumePlanDraft(
+                    title="Volume I",
+                    summary="Investigate the royal murder in the capital.",
+                    chapter_start=1,
+                    chapter_end=4,
+                    target_volume_words=10000,
+                    anchors=[],
+                ),
+                MacroVolumePlanDraft(
+                    title="Volume II",
+                    summary="Counterattack with hidden evidence.",
+                    chapter_start=5,
+                    chapter_end=8,
+                    target_volume_words=10000,
+                    anchors=[],
+                ),
+                MacroVolumePlanDraft(
+                    title="Volume III",
+                    summary="Expose the real mastermind.",
+                    chapter_start=9,
+                    chapter_end=12,
+                    target_volume_words=10000,
+                    anchors=[],
+                ),
+            ],
+        )
+        return response_model.model_validate(output.model_dump(mode="json")), type(
+            "LLMResultStub",
+            (),
+            {"content": "", "token_usage": 42, "latency_ms": 15},
+        )()
+
+
+class FakeStructuredLLMClientRetryTradToSimp:
+    """First response: Traditional-heavy macro output; second: Simplified (matches language retry path)."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self._trad = FakeStructuredLLMClient()
+
+    def invoke(self, prompt: str):
+        raise NotImplementedError()
+
+    def invoke_text(self, prompt: str, profile: AgentPromptProfile):
+        raise NotImplementedError()
+
+    def invoke_json(self, prompt: str, response_model, profile: AgentPromptProfile):
+        self.calls += 1
+        if self.calls == 1:
+            return self._trad.invoke_json(prompt, response_model, profile)
+        output = MacroPlanOutput(
+            bible={"story_genre": "奇幻", "writing_style": "简洁叙事"},
+            cast=[MacroCastMember(canonical_name="凯伦", role="protagonist", short_bio="被流放的骑士。")],
+            volumes=[
+                MacroVolumePlanDraft(
+                    title="第一卷",
+                    summary="主角回到王都追查命案。",
+                    chapter_start=1,
+                    chapter_end=4,
+                    target_volume_words=10000,
+                    anchors=[
+                        MacroNestedAnchorDraft(
+                            title="线索出现",
+                            description="第一条线索指向王宫。",
+                            target_state={"step": 1},
+                            chapter_target=2,
+                            priority=1,
+                        ),
+                        MacroNestedAnchorDraft(
+                            title="盟友加入",
+                            description="宫廷线人加入调查。",
+                            target_state={"step": 2},
+                            chapter_target=3,
+                            priority=2,
+                        ),
+                        MacroNestedAnchorDraft(
+                            title="陷阱收紧",
+                            description="主角被反派栽赃。",
+                            target_state={"step": 3},
+                            chapter_target=4,
+                            priority=3,
+                        ),
+                    ],
+                ),
+                MacroVolumePlanDraft(
+                    title="第二卷",
+                    summary="利用隐藏证据反击。",
+                    chapter_start=5,
+                    chapter_end=8,
+                    target_volume_words=10000,
+                    anchors=[],
+                ),
+                MacroVolumePlanDraft(
+                    title="第三卷",
+                    summary="揭露真正幕后黑手。",
+                    chapter_start=9,
+                    chapter_end=12,
+                    target_volume_words=10000,
+                    anchors=[],
+                ),
+            ],
+        )
+        return response_model.model_validate(output.model_dump(mode="json")), type(
+            "LLMResultStub",
+            (),
+            {"content": "", "token_usage": 42, "latency_ms": 15},
+        )()
+
+
+class FakeStructuredLLMClientTraditionalOnly:
+    def __init__(self) -> None:
+        self.calls = 0
+        self._trad = FakeStructuredLLMClient()
+
+    def invoke(self, prompt: str):
+        raise NotImplementedError()
+
+    def invoke_text(self, prompt: str, profile: AgentPromptProfile):
+        raise NotImplementedError()
+
+    def invoke_json(self, prompt: str, response_model, profile: AgentPromptProfile):
+        self.calls += 1
+        head = prompt.split("\n\nPrevious output violated", 1)[0].strip()
+        return self._trad.invoke_json(head, response_model, profile)
+
+
 def test_clamp_macro_author_notes_truncates() -> None:
     long = "x" * (MACRO_AUTHOR_NOTES_MAX + 50)
     out = clamp_macro_author_notes(long)
@@ -285,7 +543,7 @@ def test_macro_prompt_requires_primary_fields_not_in_extra() -> None:
     requirements = data.get("requirements") or []
     merged = "\n".join(str(x) for x in requirements)
     assert "theme / narrative_pov / writing_style" in merged
-    assert "不要放進 extra" in merged
+    assert "not inside extra" in merged
 
 
 def test_normalize_cast_merge_seed_keeps_missing_name() -> None:
@@ -337,8 +595,7 @@ def test_macro_prompt_includes_cast_seed_when_set() -> None:
     prompt = service._build_macro_prompt(si, fixed_total_chapters=18, fixed_total_volumes=3)
     assert "cast_seed" in prompt
     assert "甲" in prompt
-    assert "恰好" not in prompt
-    assert "人數不限" in prompt
+    assert "headcount" in prompt.casefold()
 
 
 def test_anchor_service_clamps_llm_plan_to_formula_total_chapters() -> None:
@@ -379,6 +636,25 @@ def test_macro_compile_fixed_volumes_scales_with_total_words() -> None:
     assert sum(volume.target_volume_words for volume in volumes) == 100000
 
 
+def test_macro_compile_english_uses_smaller_chapter_unit_and_volume_scale() -> None:
+    """100k words, en: chapter_unit=1800, words_per_volume=18000 -> ceil(100k/18k)=6 volumes."""
+    service = AnchorService()
+    # Mock path (no structured LLM): validates AnchorService volume/chapter scaling only.
+    volumes, anchors, _cast, _b_seed, _bible = service.compile_macro_plan(
+        "story_100k_en",
+        StoryInput(
+            title="Epic",
+            premise="Hero returns.",
+            target_total_words=100000,
+            output_language="en",
+        ),
+        None,
+    )
+    assert len(volumes) == 6
+    assert len(anchors) == 6 * 3
+    assert sum(volume.target_volume_words for volume in volumes) == 100000
+
+
 def test_macro_compile_notes_links_missing_raises() -> None:
     service = AnchorService()
     with pytest.raises(ValueError):
@@ -411,3 +687,100 @@ def test_macro_compile_notes_links_present_succeeds() -> None:
     assert len(cast) >= 1
     assert bible.get("story_genre") == "奇幻"
     assert b_seed == []
+
+
+def test_macro_compile_retries_when_output_language_mismatch() -> None:
+    service = AnchorService()
+    fake_llm = FakeStructuredLLMClientRetryLanguage()
+    volumes, anchors, cast, _, _ = service.compile_macro_plan(
+        "story_lang_retry",
+        StoryInput(
+            title="语言重试",
+            premise="主角返回王都调查命案。",
+            target_total_words=30000,
+            output_language="zh-Hans",
+        ),
+        fake_llm,
+    )
+    assert fake_llm.calls == 2
+    assert len(volumes) == 3
+    assert len(anchors) >= 3
+    assert len(cast) >= 1
+
+
+def test_macro_compile_raises_when_language_mismatch_persists() -> None:
+    service = AnchorService()
+    fake_llm = FakeStructuredLLMClientWrongLanguageOnly()
+    with pytest.raises(ValueError, match="output language mismatch"):
+        service.compile_macro_plan(
+            "story_lang_fail",
+            StoryInput(
+                title="语言失败",
+                premise="主角返回王都调查命案。",
+                target_total_words=30000,
+                output_language="zh-Hans",
+            ),
+            fake_llm,
+        )
+
+
+def test_macro_prompt_includes_zh_script_shape_requirements() -> None:
+    service = AnchorService()
+    prompt_hans = service._build_macro_prompt(
+        StoryInput(title="t", premise="p", target_total_words=45000, output_language="zh-Hans"),
+        fixed_total_chapters=18,
+        fixed_total_volumes=3,
+    )
+    assert "大陆规范简体" in prompt_hans
+    prompt_hant = service._build_macro_prompt(
+        StoryInput(title="t", premise="p", target_total_words=45000, output_language="zh-Hant"),
+        fixed_total_chapters=18,
+        fixed_total_volumes=3,
+    )
+    assert "繁體中文" in prompt_hant
+
+
+def test_zh_hans_traditional_heuristic() -> None:
+    svc = AnchorService()
+    tc_blob = "這與國時會說對從種經長門卷內章節點敘述稱線索邊境壓力與審判" * 8
+    cjk_tc, _ = svc._script_letter_counts(tc_blob)
+    assert cjk_tc >= 28
+    assert svc._zh_hans_traditional_script_mismatch(tc_blob, cjk_tc) is not None
+    sc_blob = "这与国时说对从种经长门卷内章节点叙述称线索边境压力与审判" * 8
+    cjk_sc, _ = svc._script_letter_counts(sc_blob)
+    assert svc._zh_hans_traditional_script_mismatch(sc_blob, cjk_sc) is None
+
+
+def test_macro_compile_retries_when_zh_hans_macro_output_is_traditional() -> None:
+    service = AnchorService()
+    fake_llm = FakeStructuredLLMClientRetryTradToSimp()
+    volumes, anchors, _, _, bible = service.compile_macro_plan(
+        "story_trad_retry",
+        StoryInput(
+            title="王都疑云",
+            premise="主角返回王都调查命案。",
+            target_total_words=30000,
+            output_language="zh-Hans",
+        ),
+        fake_llm,
+    )
+    assert fake_llm.calls == 2
+    assert len(volumes) == 3
+    assert bible.get("story_genre") == "奇幻"
+
+
+def test_macro_compile_raises_when_zh_hans_macro_stays_traditional() -> None:
+    service = AnchorService()
+    fake_llm = FakeStructuredLLMClientTraditionalOnly()
+    with pytest.raises(ValueError, match="output language mismatch"):
+        service.compile_macro_plan(
+            "story_trad_fail",
+            StoryInput(
+                title="王都疑云",
+                premise="主角返回王都调查命案。",
+                target_total_words=30000,
+                output_language="zh-Hans",
+            ),
+            fake_llm,
+        )
+    assert fake_llm.calls == 2

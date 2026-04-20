@@ -1,5 +1,5 @@
 import { type ChangeEvent, useEffect, useRef, useState } from "react";
-import type { ImportMergeMode, StoryInput } from "../../types";
+import type { ImportMergeMode, StoryInput, StoryOutputLanguage } from "../../types";
 
 const MACRO_NOTES_SOFT_MAX = 8000;
 
@@ -30,7 +30,9 @@ function hydrateFromStoryInput(input: StoryInput): {
   planRetryLimit: number;
   draftLoopRetryLimit: number;
   macroAuthorNotes: string;
+  outputLanguage: StoryOutputLanguage;
 } {
+  const ol = input.output_language;
   return {
     title: input.title,
     premise: input.premise,
@@ -38,6 +40,7 @@ function hydrateFromStoryInput(input: StoryInput): {
     planRetryLimit: input.plan_retry_limit,
     draftLoopRetryLimit: input.draft_loop_retry_limit,
     macroAuthorNotes: input.macro_author_notes ?? "",
+    outputLanguage: ol === "en" || ol === "zh-Hans" || ol === "zh-Hant" ? ol : "zh-Hant",
   };
 }
 
@@ -48,6 +51,7 @@ function buildStoryPayload(
   planRetryLimit: number,
   draftLoopRetryLimit: number,
   macroAuthorNotes: string,
+  outputLanguage: StoryOutputLanguage,
 ): StoryInput {
   return {
     title,
@@ -58,6 +62,7 @@ function buildStoryPayload(
     bible: {},
     macro_author_notes: macroAuthorNotes,
     cast_seed: [],
+    output_language: outputLanguage,
   };
 }
 
@@ -81,6 +86,7 @@ export function StorySetupForm({
   const [planRetryLimit, setPlanRetryLimit] = useState(3);
   const [draftLoopRetryLimit, setDraftLoopRetryLimit] = useState(3);
   const [macroAuthorNotes, setMacroAuthorNotes] = useState("");
+  const [outputLanguage, setOutputLanguage] = useState<StoryOutputLanguage>("zh-Hant");
   const [saveBusy, setSaveBusy] = useState(false);
   const importInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -93,6 +99,7 @@ export function StorySetupForm({
       setPlanRetryLimit(h.planRetryLimit);
       setDraftLoopRetryLimit(h.draftLoopRetryLimit);
       setMacroAuthorNotes(h.macroAuthorNotes);
+      setOutputLanguage(h.outputLanguage);
     } else {
       setTitle("王都疑雲");
       setPremise("一名被流放的年輕騎士回到王都，追查皇室命案背後的真正凶手。");
@@ -100,6 +107,7 @@ export function StorySetupForm({
       setPlanRetryLimit(3);
       setDraftLoopRetryLimit(3);
       setMacroAuthorNotes("");
+      setOutputLanguage("zh-Hant");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- hydrate only when resetKey bumps
   }, [resetKey]);
@@ -107,7 +115,15 @@ export function StorySetupForm({
   useEffect(() => {
     if (locked || !onValuesChange) return;
     onValuesChange(
-      buildStoryPayload(title, premise, targetTotalWords, planRetryLimit, draftLoopRetryLimit, macroAuthorNotes),
+      buildStoryPayload(
+        title,
+        premise,
+        targetTotalWords,
+        planRetryLimit,
+        draftLoopRetryLimit,
+        macroAuthorNotes,
+        outputLanguage,
+      ),
     );
   }, [
     locked,
@@ -118,6 +134,7 @@ export function StorySetupForm({
     planRetryLimit,
     draftLoopRetryLimit,
     macroAuthorNotes,
+    outputLanguage,
   ]);
 
   const fieldDisabled = Boolean(disabled || locked);
@@ -132,7 +149,15 @@ export function StorySetupForm({
     event.preventDefault();
     if (locked) return;
     await onSubmit(
-      buildStoryPayload(title, premise, targetTotalWords, planRetryLimit, draftLoopRetryLimit, macroAuthorNotes),
+      buildStoryPayload(
+        title,
+        premise,
+        targetTotalWords,
+        planRetryLimit,
+        draftLoopRetryLimit,
+        macroAuthorNotes,
+        outputLanguage,
+      ),
     );
   }
 
@@ -141,7 +166,15 @@ export function StorySetupForm({
     setSaveBusy(true);
     try {
       await onSaveSettings(
-        buildStoryPayload(title, premise, targetTotalWords, planRetryLimit, draftLoopRetryLimit, macroAuthorNotes),
+        buildStoryPayload(
+          title,
+          premise,
+          targetTotalWords,
+          planRetryLimit,
+          draftLoopRetryLimit,
+          macroAuthorNotes,
+          outputLanguage,
+        ),
       );
     } finally {
       setSaveBusy(false);
@@ -229,6 +262,23 @@ export function StorySetupForm({
               readOnly={locked}
             />
           </div>
+        </div>
+        <div className="space-y-1">
+          <label className="auteur-label">產出語言 / Output language</label>
+          <select
+            className="auteur-input font-body"
+            value={outputLanguage}
+            onChange={(e) => setOutputLanguage(e.target.value as StoryOutputLanguage)}
+            disabled={fieldDisabled}
+            aria-label="Story output language"
+          >
+            <option value="zh-Hant">繁體中文（Traditional Chinese）</option>
+            <option value="zh-Hans">简体中文（Simplified Chinese）</option>
+            <option value="en">English</option>
+          </select>
+          <p className="text-xs text-on-surface-variant">
+            影響章節正文、大綱、審稿回饋與圖譜摘要的用語（系統指令仍為英文）。
+          </p>
         </div>
         <div className="space-y-1">
           <label className="auteur-label">故事核心／梗概</label>

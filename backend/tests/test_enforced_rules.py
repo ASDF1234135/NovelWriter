@@ -19,7 +19,7 @@ from app.services.workflow.continuity import (
     format_local_enforced_rules_block,
     resolve_pov_location_node_id,
 )
-from app.services.workflow.extraction import _relation_direction_valid
+from app.services.workflow.relation_direction_rules import relation_direction_is_valid
 
 
 def test_collect_enforced_rules_location_and_epoch() -> None:
@@ -228,14 +228,14 @@ def test_relation_direction_valid_rule_edges() -> None:
         "x": NodeType.CONCEPT,
         "p": NodeType.PERSONA,
     }
-    assert _relation_direction_valid(EdgeType.ENFORCED_IN, "r", "l", nt)
-    assert _relation_direction_valid(EdgeType.ENFORCED_IN, "r", "e", nt)
-    assert not _relation_direction_valid(EdgeType.ENFORCED_IN, "l", "r", nt)
-    assert _relation_direction_valid(EdgeType.RESTRICTS, "r", "c", nt)
-    assert _relation_direction_valid(EdgeType.RESTRICTS, "r", "i", nt)
-    assert _relation_direction_valid(EdgeType.RESTRICTS, "r", "x", nt)
-    assert _relation_direction_valid(EdgeType.EXEMPT_FROM, "r", "p", nt)
-    assert not _relation_direction_valid(EdgeType.EXEMPT_FROM, "r", "l", nt)
+    assert relation_direction_is_valid(EdgeType.ENFORCED_IN, "r", "l", nt)
+    assert relation_direction_is_valid(EdgeType.ENFORCED_IN, "r", "e", nt)
+    assert not relation_direction_is_valid(EdgeType.ENFORCED_IN, "l", "r", nt)
+    assert relation_direction_is_valid(EdgeType.RESTRICTS, "r", "c", nt)
+    assert relation_direction_is_valid(EdgeType.RESTRICTS, "r", "i", nt)
+    assert relation_direction_is_valid(EdgeType.RESTRICTS, "r", "x", nt)
+    assert relation_direction_is_valid(EdgeType.EXEMPT_FROM, "r", "p", nt)
+    assert not relation_direction_is_valid(EdgeType.EXEMPT_FROM, "r", "l", nt)
 
 
 def test_query_context_request_inherits_list_enforced_rules() -> None:

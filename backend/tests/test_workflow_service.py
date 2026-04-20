@@ -8,6 +8,7 @@ from app.domain.schema import (
     HitlContextPruneRequest,
     HitlDecisionRequest,
     HitlExtractionHintsRequest,
+    HitlExtractionRemapRequest,
     HitlOutlineEditRequest,
     HitlReason,
     HitlStateInjectionRequest,
@@ -422,6 +423,22 @@ def test_hitl_outline_sets_resume_from_by_reason(monkeypatch, tmp_path) -> None:
         assert st["resume_from"] == expected
 
 
+def test_alignment_hitl_rejects_empty_chapter_hard_rules(tmp_path) -> None:
+    service = build_service(str(tmp_path / "workflow_align_hitl_empty.sqlite3"))
+    story = service.create_story(StoryInput(title="T", premise="p", bible={}, target_total_words=12000))
+    base = build_initial_state(story["story_id"], 1, [], "trace-align-empty")
+    base["requires_hitl"] = True
+    base["workflow_status"] = "WAITING_HITL"
+    base["hitl_reason"] = HitlReason.ALIGNMENT_RULES_REQUIRED
+    base["resume_from"] = "logic_alignment"
+    run = service.workflow_repository.create_run(story["story_id"], 1, base)
+    with pytest.raises(ValueError, match="non-empty"):
+        service.apply_hitl_state_injection(
+            run.run_id,
+            HitlStateInjectionRequest(mutations=[], chapter_hard_rules="   ", resume_from="logic_alignment"),
+        )
+
+
 def test_alignment_hitl_state_injection_sets_rules_and_resumes_alignment(tmp_path) -> None:
     service = build_service(str(tmp_path / "workflow_align_hitl_state.sqlite3"))
     story = service.create_story(StoryInput(title="T", premise="p", bible={}, target_total_words=12000))
@@ -443,6 +460,43 @@ def test_alignment_hitl_state_injection_sets_rules_and_resumes_alignment(tmp_pat
     assert st["hitl_reason"] == ""
     assert st["resume_from"] == "logic_alignment"
     assert st["chapter_hard_rules"] == "每回合只能行動一次；失敗方失去全部籌碼。"
+
+
+def test_hitl_outline_edit_requires_events(tmp_path) -> None:
+    service = build_service(str(tmp_path / "workflow_outline_empty.sqlite3"))
+    story = service.create_story(StoryInput(title="T", premise="p", bible={}, target_total_words=12000))
+    base = build_initial_state(story["story_id"], 1, [], "trace-outline-empty")
+    base["requires_hitl"] = True
+    base["workflow_status"] = "WAITING_HITL"
+    base["hitl_reason"] = HitlReason.PLAN_LOOP_EXCEEDED
+    run = service.workflow_repository.create_run(story["story_id"], 1, base)
+    with pytest.raises(ValueError, match="at least one"):
+        service.apply_hitl_outline_edit(run.run_id, HitlOutlineEditRequest(ground_truth_events=[]))
+
+
+def test_hitl_extraction_remap_requires_remap_or_waive(tmp_path) -> None:
+    service = build_service(str(tmp_path / "workflow_remap_empty.sqlite3"))
+    story = service.create_story(StoryInput(title="T", premise="p", bible={}, target_total_words=12000))
+    base = build_initial_state(story["story_id"], 1, [], "trace-remap-empty")
+    base["requires_hitl"] = True
+    base["workflow_status"] = "WAITING_HITL"
+    base["hitl_reason"] = HitlReason.EXTRACTION_GATE_FAILED
+    run = service.workflow_repository.create_run(story["story_id"], 1, base)
+    with pytest.raises(ValueError, match="at least one"):
+        service.apply_hitl_extraction_remap(run.run_id, HitlExtractionRemapRequest())
+
+
+def test_list_hitl_actions_returns_rows(tmp_path) -> None:
+    service = build_service(str(tmp_path / "workflow_hitl_actions_list.sqlite3"))
+    story = service.create_story(StoryInput(title="T", premise="p", bible={}, target_total_words=12000))
+    base = build_initial_state(story["story_id"], 1, [], "trace-hitl-actions")
+    base["requires_hitl"] = True
+    base["workflow_status"] = "WAITING_HITL"
+    base["hitl_reason"] = HitlReason.PLAN_LOOP_EXCEEDED
+    run = service.workflow_repository.create_run(story["story_id"], 1, base)
+    service.workflow_repository.append_hitl_action(run.run_id, "unit_probe", {"ok": True})
+    rows = service.list_hitl_actions(run.run_id)
+    assert any(r["action_type"] == "unit_probe" and r["payload"].get("ok") is True for r in rows)
 
 
 def test_hitl_state_injection_appends_cast_evolutions_without_forcing_resume(tmp_path) -> None:
@@ -485,10 +539,9 @@ def test_logic_alignment_routes_to_hitl_when_rules_missing_and_draft_complex(tmp
     run = service.workflow_repository.create_run(story["story_id"], 1, base)
     service.execute_stored_run(run.run_id)
     st = service.workflow_repository.get_run_state(run.run_id)
-    assert st["workflow_status"] == "WAITING_HITL"
-    assert st["requires_hitl"] is True
-    assert st["hitl_reason"] == HitlReason.ALIGNMENT_RULES_REQUIRED
-    assert st["resume_from"] == "logic_alignment"
+    # Heuristic mind-game detection is removed; missing hard rules alone no longer routes to HITL.
+    assert st["requires_hitl"] is False
+    assert st["workflow_status"] in ("RUNNING", "COMPLETED")
 
 
 def test_logic_alignment_retry_limit_force_passes_with_warning(tmp_path) -> None:
@@ -833,3 +886,110 @@ def test_context_prune_maps_product_tier(tmp_path) -> None:
     service.apply_hitl_context_prune(run.run_id, HitlContextPruneRequest(graph_rag_context_tier=2))
     st = service.workflow_repository.get_run_state(run.run_id)
     assert st["graph_rag_context_tier"] == 0
+
+
+def test_get_workflow_hitl_context_output_language(tmp_path) -> None:
+    service = build_service(str(tmp_path / "workflow_hitl_ol.sqlite3"))
+    story = service.create_story(
+        StoryInput(title="T", premise="p", bible={}, target_total_words=12000),
+    )
+    base = build_initial_state(story["story_id"], 1, [], "trace-ol")
+    base["requires_hitl"] = True
+    base["workflow_status"] = "WAITING_HITL"
+    base["hitl_reason"] = HitlReason.OUTPUT_LANGUAGE_MISMATCH
+    base["resume_from"] = "output_language_gate"
+    base["hitl_output_language_detail"] = "Story is set to English, but draft has many CJK letters."
+    base["hitl_expected_output_language"] = "en"
+    base["current_draft"] = "x" * 400
+    run = service.workflow_repository.create_run(story["story_id"], 1, base)
+    wf = service.get_workflow(run.run_id)
+    assert wf["run"]["hitl_context"] is not None
+    meta = wf["run"]["hitl_context"]["context_metadata"]
+    assert meta["payload_type"] == "output_language"
+    assert meta["expected_output_language"] == "en"
+
+
+def test_apply_hitl_output_language_force_continue(tmp_path) -> None:
+    service = build_service(str(tmp_path / "workflow_hitl_ol_apply.sqlite3"))
+    story = service.create_story(
+        StoryInput(title="T", premise="p", bible={}, target_total_words=12000),
+    )
+    base = build_initial_state(story["story_id"], 1, [], "trace-ol-apply")
+    base["requires_hitl"] = True
+    base["workflow_status"] = "WAITING_HITL"
+    base["hitl_reason"] = HitlReason.OUTPUT_LANGUAGE_MISMATCH
+    base["resume_from"] = "output_language_gate"
+    run = service.workflow_repository.create_run(story["story_id"], 1, base)
+    service.apply_hitl_decision(run.run_id, HitlDecisionRequest(option_id="language_force_continue"))
+    st = service.workflow_repository.get_run_state(run.run_id)
+    assert st["output_language_hitl_waived"] is True
+    assert st["resume_from"] == "output_language_gate"
+    assert st["requires_hitl"] is False
+
+
+def test_apply_hitl_output_language_return_author(tmp_path) -> None:
+    service = build_service(str(tmp_path / "workflow_hitl_ol_author.sqlite3"))
+    story = service.create_story(
+        StoryInput(title="T", premise="p", bible={}, target_total_words=12000),
+    )
+    base = build_initial_state(story["story_id"], 1, [], "trace-ol-author")
+    base["requires_hitl"] = True
+    base["workflow_status"] = "WAITING_HITL"
+    base["hitl_reason"] = HitlReason.OUTPUT_LANGUAGE_MISMATCH
+    base["resume_from"] = "output_language_gate"
+    base["draft_feedback"] = []
+    base["draft_retry_count"] = 0
+    run = service.workflow_repository.create_run(story["story_id"], 1, base)
+    service.apply_hitl_decision(run.run_id, HitlDecisionRequest(option_id="language_return_author"))
+    st = service.workflow_repository.get_run_state(run.run_id)
+    assert st["resume_from"] == "author"
+    assert len(st["draft_feedback"]) == 1
+    assert st["draft_feedback"][0]["violation"] == "OUTPUT_LANGUAGE"
+
+
+def test_macro_compile_propagates_language_mismatch_error(tmp_path, monkeypatch) -> None:
+    service = build_service(str(tmp_path / "workflow_macro_lang_fail.sqlite3"))
+    story = service.create_story(StoryInput(title="T", premise="p", bible={}, target_total_words=12000))
+
+    def fake_compile_macro_plan(story_id, story_input, llm_client):
+        raise ValueError("macro compile output language mismatch: expected Simplified Chinese")
+
+    monkeypatch.setattr(service.anchor_service, "compile_macro_plan", fake_compile_macro_plan)
+    with pytest.raises(ValueError, match="output language mismatch"):
+        service.macro_compile(story["story_id"])
+
+
+def test_start_run_chapter_normalizes_zh_cn_alias_to_hans(tmp_path) -> None:
+    service = build_service(str(tmp_path / "workflow_lang_alias_run.sqlite3"))
+    story = service.create_story(StoryInput(title="T", premise="p", bible={}, target_total_words=12000))
+    with service.story_repository.db.connection() as conn:
+        conn.execute("UPDATE stories SET output_language = ? WHERE story_id = ?", ("zh-CN", story["story_id"]))
+    wf = service.start_run_chapter(story["story_id"], 1)
+    assert wf["state"]["story_output_language"] == "zh-Hans"
+
+
+def test_start_run_chapter_sets_target_word_count_from_output_language_en(tmp_path) -> None:
+    service = build_service(str(tmp_path / "workflow_en_chapter_words.sqlite3"))
+    story = service.create_story(
+        StoryInput(title="T", premise="p", bible={}, target_total_words=12000, output_language="en")
+    )
+    wf = service.start_run_chapter(story["story_id"], 1)
+    assert wf["state"]["story_output_language"] == "en"
+    assert wf["state"]["target_word_count"] == 360
+
+
+def test_macro_compile_normalizes_zh_cn_alias_before_compile(tmp_path, monkeypatch) -> None:
+    service = build_service(str(tmp_path / "workflow_lang_alias_macro.sqlite3"))
+    story = service.create_story(StoryInput(title="T", premise="p", bible={}, target_total_words=12000))
+    with service.story_repository.db.connection() as conn:
+        conn.execute("UPDATE stories SET output_language = ? WHERE story_id = ?", ("zh-CN", story["story_id"]))
+
+    seen = {"lang": ""}
+
+    def fake_compile_macro_plan(story_id, story_input, llm_client):
+        seen["lang"] = story_input.output_language
+        return [], [], [], [], {}
+
+    monkeypatch.setattr(service.anchor_service, "compile_macro_plan", fake_compile_macro_plan)
+    service.macro_compile(story["story_id"])
+    assert seen["lang"] == "zh-Hans"

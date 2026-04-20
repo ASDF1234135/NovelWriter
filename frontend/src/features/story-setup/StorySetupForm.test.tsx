@@ -18,6 +18,7 @@ describe("StorySetupForm", () => {
     expect(onSubmit).toHaveBeenCalledWith(
       expect.objectContaining({
         cast_seed: [],
+        output_language: "zh-Hant",
       }),
     );
   });

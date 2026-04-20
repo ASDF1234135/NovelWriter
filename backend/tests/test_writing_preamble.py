@@ -2,7 +2,7 @@
 
 import pytest
 
-from app.domain.schema import ConflictType, EndingVibe, ResolutionMethod, StoryInput
+from app.domain.schema import ConflictType, EndingVibe, PlotSummarySource, ResolutionMethod, StoryInput
 from app.repositories.sqlite.database import SQLiteDatabase
 from app.repositories.sqlite.story_repository import StoryRepository
 from app.repositories.sqlite.workflow_repository import WorkflowRepository
@@ -65,6 +65,7 @@ def test_milestones_filtered_and_counts(tmp_path) -> None:
     assert out["plot_progress"]["earlier_chapters_with_summary_count"] == 3
     recent = out["plot_progress"]["recent_summaries"]
     assert [r["chapter_id"] for r in recent] == [1, 2, 3]
+    assert all(r["plot_summary_source"] == PlotSummarySource.CHAPTER_SUMMARIZER_LLM.value for r in recent)
 
 
 def test_previous_chapter_summary_and_status(tmp_path) -> None:
@@ -84,7 +85,29 @@ def test_previous_chapter_summary_and_status(tmp_path) -> None:
     prev = out["plot_progress"]["previous_chapter"]
     assert prev["chapter_id"] == 1
     assert prev["plot_summary"] == "Prev plot"
+    assert prev["plot_summary_source"] == PlotSummarySource.CHAPTER_SUMMARIZER_LLM.value
     assert prev["status"] == "completed"
+
+
+def test_count_skips_blank_plot_summary(tmp_path) -> None:
+    svc = _service(str(tmp_path / "blank_count.sqlite3"))
+    sid = svc.create_story(StoryInput(title="T", premise="p", bible={}, target_total_words=30_000))["story_id"]
+    repo = svc.story_repository
+    repo.upsert_chapter_summary(
+        sid,
+        1,
+        plot_summary="   ",
+        conflict_type=ConflictType.MYSTERY,
+        resolution_method=ResolutionMethod.DISCOVERY,
+    )
+    repo.upsert_chapter_summary(
+        sid,
+        2,
+        plot_summary="Real",
+        conflict_type=ConflictType.MYSTERY,
+        resolution_method=ResolutionMethod.DISCOVERY,
+    )
+    assert repo.count_chapter_summaries_before(sid, 4) == 1
 
 
 def test_resolution_pacing_hints_human_readable(tmp_path) -> None:

@@ -161,12 +161,24 @@ class SQLiteDatabase:
             self._ensure_column(conn, "stories", "macro_compile_updated_at", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "stories", "macro_compile_error", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "stories", "cast_seed_json", "TEXT NOT NULL DEFAULT '[]'")
+            self._ensure_column(
+                conn,
+                "stories",
+                "output_language",
+                "TEXT NOT NULL DEFAULT 'zh-Hant'",
+            )
             self._ensure_column(conn, "volumes", "target_volume_words", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(
                 conn,
                 "chapter_summaries",
                 "ending_vibe",
                 "TEXT NOT NULL DEFAULT 'ON_THE_MOVE'",
+            )
+            self._ensure_column(
+                conn,
+                "chapter_summaries",
+                "plot_summary_source",
+                "TEXT NOT NULL DEFAULT 'UNKNOWN'",
             )
             conn.execute("PRAGMA journal_mode=WAL")
 

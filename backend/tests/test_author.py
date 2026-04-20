@@ -22,6 +22,7 @@ class FakeTextLLMClient:
 class DummyContext:
     def __init__(self) -> None:
         self.llm_client = FakeTextLLMClient()
+        self.output_language = "zh-Hant"
 
 
 class SequenceTextLLMClient:
@@ -44,6 +45,32 @@ class SequenceTextLLMClient:
 class SequenceContext:
     def __init__(self, responses: list[str]) -> None:
         self.llm_client = SequenceTextLLMClient(responses)
+        self.output_language = "zh-Hant"
+
+
+class HintRetryLLMClient:
+    def __init__(self, chapter: str, hint_payloads: list[dict]) -> None:
+        self.chapter = chapter
+        self.hint_payloads = list(hint_payloads)
+        self.json_calls = 0
+
+    def invoke(self, prompt: str) -> LLMResult:
+        raise NotImplementedError
+
+    def invoke_text(self, prompt: str, profile: AgentPromptProfile) -> LLMResult:
+        return LLMResult(content=self.chapter, token_usage=10, latency_ms=10)
+
+    def invoke_json(self, prompt, response_model, profile):
+        idx = min(self.json_calls, len(self.hint_payloads) - 1)
+        self.json_calls += 1
+        data = self.hint_payloads[idx] if self.hint_payloads else {"entries": []}
+        return response_model.model_validate(data), LLMResult(content="{}", token_usage=5, latency_ms=5)
+
+
+class HintRetryContext:
+    def __init__(self, chapter: str, hint_payloads: list[dict]) -> None:
+        self.llm_client = HintRetryLLMClient(chapter, hint_payloads)
+        self.output_language = "zh-Hant"
 
 
 def test_author_uses_text_generation_for_real_llm() -> None:
@@ -100,41 +127,6 @@ def test_author_uses_text_generation_for_real_llm() -> None:
     assert latency >= 456
 
 
-def test_author_repairs_boundary_violation_before_returning() -> None:
-    state = {
-        "chapter_id": 1,
-        "narrative_script": "主角撤離後停在安全屋外圍，不可進屋。",
-        "chapter_start_location": "舊御花園後巷。",
-        "author_goal": "讓主角完成撤離，並把懸念留到下一章。",
-        "must_include_beats": ["撤離到安全屋外圍"],
-        "reader_visible_facts": ["主角暫時脫離追兵"],
-        "reader_unresolved_questions": ["安全屋內是誰在等他"],
-        "chapter_end_location_hint": "安全屋外圍巷口陰影處。",
-        "ending_state_shift": "主角成功撤離，但尚未真正安全。",
-        "ending_boundary_rule": "本章最遠只能停在安全屋外圍巷口陰影處，不可進入安全屋內部。",
-        "forbidden_next_scene_actions": ["不可進入安全屋內部"],
-        "forbidden_reveals": ["不要揭露安全屋內部安排"],
-        "tone_direction": "懸疑",
-        "target_word_count": 200,
-        "previous_chapter_summary": "主角在後巷甩開追兵。",
-        "current_draft": "",
-        "last_known_location": "舊御花園後巷。",
-        "draft_feedback": [],
-        "reader_feedback": [],
-    }
-    context = SequenceContext(
-        [
-            "第1章\n\n他終於抵達安全屋外圍，接著推門進入安全屋內部，準備和屋內的人會面。",
-            "第1章\n\n他終於抵達安全屋外圍，停在巷口陰影處，沒有再往裡走，只聽見門後傳來極輕的腳步聲。",
-        ]
-    )
-
-    output, _, _, _ = run_author(state, context)
-
-    assert "安全屋內部" not in output["chapter_content"]
-    assert "巷口陰影處" in output["chapter_content"]
-
-
 def test_author_formats_feedback_as_independent_entries() -> None:
     rendered = _format_feedback_entries(
         [
@@ -144,9 +136,9 @@ def test_author_formats_feedback_as_independent_entries() -> None:
         "draft",
     )
 
-    assert "第 1 次退稿" in rendered
+    assert "rejection attempt 1" in rendered
     assert "第一版問題" in rendered
-    assert "第 2 次退稿" in rendered
+    assert "rejection attempt 2" in rendered
     assert "第二版問題" in rendered
 
 
@@ -179,16 +171,16 @@ def test_author_prompt_includes_previous_attempt_draft_for_revision() -> None:
         )
     )
 
-    assert "## 上一版草稿（供修稿參考）" in prompt
+    assert "## Prior draft (for revision passes)" in prompt
     assert "主角原本停在石橋北端，卻又直接走進霧區深處。" in prompt
-    assert "這次是修稿，不是從零重寫" in prompt
-    assert "請只修正相關段落，不要把整章前半全部推翻重寫" in prompt
-    assert "## 修稿優先順序" in prompt
-    assert "## 字數修訂模式" in prompt
+    assert "If a prior draft exists, revise" in prompt
+    assert "patch the affected spans only" in prompt
+    assert "## Revision priority" in prompt
+    assert "## Length adjustment mode" in prompt
     assert "COMPRESS" in prompt
-    assert "第一優先：嚴格完成本章主任務" in prompt
-    assert "`reader_feedback` 只屬於軟性優化建議" in prompt
-    assert "不得推翻既定事件鏈" in prompt
+    assert "1) Satisfy author_goal" in prompt
+    assert "draft_feedback is hard; reader_feedback is soft" in prompt
+    assert "cannot override the locked event chain" in prompt
 
 
 def test_author_prompt_includes_previous_chapter_tail_excerpt() -> None:
@@ -220,9 +212,9 @@ def test_author_prompt_includes_previous_chapter_tail_excerpt() -> None:
             length_adjustment="NONE",
         )
     )
-    assert "上一章尾端節錄" in prompt
-    assert "禁止逐字抄進本章正文" in prompt
-    assert "與上一章正文銜接" in prompt
+    assert "Previous chapter tail excerpt" in prompt
+    assert "do not paste verbatim" in prompt
+    assert "Hard bridge from prior chapter prose" in prompt
     assert "屏住呼吸，手指還停在門縫邊" in prompt
 
 
@@ -256,14 +248,14 @@ def test_author_prompt_includes_writing_note_block() -> None:
             length_adjustment="NONE",
         )
     )
-    assert "作者寫作規定（writing_note）" in prompt
-    assert "本章絕對法則" in prompt
+    assert "## Author writing_note (hard)" in prompt
+    assert "## Absolute chapter laws" in prompt
     assert "每回合只能行動一次" in prompt
     assert "短句優先" in prompt
     assert "避免過度抒情" in prompt
-    assert "命名節制鐵律" in prompt
-    assert "非必要不命名" in prompt
-    assert "陌生事物先描寫再命名" in prompt
+    assert "## Naming discipline" in prompt
+    assert "Name only when needed" in prompt
+    assert "Describe before you label" in prompt
 
 
 def test_author_compresses_when_draft_is_too_long() -> None:
@@ -302,3 +294,93 @@ def test_author_compresses_when_draft_is_too_long() -> None:
 
     assert output["word_count"] <= 135
     assert "碼頭暗影處" in output["chapter_content"]
+
+
+def test_author_retries_hints_for_missing_mandatory_entities() -> None:
+    state = {
+        "chapter_id": 1,
+        "narrative_script": "主角啟用 memory dampener 並撤離。",
+        "chapter_start_location": "觀測站",
+        "author_goal": "提及必要道具",
+        "must_include_beats": ["提到 memory dampener"],
+        "reader_visible_facts": [],
+        "reader_unresolved_questions": [],
+        "chapter_end_location_hint": "觀測站外",
+        "ending_state_shift": "主角掌握新道具",
+        "ending_boundary_rule": "",
+        "forbidden_next_scene_actions": [],
+        "forbidden_reveals": [],
+        "tone_direction": "緊張",
+        "target_word_count": 80,
+        "previous_chapter_summary": "",
+        "current_draft": "",
+        "last_known_location": "觀測站",
+        "draft_feedback": [],
+        "reader_feedback": [],
+        "planned_graph_nodes": [
+            {
+                "node_id": "item_memory_dampener",
+                "node_type": "ITEM",
+                "mandatory": True,
+                "role": "ITEM",
+                "canonical_name": "memory dampener",
+                "writing_brief": "記憶阻尼器",
+            }
+        ],
+    }
+    chapter = "第1章\n\n他握緊 memory dampener，確認干擾場已經展開。"
+    context = HintRetryContext(
+        chapter=chapter,
+        hint_payloads=[
+            {"entries": [{"node_id": "item_memory_dampener", "surface_forms": []}]},
+            {"entries": [{"node_id": "item_memory_dampener", "surface_forms": ["memory dampener"]}]},
+        ],
+    )
+
+    output, _, _, _ = run_author(state, context)
+
+    assert context.llm_client.json_calls == 2
+    hints = output.get("author_extraction_surface_hints") or []
+    assert hints and hints[0]["surface_forms"] == ["memory dampener"]
+
+
+def test_author_emits_hint_diagnostics_when_mandatory_hints_still_missing() -> None:
+    state = {
+        "chapter_id": 1,
+        "narrative_script": "主角離開觀測站。",
+        "chapter_start_location": "觀測站",
+        "author_goal": "完成撤離",
+        "must_include_beats": [],
+        "reader_visible_facts": [],
+        "reader_unresolved_questions": [],
+        "chapter_end_location_hint": "觀測站外",
+        "ending_state_shift": "主角離開",
+        "ending_boundary_rule": "",
+        "forbidden_next_scene_actions": [],
+        "forbidden_reveals": [],
+        "tone_direction": "緊張",
+        "target_word_count": 80,
+        "previous_chapter_summary": "",
+        "current_draft": "",
+        "last_known_location": "觀測站",
+        "draft_feedback": [],
+        "reader_feedback": [],
+        "planned_graph_nodes": [
+            {
+                "node_id": "item_memory_dampener",
+                "node_type": "ITEM",
+                "mandatory": True,
+                "role": "ITEM",
+                "canonical_name": "memory dampener",
+                "writing_brief": "記憶阻尼器",
+            }
+        ],
+    }
+    chapter = "第1章\n\n他檢查了工具包，沒有細說內容。"
+    context = HintRetryContext(chapter=chapter, hint_payloads=[{"entries": []}, {"entries": []}])
+
+    output, _, _, _ = run_author(state, context)
+
+    assert context.llm_client.json_calls == 2
+    diag = output.get("author_extraction_hints_diagnostics") or {}
+    assert "item_memory_dampener" in (diag.get("missing_mandatory_hint_node_ids") or [])

@@ -11,8 +11,7 @@ from app.domain.schema import (
     ViolationType,
 )
 from app.services.workflow.chapter_pipeline import (
-    apply_manual_entity_remap,
-    apply_resolution_to_extraction,
+    apply_full_extraction_remaps,
     build_extraction_remap_hints,
     validate_mandatory_planned_nodes,
 )
@@ -59,11 +58,9 @@ def _format_missing_mandatory_feedback(
             brief = (p.writing_brief or "").strip()
             if len(brief) > 200:
                 brief = brief[:200] + "…"
-            line = (
-                f"- node_id={nid} | 類型={nt} | 規劃名稱={p.canonical_name!r} | 任務角色={p.role!r}"
-            )
+            line = f"- node_id={nid} | type={nt} | planned_name={p.canonical_name!r} | mission_role={p.role!r}"
             if brief:
-                line += f" | 寫作要點摘要={brief}"
+                line += f" | writing_brief_excerpt={brief}"
             lines.append(line)
             structured.append(
                 {
@@ -74,7 +71,7 @@ def _format_missing_mandatory_feedback(
                 }
             )
         else:
-            lines.append(f"- node_id={nid} | （規劃表 planned_graph_nodes 中找不到對應列）")
+            lines.append(f"- node_id={nid} | (no matching row in planned_graph_nodes)")
             structured.append(
                 {
                     "node_id": nid,
@@ -86,8 +83,14 @@ def _format_missing_mandatory_feedback(
             )
 
     body = "\n".join(lines)
-    intro = "本章規劃的以下必選圖節點在正文抽取與對齊後，仍無法對應到抽取結果中的 node_id（可能過於隱晦、稱呼與規劃差異過大，或抽取管線遺漏）："
-    suffix = "請在正文中加入更可辨識的稱呼、外觀或動作，並與任務卡中的角色／地點一致；必要時讓 surface hints 涵蓋文中實際出現的精確子字串。"
+    intro = (
+        "These mandatory planned graph nodes could not be aligned to extracted node_ids after prose extraction "
+        "(too oblique, surface names diverge too far from the plan, or the extraction pipeline missed them):"
+    )
+    suffix = (
+        "Add clearer in-text names, looks, or actions consistent with the mission card for those roles/locations; "
+        "when needed, extend surface hints to include exact substrings that literally appear in the draft."
+    )
     msg = f"{intro}\n{body}\n{suffix}"
     return msg, structured
 
@@ -101,16 +104,16 @@ def _extraction_fallback_notice(diag: dict[str, Any] | None) -> str:
     labels: list[str] = []
     ent = steps.get("entity_extractor")
     if isinstance(ent, dict) and ent.get("fallback"):
-        labels.append("實體抽取")
+        labels.append("entity extraction")
     mem = steps.get("chapter_memory_extractor")
     if isinstance(mem, dict) and mem.get("fallback"):
-        labels.append("章節記憶抽取")
+        labels.append("chapter memory extraction")
     if not labels:
         return ""
-    joined = "與".join(labels)
+    joined = " and ".join(labels)
     return (
-        f"【系統提示】本章{joined}曾降級為後備流程，結構化結果可信度較低；"
-        "若反覆對齊失敗請檢查正文可抽性、API 與模型輸出。\n\n"
+        f"[System notice] This chapter's {joined} ran in fallback mode; structured outputs may be less reliable. "
+        "If alignment keeps failing, check draft extractability, API health, and model output.\n\n"
     )
 
 
@@ -133,12 +136,12 @@ def run_extraction_gate(state: dict, context: WorkflowContext) -> dict:
     )
     extracted, diag = extract_chapter_artifacts(state, context, graph_snapshot, chapter_content, events)
     planned = list(state.get("planned_graph_nodes") or [])
-    remapped_entities = apply_manual_entity_remap(
-        list(extracted.entities),
+    extracted = apply_full_extraction_remaps(
+        extracted,
         list(state.get("manual_entity_remap") or []),
+        planned,
+        _author_surface_map(state),
     )
-    extracted = extracted.model_copy(update={"entities": remapped_entities})
-    extracted = apply_resolution_to_extraction(extracted, planned, _author_surface_map(state))
     skips = {str(x).strip() for x in (state.get("mandatory_extraction_skips") or []) if str(x).strip()}
     ok, missing = validate_mandatory_planned_nodes(
         list(extracted.entities), planned, skip_mandatory_node_ids=skips
