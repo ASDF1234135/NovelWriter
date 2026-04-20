@@ -1,16 +1,19 @@
 import type { ReactNode } from "react";
 
-export type AppView = "library" | "setup" | "manuscript" | "graph" | "console";
+export type AppView = "library" | "setup" | "write" | "review" | "graph" | "export";
+export type TaskFlowStageId = "projectSetup" | "planStructure" | "writeChapter" | "reviewFix" | "export";
 
 type NavItem = { id: AppView; label: string; icon: string };
+type TaskFlowStage = { id: TaskFlowStageId; label: string; done: boolean };
 
 const libraryNav: NavItem = { id: "library", label: "故事庫", icon: "auto_stories" };
 
 const storyScopedNav: NavItem[] = [
-  { id: "setup", label: "故事設定", icon: "edit_note" },
-  { id: "manuscript", label: "原稿", icon: "menu_book" },
-  { id: "graph", label: "世界觀圖譜", icon: "hub" },
-  { id: "console", label: "主控台", icon: "monitoring" },
+  { id: "setup", label: "設定與規劃", icon: "edit_note" },
+  { id: "write", label: "章節執行", icon: "play_circle" },
+  { id: "review", label: "檢閱與修正", icon: "fact_check" },
+  { id: "graph", label: "一致性圖譜", icon: "hub" },
+  { id: "export", label: "匯出", icon: "upload_file" },
 ];
 
 type Props = {
@@ -23,6 +26,9 @@ type Props = {
   showStorySection: boolean;
   /** Short label for the story group heading (e.g. story title or id prefix). */
   storySectionLabel?: string;
+  taskFlow: TaskFlowStage[];
+  activeStage: TaskFlowStageId;
+  workflowMiniStatus: string;
 };
 
 function navButtonClass(active: boolean, enabled: boolean): string {
@@ -52,8 +58,11 @@ export function AppShell({
   hasSelectedStory,
   showStorySection,
   storySectionLabel = "",
+  taskFlow,
+  activeStage,
+  workflowMiniStatus,
 }: Props) {
-  const gatedViews: AppView[] = ["manuscript", "graph", "console"];
+  const gatedViews: AppView[] = ["write", "review", "graph", "export"];
   const needsStory = (v: AppView) => gatedViews.includes(v);
 
   function tryNavigate(v: AppView) {
@@ -106,9 +115,36 @@ export function AppShell({
           <span className="material-symbols-outlined text-primary">auto_fix_high</span>
         </div>
       </header>
+      <div className="border-b border-outline-variant/10 bg-surface-container-low/70 px-4 py-3 md:px-8">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <ol className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-3 lg:flex lg:flex-wrap">
+            {taskFlow.map((stage) => {
+              const active = activeStage === stage.id;
+              return (
+                <li
+                  key={stage.id}
+                  className={`rounded-full border px-3 py-1.5 font-label tracking-wide ${
+                    active
+                      ? "border-primary bg-primary/15 text-primary"
+                      : stage.done
+                        ? "border-secondary/40 bg-secondary/10 text-secondary"
+                        : "border-outline-variant/20 text-on-surface-variant"
+                  }`}
+                >
+                  {stage.done ? "✓ " : ""}
+                  {stage.label}
+                </li>
+              );
+            })}
+          </ol>
+          <div className="rounded-lg border border-outline-variant/20 bg-surface-container-highest/50 px-3 py-1.5 font-body text-xs text-on-surface-variant">
+            工作流程狀態：<span className="font-semibold text-on-surface">{workflowMiniStatus}</span>
+          </div>
+        </div>
+      </div>
 
-      <div className="flex min-h-[calc(100vh-4rem)]">
-        <aside className="sticky top-16 hidden h-[calc(100vh-4rem)] w-64 shrink-0 flex-col gap-1 self-start border-r border-outline-variant/10 bg-[#161d2f] py-8 font-headline text-sm font-medium text-primary shadow-glowSm lg:flex">
+      <div className="flex min-h-[calc(100vh-8.5rem)]">
+        <aside className="sticky top-[7.5rem] hidden h-[calc(100vh-7.5rem)] w-64 shrink-0 flex-col gap-1 self-start border-r border-outline-variant/10 bg-[#161d2f] py-8 font-headline text-sm font-medium text-primary shadow-glowSm lg:flex">
           <div className="mb-8 px-6">
             <div className="text-lg font-bold text-secondary">Auteur AI</div>
             <div className="text-[10px] uppercase tracking-[0.2em] text-on-surface/50">創作引擎</div>

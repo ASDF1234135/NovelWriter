@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import {
   createStory,
   downloadChapterTxt,
@@ -34,6 +35,8 @@ import { MacroPlanPanel } from "../features/macro-plan/MacroPlanPanel";
 import { StoryLibrary } from "../features/story-library/StoryLibrary";
 import { StorySetupForm } from "../features/story-setup/StorySetupForm";
 import { WorkflowMonitor } from "../features/workflow-monitor/WorkflowMonitor";
+import { WorkflowProgressTrack } from "../features/workflow-monitor/WorkflowProgressTrack";
+import { ExportCenter } from "../features/export-center/ExportCenter";
 import type {
   AiFreedomLevel,
   ChapterContent,
@@ -50,13 +53,43 @@ import type {
   WorkflowPayload,
   WritingPreambleResponse,
 } from "../types";
-import { AppShell, type AppView } from "./AppShell";
+import { AppShell, type AppView, type TaskFlowStageId } from "./AppShell";
 import { mergeMacroBibles } from "../features/macro-plan/macroPlanHelpers";
 
 /** Same heuristic as backend OUTLINE_MIN_CHARS_FOR_FULL_BINDING — UX hint only. */
 const OUTLINE_FULL_BINDING_MIN_CHARS = 100;
 
 const CHAPTER_SUMMARIZER_LLM_SOURCE = "CHAPTER_SUMMARIZER_LLM";
+
+const VIEW_PATH_MAP: Record<AppView, string> = {
+  library: "/library",
+  setup: "/setup",
+  write: "/write",
+  review: "/review",
+  graph: "/graph",
+  export: "/export",
+};
+
+function pathToView(pathname: string): AppView {
+  const cleaned = pathname.replace(/\/+$/, "") || "/";
+  switch (cleaned) {
+    case "/":
+    case "/library":
+      return "library";
+    case "/setup":
+      return "setup";
+    case "/write":
+      return "write";
+    case "/review":
+      return "review";
+    case "/graph":
+      return "graph";
+    case "/export":
+      return "export";
+    default:
+      return "library";
+  }
+}
 
 /** True when backend persisted a summary row whose text was not produced by the chapter_summarizer LLM path. */
 function plotSummarySourceNeedsRegenerate(src: string | undefined): boolean {
@@ -383,7 +416,10 @@ function downloadJsonFile(filename: string, payload: unknown) {
 }
 
 export default function App() {
-  const [view, setView] = useState<AppView>("library");
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [viewState, setViewState] = useState<AppView>(() => pathToView(location.pathname));
+  const view = viewState;
   const [storyId, setStoryId] = useState<string>("");
   const [storyTitle, setStoryTitle] = useState<string>("");
   const [chapterId, setChapterId] = useState<number>(1);
@@ -403,13 +439,41 @@ export default function App() {
   const [chapterHardRules, setChapterHardRules] = useState("");
   const [aiFreedomLevel, setAiFreedomLevel] = useState<AiFreedomLevel>("balanced");
   const [writingPreamble, setWritingPreamble] = useState<WritingPreambleResponse | null>(null);
-  const [preamblePanelOpen, setPreamblePanelOpen] = useState(true);
+  const [preamblePanelOpen, setPreamblePanelOpen] = useState(false);
+  const [writePanelTab, setWritePanelTab] = useState<"progress" | "logs">("progress");
   const [regenSummaryBusyChapter, setRegenSummaryBusyChapter] = useState<number | null>(null);
   const [configVersion, setConfigVersion] = useState(0);
+  const [hasExportedChapter, setHasExportedChapter] = useState(false);
+  const [hasExportedProject, setHasExportedProject] = useState(false);
+  const [navCount, setNavCount] = useState(0);
+  const [stageVisitCount, setStageVisitCount] = useState<Record<TaskFlowStageId, number>>({
+    projectSetup: 0,
+    planStructure: 0,
+    writeChapter: 0,
+    reviewFix: 0,
+    export: 0,
+  });
+  const [flowStartedAt, setFlowStartedAt] = useState<number | null>(null);
   const workflowEventsUnsubRef = useRef<(() => void) | null>(null);
   const storyIdRef = useRef(storyId);
   const chapterIdRef = useRef(chapterId);
   const chapterHardRulesRef = useRef<HTMLTextAreaElement | null>(null);
+  const toolbarImportInputRef = useRef<HTMLInputElement | null>(null);
+
+  function setView(nextView: AppView, replace = false) {
+    setViewState(nextView);
+    const targetPath = VIEW_PATH_MAP[nextView];
+    if (location.pathname !== targetPath) {
+      navigate(targetPath, { replace });
+    }
+  }
+
+  useEffect(() => {
+    const fromPath = pathToView(location.pathname);
+    if (fromPath !== viewState) {
+      setViewState(fromPath);
+    }
+  }, [location.pathname, viewState]);
 
   useEffect(() => {
     storyIdRef.current = storyId;
@@ -426,7 +490,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!storyId && (view === "manuscript" || view === "graph" || view === "console")) {
+    if (!storyId && (view === "write" || view === "review" || view === "graph" || view === "export")) {
       setView("library");
     }
   }, [storyId, view]);
@@ -569,6 +633,11 @@ export default function App() {
       setChapters([]);
       setSelectedChapter(null);
       setWritingPreamble(null);
+      setHasExportedChapter(false);
+      setHasExportedProject(false);
+      setNavCount(0);
+      setFlowStartedAt(Date.now());
+      setStageVisitCount({ projectSetup: 1, planStructure: 0, writeChapter: 0, reviewFix: 0, export: 0 });
       setView("setup");
     } catch (err) {
       setError(err instanceof Error ? err.message : "無法建立故事");
@@ -593,6 +662,11 @@ export default function App() {
     setStoryConfigSnapshot(null);
     setPersistedStoryConfig(null);
     setConfigurationLocked(false);
+    setHasExportedChapter(false);
+    setHasExportedProject(false);
+    setNavCount(0);
+    setFlowStartedAt(null);
+    setStageVisitCount({ projectSetup: 0, planStructure: 0, writeChapter: 0, reviewFix: 0, export: 0 });
     setConfigVersion((v) => v + 1);
     setError("");
     setView("setup");
@@ -615,6 +689,11 @@ export default function App() {
     setStoryConfigSnapshot(null);
     setPersistedStoryConfig(null);
     setConfigurationLocked(false);
+    setHasExportedChapter(false);
+    setHasExportedProject(false);
+    setNavCount(0);
+    setFlowStartedAt(null);
+    setStageVisitCount({ projectSetup: 0, planStructure: 0, writeChapter: 0, reviewFix: 0, export: 0 });
     setConfigVersion((v) => v + 1);
     setError("");
     setView("library");
@@ -660,6 +739,11 @@ export default function App() {
       setSelectedChapter(null);
       setChapterId(1);
       setChapterAlreadyCompleted(false);
+      setHasExportedChapter(false);
+      setHasExportedProject(false);
+      setNavCount(0);
+      setFlowStartedAt(Date.now());
+      setStageVisitCount({ projectSetup: 1, planStructure: 0, writeChapter: 0, reviewFix: 0, export: 0 });
       setView("setup");
     } catch (err) {
       setError(err instanceof Error ? err.message : "無法載入故事");
@@ -743,7 +827,7 @@ export default function App() {
       const wf = await fetchWorkflow(runId);
       setWorkflow(wf);
       if (String(wf.state.workflow_status ?? "") === "COMPLETED") {
-        setView("manuscript");
+        setView("review");
       }
       const sid = storyIdRef.current;
       if (sid) {
@@ -844,6 +928,8 @@ export default function App() {
     setNotice("");
     workflowEventsUnsubRef.current?.();
     workflowEventsUnsubRef.current = null;
+    setWorkflow(null);
+    setSelectedChapter(null);
     setBusy(true);
     try {
       const initial = await runChapter(storyId, chapterId, {
@@ -863,40 +949,12 @@ export default function App() {
       }
       setConfigVersion((v) => v + 1);
       const runId = initial.run.run_id;
-      setView("console");
+      setView("write");
       attachWorkflowEventStream(runId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "無法開始撰寫本章");
     } finally {
       setBusy(false);
-    }
-  }
-
-  async function refreshWorkflow() {
-    if (!workflow?.run.run_id) return;
-    setWorkflow(await fetchWorkflow(workflow.run.run_id));
-    if (storyId) {
-      setGraph(await fetchGraph(storyId));
-      setChapters(await fetchChapters(storyId));
-      if (selectedChapter) {
-        try {
-          setSelectedChapter(await fetchChapter(storyId, selectedChapter.chapter_id));
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : "";
-          if (msg.includes("Chapter not found")) {
-            setSelectedChapter(null);
-            setNotice("目標章節尚未落盤，請稍後再讀取。");
-          } else {
-            throw err;
-          }
-        }
-      }
-      try {
-        const probe = await fetchChapterIfExists(storyId, chapterId);
-        setChapterAlreadyCompleted(probe?.status === "completed");
-      } catch {
-        setChapterAlreadyCompleted(false);
-      }
     }
   }
 
@@ -926,6 +984,7 @@ export default function App() {
       payload.macro_plan = buildMacroPutBody(macroData);
     }
     downloadJsonFile(`${storyId}-project.json`, payload);
+    setHasExportedProject(true);
   }
 
   async function importProjectBundle(jsonText: string, mode: ImportMergeMode) {
@@ -997,6 +1056,28 @@ export default function App() {
     if (parsedStory || parsedMacro) {
       setConfigVersion((v) => v + 1);
       setNotice(`專案 JSON 已匯入（${modeLabel}）`);
+    }
+  }
+
+  function askImportMode(): ImportMergeMode {
+    const replace = window.confirm("匯入模式：按「確定」= 覆蓋目前資料；按「取消」= 合併（已有值優先）");
+    return replace ? "replace" : "merge";
+  }
+
+  async function handleToolbarImportProjectBundle(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || !storyId || configurationLocked) return;
+    const mode = askImportMode();
+    setBusy(true);
+    setError("");
+    try {
+      const text = await file.text();
+      await importProjectBundle(text, mode);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "匯入專案 JSON 失敗");
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -1105,14 +1186,83 @@ export default function App() {
   const showStorySection = Boolean(storyId) || view === "setup";
   const storySectionLabel =
     storyTitle.trim() || (storyId ? `${storyId.slice(0, 10)}…` : "");
+  const hasMacroCompiled = Boolean(macroData && macroData.volumes.length > 0 && macroData.anchors.length > 0);
+  const hasChapterRun = Boolean(workflow || chapters.length > 0);
+  const hasReviewed = Boolean(selectedChapter || chapters.length > 0);
+  const hasExported = hasExportedChapter || hasExportedProject;
+  const workflowMiniStatus = useMemo(() => {
+    if (!workflow) return "尚未執行章節";
+    const status = String(workflow.state.workflow_status ?? workflow.run.status ?? "");
+    if (status === "WAITING_HITL") return "等待人工決策";
+    if (status === "COMPLETED") return "章節流程已完成";
+    if (status === "FAILED") return "章節流程失敗";
+    return "章節流程執行中";
+  }, [workflow]);
+  const activeStage: TaskFlowStageId = useMemo(() => {
+    if (view === "setup") return hasMacroCompiled ? "planStructure" : "projectSetup";
+    if (view === "write") return "writeChapter";
+    if (view === "review" || view === "graph") return "reviewFix";
+    if (view === "export") return "export";
+    if (!storyId) return "projectSetup";
+    if (!hasMacroCompiled) return "projectSetup";
+    if (!hasChapterRun) return "planStructure";
+    if (!hasReviewed) return "writeChapter";
+    if (!hasExported) return "reviewFix";
+    return "export";
+  }, [view, storyId, hasMacroCompiled, hasChapterRun, hasReviewed, hasExported]);
+  const taskFlow = useMemo(
+    () => [
+      { id: "projectSetup" as const, label: "Project Setup", done: Boolean(storyId) },
+      { id: "planStructure" as const, label: "Plan & Structure", done: hasMacroCompiled },
+      { id: "writeChapter" as const, label: "Write Chapter", done: hasChapterRun },
+      { id: "reviewFix" as const, label: "Review & Fix", done: hasReviewed },
+      { id: "export" as const, label: "Export", done: hasExported },
+    ],
+    [storyId, hasMacroCompiled, hasChapterRun, hasReviewed, hasExported],
+  );
+  function handleViewChange(nextView: AppView) {
+    if (nextView === view) return;
+    const markStageVisit = (stage: TaskFlowStageId) => {
+      setStageVisitCount((prev) => ({ ...prev, [stage]: prev[stage] + 1 }));
+      setNavCount((prev) => prev + 1);
+    };
+    if (!storyId && nextView !== "library" && nextView !== "setup") {
+      setNotice("請先在故事庫選擇或建立故事。");
+      setView("library");
+      return;
+    }
+    if (nextView === "write" && !hasMacroCompiled) {
+      setNotice("請先在「設定與規劃」完成世界觀編譯。");
+      setView("setup");
+      return;
+    }
+    if ((nextView === "review" || nextView === "export") && !hasChapterRun) {
+      setNotice("請先執行至少一輪章節流程。");
+      setView("write");
+      return;
+    }
+    if (nextView === "setup") {
+      markStageVisit(hasMacroCompiled ? "planStructure" : "projectSetup");
+    } else if (nextView === "write") {
+      markStageVisit("writeChapter");
+    } else if (nextView === "review" || nextView === "graph") {
+      markStageVisit("reviewFix");
+    } else if (nextView === "export") {
+      markStageVisit("export");
+    }
+    setView(nextView);
+  }
 
   return (
     <AppShell
       activeView={view}
-      onViewChange={setView}
+      onViewChange={handleViewChange}
       hasSelectedStory={Boolean(storyId)}
       showStorySection={showStorySection}
       storySectionLabel={storySectionLabel}
+      taskFlow={taskFlow}
+      activeStage={activeStage}
+      workflowMiniStatus={workflowMiniStatus}
     >
       {error ? (
         <div className="mx-4 mt-4 rounded-xl border border-error/40 bg-error/10 px-4 py-3 font-label text-sm text-error">
@@ -1132,7 +1282,6 @@ export default function App() {
           </button>
         </div>
       ) : null}
-
       {view === "library" ? (
         <StoryLibrary
           onSelectStory={handleSelectStoryFromLibrary}
@@ -1173,222 +1322,23 @@ export default function App() {
                 <span className="material-symbols-outlined text-lg">auto_awesome</span>
                 產生世界觀與結構
               </button>
-              <label className="flex items-center gap-2 text-xs uppercase tracking-wider text-on-surface-variant">
-                章節
-                <input
-                  type="number"
-                  min={1}
-                  value={chapterId}
-                  onChange={(e) => setChapterId(Number(e.target.value))}
-                  className="w-20 rounded-lg border border-outline-variant/20 bg-surface-container-highest px-2 py-2 text-on-surface"
-                />
-              </label>
-              <button
-                type="button"
-                className="btn-secondary"
-                title="將章節選擇設為目前已有的最大章節"
-                disabled={!storyId || busy || chapters.length === 0}
-                onClick={() => setChapterId(latestChapterId)}
-              >
-                <span className="material-symbols-outlined align-middle text-base">skip_next</span>
-                最新章
+              <button type="button" className="btn-secondary" onClick={storyId ? exportProjectBundle : undefined} disabled={!storyId || busy}>
+                匯出專案 JSON
               </button>
               <button
                 type="button"
                 className="btn-secondary"
-                onClick={handleRunChapter}
-                disabled={!storyId || busy || workflowConflictLocked || chapterAlreadyCompleted}
+                onClick={() => toolbarImportInputRef.current?.click()}
+                disabled={!storyId || busy || configurationLocked}
               >
-                撰寫本章
+                匯入專案 JSON
               </button>
-              <button type="button" className="btn-secondary" onClick={refreshWorkflow} disabled={!workflow || busy}>
-                重新整理狀態
-              </button>
-            </div>
-
-            {storyId ? (
-              <div className="mb-3 overflow-hidden rounded-xl border border-outline-variant/15 bg-surface-container/90">
-                <button
-                  type="button"
-                  className="flex w-full items-center justify-between gap-2 px-4 py-3 text-left hover:bg-surface-container-highest/50"
-                  onClick={() => setPreamblePanelOpen((o) => !o)}
-                >
-                  <span className="flex min-w-0 flex-1 items-center gap-2">
-                    <span className="font-label text-[11px] font-bold uppercase tracking-wider text-secondary">
-                      開寫前參考
-                    </span>
-                    <span className="truncate font-body text-sm text-on-surface-variant">
-                      劇情進度（至第 {Math.max(0, chapterId - 1)} 章）
-                    </span>
-                  </span>
-                  <span className="material-symbols-outlined shrink-0 text-on-surface-variant">
-                    {preamblePanelOpen ? "expand_less" : "expand_more"}
-                  </span>
-                </button>
-                {preamblePanelOpen && !writingPreamble ? (
-                  <div className="border-t border-outline-variant/10 px-4 py-3 font-body text-sm text-on-surface-variant">
-                    載入提示中…
-                  </div>
-                ) : null}
-                {preamblePanelOpen && writingPreamble ? (
-                  <div className="space-y-4 border-t border-outline-variant/10 px-4 py-3">
-                    <div>
-                      <p className="mb-2 font-label text-[10px] font-bold uppercase tracking-wider text-secondary">
-                        劇情進度
-                      </p>
-                      {chapterId <= 1 ? (
-                        <p className="font-body text-sm leading-relaxed text-on-surface">
-                          這是第 1 章開篇。
-                          {storyConfigSnapshot?.premise?.trim() ? (
-                            <>
-                              {" "}
-                              故事前提：
-                              <span className="text-on-surface-variant"> {storyConfigSnapshot.premise.trim()}</span>
-                            </>
-                          ) : (
-                            <span className="text-on-surface-variant"> 可先在大綱寫下開場要交代的世界與人物處境。</span>
-                          )}
-                        </p>
-                      ) : (
-                        <>
-                          {preambleHasNonLlmSummary ? (
-                            <p className="mb-2 rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2 font-body text-xs leading-relaxed text-on-surface">
-                              部分章節摘要並非由章節整理器（LLM）直接產生（例如備援摘要或舊資料）。建議在對應章節旁點「重新產生摘要」，以目前手稿正文重新跑結構化摘要。
-                            </p>
-                          ) : null}
-                          {writingPreamble.plot_progress.previous_chapter.plot_summary ? (
-                            <div className="mb-2 flex flex-wrap items-start gap-2 font-body text-sm leading-relaxed text-on-surface">
-                              <p className="min-w-0 flex-1">
-                                <span className="font-semibold text-on-surface">
-                                  第 {writingPreamble.plot_progress.previous_chapter.chapter_id} 章摘要
-                                </span>
-                                {writingPreamble.plot_progress.previous_chapter.status ? (
-                                  <span className="ml-2 text-xs text-on-surface-variant">
-                                    （{writingPreamble.plot_progress.previous_chapter.status}）
-                                  </span>
-                                ) : null}
-                                ：{writingPreamble.plot_progress.previous_chapter.plot_summary}
-                              </p>
-                              {writingPreamble.plot_progress.previous_chapter.chapter_id != null &&
-                              plotSummarySourceNeedsRegenerate(writingPreamble.plot_progress.previous_chapter.plot_summary_source) ? (
-                                <button
-                                  type="button"
-                                  className="shrink-0 rounded-md border border-outline-variant/30 px-2 py-1 text-[11px] font-medium text-secondary hover:bg-surface-container-highest/80 disabled:opacity-50"
-                                  disabled={regenSummaryBusyChapter !== null || busy}
-                                  onClick={() => void handleRegenerateChapterSummary(writingPreamble.plot_progress.previous_chapter.chapter_id!)}
-                                >
-                                  {regenSummaryBusyChapter === writingPreamble.plot_progress.previous_chapter.chapter_id
-                                    ? "處理中…"
-                                    : "重新產生摘要"}
-                                </button>
-                              ) : null}
-                            </div>
-                          ) : (
-                            <p className="mb-2 font-body text-sm text-on-surface-variant">
-                              尚無第 {chapterId - 1} 章的結構化摘要；完稿並跑過流程後會累積在此。
-                            </p>
-                          )}
-                          {writingPreamble.plot_progress.milestones.length > 0 ? (
-                            <ul className="mb-2 list-inside list-disc space-y-1 font-body text-sm text-on-surface-variant">
-                              {writingPreamble.plot_progress.milestones.map((m) => (
-                                <li key={`${m.chapter_start}-${m.chapter_end}`}>
-                                  第 {m.chapter_start}–{m.chapter_end} 章段：{m.milestone_summary}
-                                </li>
-                              ))}
-                            </ul>
-                          ) : null}
-                          {writingPreamble.plot_progress.recent_summaries.length > 0 ? (
-                            <ul className="list-none space-y-2 font-body text-sm text-on-surface-variant">
-                              {writingPreamble.plot_progress.recent_summaries.map((r) => (
-                                <li
-                                  key={r.chapter_id}
-                                  className="flex flex-wrap items-start gap-2 rounded-md border border-outline-variant/10 bg-surface-container-highest/40 px-2 py-1.5"
-                                >
-                                  <span className="min-w-0 flex-1">
-                                    第 {r.chapter_id} 章：{r.plot_summary || "（無摘要）"}
-                                  </span>
-                                  {plotSummarySourceNeedsRegenerate(r.plot_summary_source) ? (
-                                    <button
-                                      type="button"
-                                      className="shrink-0 rounded-md border border-outline-variant/30 px-2 py-0.5 text-[11px] font-medium text-secondary hover:bg-surface-container-highest/80 disabled:opacity-50"
-                                      disabled={regenSummaryBusyChapter !== null || busy}
-                                      onClick={() => void handleRegenerateChapterSummary(r.chapter_id)}
-                                    >
-                                      {regenSummaryBusyChapter === r.chapter_id ? "處理中…" : "重新產生摘要"}
-                                    </button>
-                                  ) : null}
-                                </li>
-                              ))}
-                            </ul>
-                          ) : null}
-                          {writingPreamble.plot_progress.earlier_chapters_with_summary_count >
-                          writingPreamble.plot_progress.recent_summaries.length ? (
-                            <p className="mt-2 font-body text-xs text-on-surface-variant">
-                              更早章節另有 {writingPreamble.plot_progress.earlier_chapters_with_summary_count} 章已存摘要；
-                              長弧已收錄於上方里程碑，全文可於手稿檢視。
-                            </p>
-                          ) : null}
-                        </>
-                      )}
-                    </div>
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-
-            <div className="rounded-xl border border-outline-variant/15 bg-surface-container px-4 py-3">
-              <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-                <label className="font-body text-sm text-on-surface">
-                  <span className="mb-1 block font-label text-[10px] uppercase tracking-wider text-outline">創作自由度</span>
-                  <select
-                    value={aiFreedomLevel}
-                    onChange={(e) => setAiFreedomLevel(e.target.value as AiFreedomLevel)}
-                    disabled={!storyId || busy || workflowConflictLocked || chapterAlreadyCompleted}
-                    className="auteur-input w-full max-w-xs text-sm sm:w-auto"
-                  >
-                    <option value="strict">嚴格（已寫明處不可改；大綱需較具體才 FULL 綁定）</option>
-                    <option value="balanced">平衡（預設）</option>
-                    <option value="wild">狂野（留白腦補多，仍標 [AI_INVENTION]）</option>
-                  </select>
-                </label>
-              </div>
-              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <p className="font-label text-[10px] font-bold uppercase tracking-wider text-secondary">Chapter Direction</p>
-                  <p className="font-body text-sm text-on-surface">本章寫作大綱</p>
-                </div>
-                {chapterAlreadyCompleted ? (
-                  <span className="rounded-full border border-tertiary/30 bg-tertiary/10 px-2 py-1 text-xs text-tertiary">
-                    第 {chapterId} 章已完成（無法重跑）
-                  </span>
-                ) : null}
-              </div>
-              <textarea
-                value={chapterOutline}
-                onChange={(e) => setChapterOutline(e.target.value)}
-                maxLength={2000}
-                rows={3}
-                placeholder="例如：本章以對話推進謎底、避免打鬥場面…"
-                disabled={!storyId || busy || workflowConflictLocked || chapterAlreadyCompleted}
-                className="mb-2 w-full resize-y rounded-lg border border-outline-variant/20 bg-surface-container-highest px-3 py-2 font-body text-sm text-on-surface placeholder:text-on-surface-variant/50"
-              />
-              {chapterOutline.trim().length > 0 && chapterOutline.trim().length < OUTLINE_FULL_BINDING_MIN_CHARS ? (
-                <p className="mb-3 font-body text-xs text-secondary">
-                  大綱較短（低於 {OUTLINE_FULL_BINDING_MIN_CHARS} 字）：流程會保留 AI 填坑權；strict 僅約束你已寫明的片段。
-                </p>
-              ) : null}
-              <div className="mb-2">
-                <p className="font-body text-sm text-on-surface">本章硬性規則（需保真、嚴格遵守）</p>
-              </div>
-              <textarea
-                value={chapterHardRules}
-                onChange={(e) => setChapterHardRules(e.target.value)}
-                ref={chapterHardRulesRef}
-                maxLength={8000}
-                rows={4}
-                placeholder="例如：遊戲規則、勝負條件、不可違背的系統法則（POV 不可知的底牌請標示清楚）"
-                disabled={!storyId || busy || workflowConflictLocked || chapterAlreadyCompleted}
-                className="w-full resize-y rounded-lg border border-outline-variant/20 bg-surface-container-highest px-3 py-2 font-body text-sm text-on-surface placeholder:text-on-surface-variant/50"
+              <input
+                ref={toolbarImportInputRef}
+                type="file"
+                accept="application/json,.json"
+                className="hidden"
+                onChange={(e) => void handleToolbarImportProjectBundle(e)}
               />
             </div>
           </div>
@@ -1415,20 +1365,27 @@ export default function App() {
               />
             </div>
             <div className="lg:col-span-7">
-              <MacroPlanPanel
-                macroData={macroData}
-                storyId={storyId || null}
-                configurationLocked={configurationLocked}
-                onMacroDataUpdate={setMacroData}
-                onBusy={setBusy}
-                onError={setError}
-              />
+              <div className="rounded-xl border border-outline-variant/10 bg-surface-container-low/50 p-3">
+                <div className="mb-3 px-1">
+                  <h3 className="font-label text-xs font-semibold uppercase tracking-wider text-on-surface-variant">
+                    世界觀與結構編修
+                  </h3>
+                </div>
+                <MacroPlanPanel
+                  macroData={macroData}
+                  storyId={storyId || null}
+                  configurationLocked={configurationLocked}
+                  onMacroDataUpdate={setMacroData}
+                  onBusy={setBusy}
+                  onError={setError}
+                />
+              </div>
             </div>
           </div>
         </div>
       ) : null}
 
-      {view === "manuscript" ? (
+      {view === "review" ? (
         <div className="flex h-[calc(100vh-4rem)] flex-col bg-surface-container-lowest lg:flex-row">
           <ChapterReader
             storyId={storyId}
@@ -1462,6 +1419,7 @@ export default function App() {
               setError("");
               try {
                 await downloadChapterTxt(storyId, nextChapterId);
+                setHasExportedChapter(true);
               } catch (err) {
                 setError(err instanceof Error ? err.message : "無法下載章節");
               } finally {
@@ -1470,6 +1428,7 @@ export default function App() {
             }}
             rightRail={
               <div className="flex flex-col gap-4 p-4">
+                <WorkflowProgressTrack workflow={workflow} compact />
                 <WorkflowMonitor workflow={workflow} variant="compact" />
                 <HitlPanel
                   workflow={workflow}
@@ -1488,6 +1447,9 @@ export default function App() {
       {view === "graph" ? (
         <div className="min-h-[calc(100vh-4rem)] bg-background p-4 md:p-8">
           <div className="mb-4 flex items-center justify-end gap-3">
+            <button type="button" className="btn-secondary" onClick={() => setView("setup")}>
+              回到設定與規劃
+            </button>
             <span className="rounded-full border border-secondary/20 bg-secondary/10 px-3 py-1 font-label text-[10px] font-bold uppercase tracking-widest text-secondary">
               僅供閱覽
             </span>
@@ -1496,11 +1458,209 @@ export default function App() {
         </div>
       ) : null}
 
-      {view === "console" ? (
-        <div className="space-y-6 px-4 py-8 md:px-10">
-          <WorkflowMonitor workflow={workflow} />
-          <HitlPanel workflow={workflow} busy={busy} workflowError={workflowHitlActive ? error : ""} {...hitlHandlers} />
-          <AgentOutputView workflow={workflow} />
+      {view === "write" ? (
+        <div className="min-h-[calc(100vh-4rem)] bg-background px-4 py-6 md:px-8 md:py-8">
+          <div className="mx-auto flex w-full max-w-7xl flex-col gap-6">
+            <section className="rounded-xl border border-outline-variant/15 bg-surface-container-low/70 p-4 shadow-glow">
+              <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(180px,220px)_minmax(220px,280px)_auto] lg:items-end">
+                <div className="flex flex-col gap-1.5">
+                  <span className="font-label text-[10px] uppercase tracking-wider text-outline">章節</span>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={1}
+                      value={chapterId}
+                      onChange={(e) => setChapterId(Number(e.target.value))}
+                      className="h-10 w-24 rounded-lg border border-outline-variant/20 bg-surface-container-highest px-2 py-2 text-on-surface"
+                    />
+                    <button
+                      type="button"
+                      className="btn-secondary h-10"
+                      title="將章節選擇設為目前已有的最大章節"
+                      disabled={!storyId || busy || chapters.length === 0}
+                      onClick={() => setChapterId(latestChapterId)}
+                    >
+                      <span className="material-symbols-outlined align-middle text-base">skip_next</span>
+                      最新章
+                    </button>
+                  </div>
+                </div>
+                <label className="flex min-w-0 flex-col gap-1.5 font-body text-sm text-on-surface">
+                  <span className="font-label text-[10px] uppercase tracking-wider text-outline">創作自由度</span>
+                  <select
+                    value={aiFreedomLevel}
+                    onChange={(e) => setAiFreedomLevel(e.target.value as AiFreedomLevel)}
+                    disabled={!storyId || busy || workflowConflictLocked || chapterAlreadyCompleted}
+                    className="auteur-input h-10 w-full text-sm"
+                  >
+                    <option value="strict">嚴格（已寫明處不可改；大綱需較具體才 FULL 綁定）</option>
+                    <option value="balanced">平衡（預設）</option>
+                    <option value="wild">狂野（留白腦補多，仍標 [AI_INVENTION]）</option>
+                  </select>
+                </label>
+                <div className="flex items-end">
+                  <button
+                    type="button"
+                    className="btn-primary-gradient h-10"
+                    onClick={handleRunChapter}
+                    disabled={!storyId || busy || workflowConflictLocked || chapterAlreadyCompleted}
+                  >
+                    撰寫本章
+                  </button>
+                </div>
+              </div>
+              {chapterAlreadyCompleted ? (
+                <div className="mt-3">
+                  <span className="rounded-full border border-tertiary/30 bg-tertiary/10 px-2 py-1 text-xs text-tertiary">
+                    第 {chapterId} 章已完成，請改章號後再執行
+                  </span>
+                </div>
+              ) : null}
+              <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                <div>
+                  <p className="mb-2 font-label text-[10px] font-bold uppercase tracking-wider text-secondary">Chapter Direction</p>
+                  <textarea
+                    value={chapterOutline}
+                    onChange={(e) => setChapterOutline(e.target.value)}
+                    maxLength={2000}
+                    rows={4}
+                    placeholder="例如：本章以對話推進謎底、避免打鬥場面…"
+                    disabled={!storyId || busy || workflowConflictLocked || chapterAlreadyCompleted}
+                    className="w-full resize-y rounded-lg border border-outline-variant/20 bg-surface-container-highest px-3 py-2 font-body text-sm text-on-surface placeholder:text-on-surface-variant/50"
+                  />
+                  {chapterOutline.trim().length > 0 && chapterOutline.trim().length < OUTLINE_FULL_BINDING_MIN_CHARS ? (
+                    <p className="mt-2 font-body text-xs text-secondary">
+                      大綱較短（低於 {OUTLINE_FULL_BINDING_MIN_CHARS} 字）：流程會保留 AI 填坑權；strict 僅約束你已寫明的片段。
+                    </p>
+                  ) : null}
+                </div>
+                <div>
+                  <p className="mb-2 font-label text-[10px] font-bold uppercase tracking-wider text-secondary">本章硬性規則</p>
+                  <textarea
+                    value={chapterHardRules}
+                    onChange={(e) => setChapterHardRules(e.target.value)}
+                    ref={chapterHardRulesRef}
+                    maxLength={8000}
+                    rows={4}
+                    placeholder="例如：遊戲規則、勝負條件、不可違背的系統法則（POV 不可知的底牌請標示清楚）"
+                    disabled={!storyId || busy || workflowConflictLocked || chapterAlreadyCompleted}
+                    className="w-full resize-y rounded-lg border border-outline-variant/20 bg-surface-container-highest px-3 py-2 font-body text-sm text-on-surface placeholder:text-on-surface-variant/50"
+                  />
+                </div>
+              </div>
+              {storyId ? (
+                <div className="mt-3 overflow-hidden rounded-xl border border-outline-variant/15 bg-surface-container/90">
+                  <button
+                    type="button"
+                    className="flex w-full items-center justify-between gap-2 px-4 py-3 text-left hover:bg-surface-container-highest/50"
+                    onClick={() => setPreamblePanelOpen((o) => !o)}
+                  >
+                    <span className="flex min-w-0 flex-1 items-center gap-2">
+                      <span className="font-label text-[11px] font-bold uppercase tracking-wider text-secondary">開寫前參考</span>
+                      <span className="truncate font-body text-sm text-on-surface-variant">
+                        劇情進度（至第 {Math.max(0, chapterId - 1)} 章）
+                      </span>
+                    </span>
+                    <span className="material-symbols-outlined shrink-0 text-on-surface-variant">
+                      {preamblePanelOpen ? "expand_less" : "expand_more"}
+                    </span>
+                  </button>
+                  {preamblePanelOpen && !writingPreamble ? (
+                    <div className="border-t border-outline-variant/10 px-4 py-3 font-body text-sm text-on-surface-variant">載入提示中…</div>
+                  ) : null}
+                  {preamblePanelOpen && writingPreamble ? (
+                    <div className="space-y-2 border-t border-outline-variant/10 px-4 py-3 font-body text-sm text-on-surface-variant">
+                      <p>上一章：{writingPreamble.plot_progress.previous_chapter.plot_summary || "尚無結構化摘要"}</p>
+                      {preambleHasNonLlmSummary ? (
+                        <p className="rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-xs text-on-surface">
+                          偵測到非章節整理器摘要，建議在對應章節重新產生摘要。
+                        </p>
+                      ) : null}
+                      {writingPreamble.plot_progress.previous_chapter.chapter_id != null &&
+                      plotSummarySourceNeedsRegenerate(writingPreamble.plot_progress.previous_chapter.plot_summary_source) ? (
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          disabled={regenSummaryBusyChapter !== null || busy}
+                          onClick={() => void handleRegenerateChapterSummary(writingPreamble.plot_progress.previous_chapter.chapter_id!)}
+                        >
+                          {regenSummaryBusyChapter === writingPreamble.plot_progress.previous_chapter.chapter_id ? "處理中…" : "重新產生上一章摘要"}
+                        </button>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+            </section>
+
+            <WorkflowProgressTrack workflow={workflow} />
+            <section className="rounded-xl border border-outline-variant/15 bg-surface-container-low/70 p-2">
+              <div className="inline-flex rounded-md bg-surface-container-lowest/40 p-1">
+                <button
+                  type="button"
+                  className={`rounded-md px-3 py-1.5 text-xs font-semibold ${
+                    writePanelTab === "progress" ? "bg-primary/20 text-primary" : "text-on-surface-variant"
+                  }`}
+                  onClick={() => setWritePanelTab("progress")}
+                  aria-pressed={writePanelTab === "progress"}
+                >
+                  章節撰寫進度
+                </button>
+                <button
+                  type="button"
+                  className={`rounded-md px-3 py-1.5 text-xs font-semibold ${
+                    writePanelTab === "logs" ? "bg-secondary/20 text-secondary" : "text-on-surface-variant"
+                  }`}
+                  onClick={() => setWritePanelTab("logs")}
+                  aria-pressed={writePanelTab === "logs"}
+                >
+                  撰寫過程紀錄
+                </button>
+              </div>
+            </section>
+            {writePanelTab === "progress" ? (
+              <div className="grid grid-cols-1 gap-6">
+                <div className="min-w-0">
+                  <WorkflowMonitor workflow={workflow} />
+                  <div className="mt-4">
+                    <HitlPanel workflow={workflow} busy={busy} workflowError={workflowHitlActive ? error : ""} {...hitlHandlers} />
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="min-w-0">
+                <AgentOutputView workflow={workflow} />
+              </div>
+            )}
+          </div>
+        </div>
+      ) : null}
+      {view === "export" ? (
+        <div className="px-4 py-8 md:px-10">
+          <ExportCenter
+            storyId={storyId}
+            chapters={chapters}
+            busy={busy}
+            onExportProject={exportProjectBundle}
+            onExportChapter={async (chapterToExport) => {
+              if (!storyId) return;
+              setBusy(true);
+              setError("");
+              try {
+                await downloadChapterTxt(storyId, chapterToExport);
+                setHasExportedChapter(true);
+              } catch (err) {
+                setError(err instanceof Error ? err.message : "無法下載章節");
+              } finally {
+                setBusy(false);
+              }
+            }}
+            uxMetrics={{
+              navCount,
+              elapsedMinutes: flowStartedAt ? Math.max(1, Math.round((Date.now() - flowStartedAt) / 60000)) : null,
+              stageVisitCount,
+            }}
+          />
         </div>
       ) : null}
     </AppShell>

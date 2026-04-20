@@ -140,6 +140,7 @@ export function HitlPanel({
   const [injectionJsonError, setInjectionJsonError] = useState("");
   const [anchorChapterError, setAnchorChapterError] = useState("");
   const [advancedInjectAck, setAdvancedInjectAck] = useState(false);
+  const [uiMode, setUiMode] = useState<"simple" | "advanced">("simple");
 
   const hitlActive = isHitlActive(workflow);
   const controlsLocked = !hitlActive || busy;
@@ -213,6 +214,12 @@ export function HitlPanel({
     }
   }, [hitlActive, reason, workflow?.run.run_id, workflow?.run.hitl_context, workflow?.state]);
 
+  useEffect(() => {
+    if (!hitlActive) {
+      setUiMode("simple");
+    }
+  }, [hitlActive, workflow?.run.run_id]);
+
   const shell = compact
     ? "glass-panel rounded-xl border border-outline-variant/15 p-4 shadow-glow"
     : "rounded-xl border border-outline-variant/10 bg-surface-container-low p-6 shadow-glow";
@@ -256,6 +263,26 @@ export function HitlPanel({
           "目前沒有等待您處理的步驟。"
         )}
       </p>
+      {hitlActive ? (
+        <div className="mb-3 inline-flex rounded-lg border border-outline-variant/25 bg-surface-container-highest/30 p-1">
+          <button
+            type="button"
+            className={`rounded-md px-3 py-1 text-xs ${uiMode === "simple" ? "bg-primary/20 text-primary" : "text-on-surface-variant"}`}
+            disabled={controlsLocked}
+            onClick={() => setUiMode("simple")}
+          >
+            簡化模式
+          </button>
+          <button
+            type="button"
+            className={`rounded-md px-3 py-1 text-xs ${uiMode === "advanced" ? "bg-secondary/20 text-secondary" : "text-on-surface-variant"}`}
+            disabled={controlsLocked}
+            onClick={() => setUiMode("advanced")}
+          >
+            進階模式
+          </button>
+        </div>
+      ) : null}
 
       {hitlActive ? (
         <>
@@ -638,7 +665,7 @@ export function HitlPanel({
                 ) : (
                   <p className="mb-2 font-body text-xs text-on-surface-variant">目前沒有表格化猜測，請依內文自行填寫對照。</p>
                 )}
-                <label className="auteur-label">手動對照（結構化，進階）</label>
+                {uiMode === "advanced" ? <label className="auteur-label">手動對照（結構化，進階）</label> : null}
                 <textarea
                   className={inputClass}
                   value={remapJson}
@@ -650,8 +677,12 @@ export function HitlPanel({
                   disabled={controlsLocked}
                 />
                 {remapJsonError ? <p className="mt-1 font-body text-xs text-error">{remapJsonError}</p> : null}
-                <label className="auteur-label mt-2">可略過的必填項目代號（逗號分隔，進階）</label>
-                <input className={inputClass} value={waiveIdsComma} onChange={(e) => setWaiveIdsComma(e.target.value)} disabled={controlsLocked} />
+                {uiMode === "advanced" ? (
+                  <>
+                    <label className="auteur-label mt-2">可略過的必填項目代號（逗號分隔，進階）</label>
+                    <input className={inputClass} value={waiveIdsComma} onChange={(e) => setWaiveIdsComma(e.target.value)} disabled={controlsLocked} />
+                  </>
+                ) : null}
                 <button
                   type="button"
                   className={btnClass}
@@ -683,8 +714,8 @@ export function HitlPanel({
                     }
                     setRemapJsonError("");
                     void onExtractionRemap({
-                      entity_remaps: rows,
-                      waive_mandatory_node_ids: waiveList(),
+                      entity_remaps: uiMode === "advanced" ? rows : rows.slice(0, Math.max(1, rows.length)),
+                      waive_mandatory_node_ids: uiMode === "advanced" ? waiveList() : [],
                     });
                   }}
                 >
@@ -804,7 +835,8 @@ export function HitlPanel({
             ) : null}
           </div>
 
-          <details className="mt-4 rounded-xl border border-outline-variant/15 bg-surface-container-highest/20 p-3" open={advancedOpen} onToggle={(e) => setAdvancedOpen((e.target as HTMLDetailsElement).open)}>
+          {uiMode === "advanced" ? (
+            <details className="mt-4 rounded-xl border border-outline-variant/15 bg-surface-container-highest/20 p-3" open={advancedOpen} onToggle={(e) => setAdvancedOpen((e.target as HTMLDetailsElement).open)}>
             <summary className="cursor-pointer font-label text-sm font-semibold text-on-surface-variant">
               進階：僅在熟悉系統時使用
             </summary>
@@ -862,7 +894,8 @@ export function HitlPanel({
                 </button>
               </div>
             </div>
-          </details>
+            </details>
+          ) : null}
         </>
       ) : null}
     </section>

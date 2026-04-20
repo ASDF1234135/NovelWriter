@@ -1039,6 +1039,17 @@ export function MacroPlanPanel({
                       <p className="text-sm">{c.short_bio || "—"}</p>
                       <p className="text-xs text-on-surface-variant">核心動機：{c.core_motivation || "—"}</p>
                       <p className="text-xs text-on-surface-variant">核心價值：{c.core_value || "—"}</p>
+                      <details className="mt-2 rounded-lg border border-outline-variant/15 bg-surface-container-highest/40 p-2">
+                        <summary className="cursor-pointer text-xs font-semibold text-secondary">展開完整人物資訊</summary>
+                        <div className="mt-2 grid grid-cols-1 gap-1 text-xs text-on-surface-variant sm:grid-cols-2">
+                          <p>別名：{(c.aliases ?? []).join("、") || "—"}</p>
+                          <p>年齡：{c.age || "—"}</p>
+                          <p>個性：{c.personality || "—"}</p>
+                          <p>語氣風格：{c.speech_style || "—"}</p>
+                          <p>致命弱點：{c.fatal_flaw || "—"}</p>
+                          <p>習慣與怪癖：{c.quirks_and_habits || "—"}</p>
+                        </div>
+                      </details>
                     </div>
                     {canEdit ? (
                       <div className="flex min-w-[5.5rem] shrink-0 flex-col gap-2 self-start">

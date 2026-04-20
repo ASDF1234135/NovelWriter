@@ -291,9 +291,9 @@ export function StorySetupForm({
             readOnly={locked}
           />
         </div>
-        <div className="space-y-1">
+        <div className="space-y-1 rounded-xl border border-outline-variant/15 bg-surface-container-highest/40 p-3">
           <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <label className="auteur-label">作者補充（自由格式）</label>
+            <label className="auteur-label">作者補充（重要）</label>
             <span className={`font-mono text-xs ${notesWarn ? "text-tertiary" : "text-on-surface-variant"}`}>
               {notesLen} / ~{MACRO_NOTES_SOFT_MAX} 建議上限
               {notesWarn ? "（過長時系統會自動截短）" : ""}
@@ -331,9 +331,7 @@ export function StorySetupForm({
           </div>
         )}
         <div className="border-t border-outline-variant/10 pt-4">
-          <p className="mb-2 font-label text-[10px] font-bold uppercase tracking-wider text-secondary">
-            專案 JSON（故事 + 宏觀規劃）
-          </p>
+          <p className="font-label text-[10px] font-bold uppercase tracking-wider text-secondary">專案檔案（重要）</p>
           <input
             ref={importInputRef}
             type="file"
@@ -341,7 +339,7 @@ export function StorySetupForm({
             className="hidden"
             onChange={(e) => void handleImportProjectBundleFile(e)}
           />
-          <div className="flex flex-col gap-2 sm:flex-row">
+          <div className="mt-3 flex flex-col gap-2 sm:flex-row">
             <button
               type="button"
               className="btn-secondary flex-1 justify-center"

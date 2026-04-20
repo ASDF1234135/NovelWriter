@@ -25,7 +25,7 @@ export function AgentOutputView({ workflow, variant = "default" }: Props) {
     : "rounded-xl border border-outline-variant/10 bg-surface-container-low p-6 shadow-glow";
 
   return (
-    <section className={shell}>
+    <section className={`${shell} min-w-0`}>
       <h2 className="mb-3 font-headline text-sm font-bold uppercase tracking-wider text-secondary">撰寫過程紀錄</h2>
       {!workflow ? (
         <p className="font-body text-sm text-on-surface-variant">尚無執行紀錄。</p>
@@ -52,15 +52,17 @@ export function AgentOutputView({ workflow, variant = "default" }: Props) {
               <div ref={stepsEndRef} />
             </div>
           ) : (
-            <div className="grid gap-4 lg:grid-cols-2">
-              <article>
+            <div className="grid min-w-0 gap-4">
+              <article className="min-w-0">
                 <h3 className="mb-2 font-headline text-xs font-bold text-primary">目前狀態（完整）</h3>
-                <pre className="auteur-pre max-h-[360px] text-xs">{JSON.stringify(workflow.state, null, 2)}</pre>
+                <pre className="auteur-pre max-h-[320px] max-w-full overflow-auto whitespace-pre-wrap break-all text-xs">
+                  {JSON.stringify(workflow.state, null, 2)}
+                </pre>
               </article>
-              <article>
+              <article className="min-w-0">
                 <h3 className="mb-2 font-headline text-xs font-bold text-primary">步驟列表</h3>
                 <p className="mb-2 font-body text-xs text-on-surface-variant">連線時會自動更新。</p>
-                <div className="space-y-2">
+                <div className="max-h-[420px] min-w-0 space-y-2 overflow-auto pr-1">
                   {workflow.steps.map((step, index) => {
                     const isLatest = index === workflow.steps.length - 1;
                     const branch = routeDecisionLabel(step.route_decision || "");
@@ -74,7 +76,9 @@ export function AgentOutputView({ workflow, variant = "default" }: Props) {
                         <summary className={`cursor-pointer font-label text-xs ${isLatest ? "text-primary" : "text-on-surface-variant"}`}>
                           第 {step.step_index} 步 · {workflowAgentStepLabel(step.agent_name)} · 分支：{branch} · {statusZh}
                         </summary>
-                        <pre className="auteur-pre mt-2 max-h-[280px] text-[11px]">{JSON.stringify(step.output_payload_json, null, 2)}</pre>
+                        <pre className="auteur-pre mt-2 max-h-[280px] max-w-full overflow-auto whitespace-pre-wrap break-all text-[11px]">
+                          {JSON.stringify(step.output_payload_json, null, 2)}
+                        </pre>
                       </details>
                     );
                   })}
