@@ -137,6 +137,12 @@ class AgentWorkflowState(TypedDict):
     hitl_output_language_detail: NotRequired[str]
     hitl_expected_output_language: NotRequired[str]
     story_output_language: NotRequired[str]
+    pending_db_commit: NotRequired[dict[str, Any]]
+    commit_executed: NotRequired[bool]
+    failure_type: NotRequired[str]
+    timeout_bucket: NotRequired[str]
+    workflow_thread_id: NotRequired[str]
+    thread_reset_done: NotRequired[bool]
 
 
 class SafeAuthorPayload(BaseModel):
@@ -397,6 +403,12 @@ def build_initial_state(
         director_state_brief="",
         human_outline_conflict_notes=[],
         this_chapter_pacing_limit="",
+        pending_db_commit={},
+        commit_executed=False,
+        failure_type="",
+        timeout_bucket="",
+        workflow_thread_id=trace_id,
+        thread_reset_done=False,
     )
 
 
@@ -456,6 +468,12 @@ def normalize_workflow_state(state: dict[str, Any]) -> dict[str, Any]:
         "hitl_output_language_detail": "",
         "hitl_expected_output_language": "",
         "story_output_language": "zh-Hant",
+        "pending_db_commit": {},
+        "commit_executed": False,
+        "failure_type": "",
+        "timeout_bucket": "",
+        "workflow_thread_id": "",
+        "thread_reset_done": False,
     }
     for key, val in defaults.items():
         if key not in state:

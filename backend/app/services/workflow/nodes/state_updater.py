@@ -7,6 +7,7 @@ from app.domain.schema import (
     ChapterMemory,
     EdgeMutation,
     EdgeType,
+    EventLinkType,
     EventOutline,
     ExtractedEntity,
     ExtractedRelation,
@@ -28,6 +29,7 @@ from app.services.workflow.continuity import chapter_content_tail_snippet
 from app.services.workflow.context import WorkflowContext
 from app.services.workflow.event_normalization import (
     coalesce_over_fragmented_events,
+    flatten_event_links,
     is_standard_event_id,
     normalize_event_ai_flags,
     normalize_event_ids,
@@ -42,6 +44,7 @@ def run_state_updater(state: dict, context: WorkflowContext) -> dict:
     malformed_ids = [event.event_id for event in events if not is_standard_event_id(event.event_id, chapter_id=int(state["chapter_id"]))]
     if malformed_ids:
         events = normalize_event_ids(int(state["chapter_id"]), events).events
+    normalized_links = flatten_event_links(events)
     chapter_content = state["best_draft_content"] or state["current_draft"]
     graph_snapshot = context.graph_store.query_context(
         GraphQueryRequest(
@@ -102,25 +105,41 @@ def run_state_updater(state: dict, context: WorkflowContext) -> dict:
                 },
             )
         )
-        if event.caused_by_event_id:
-            mutations.append(
-                EdgeMutation(
-                    action="CREATE_EDGE",
-                    source_id=event.caused_by_event_id,
-                    relation_type=EdgeType.CAUSED,
-                    target_id=event.event_id,
-                    attributes={
-                        "valid_epoch": state["active_epoch_id"],
-                        "start_event_id": event.caused_by_event_id,
-                        "end_event_id": event.event_id,
-                        "is_truth": True,
-                        "is_public": True,
-                        "known_by": [],
-                        "holder": [],
-                        "context_details": f"{event.caused_by_event_id} caused {event.event_id}",
-                    },
-                )
+    seen_event_links: set[tuple[str, str, EventLinkType]] = set()
+    for link in normalized_links:
+        link_key = (link.target_event_id, link.source_event_id, link.link_type)
+        if link_key in seen_event_links:
+            continue
+        seen_event_links.add(link_key)
+        relation_type = (
+            EdgeType.CAUSED
+            if link.link_type == EventLinkType.CAUSAL
+            else EdgeType.HAPPENED_BEFORE
+        )
+        if link.target_event_id == link.source_event_id:
+            continue
+        mutations.append(
+            EdgeMutation(
+                action="CREATE_EDGE",
+                source_id=link.target_event_id,
+                relation_type=relation_type,
+                target_id=link.source_event_id,
+                attributes={
+                    "valid_epoch": state["active_epoch_id"],
+                    "start_event_id": link.target_event_id,
+                    "end_event_id": link.source_event_id,
+                    "is_truth": True,
+                    "is_public": True,
+                    "known_by": [],
+                    "holder": [],
+                    "context_details": (
+                        f"{link.target_event_id} caused {link.source_event_id}"
+                        if relation_type == EdgeType.CAUSED
+                        else f"{link.target_event_id} happened before {link.source_event_id}"
+                    ),
+                },
             )
+        )
 
     for resolved in resolved_entities.values():
         new_ids.add(resolved["node_id"])

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { WorkflowPayload } from "../../types";
 import { resumeNodeUserLabel as resumeLabelFromHitl } from "../hitl-panel/hitlCopy";
+import { useI18n } from "../../i18n/useI18n";
 import {
   hitlReasonTitle,
   workflowAgentStepLabel,
@@ -25,6 +26,7 @@ function asStringArray(v: unknown): string[] {
 }
 
 export function WorkflowMonitor({ workflow, variant = "default" }: Props) {
+  const { locale } = useI18n();
   const [alignmentOpen, setAlignmentOpen] = useState(false);
   const compact = variant === "compact";
   const shell = compact
@@ -34,8 +36,16 @@ export function WorkflowMonitor({ workflow, variant = "default" }: Props) {
   if (!workflow) {
     return (
       <section className={shell}>
-        <h2 className="mb-2 font-headline text-sm font-bold uppercase tracking-wider text-primary">章節撰寫進度</h2>
-        <p className="font-body text-sm text-on-surface-variant">尚未開始本章的自動撰寫流程。</p>
+        <h2 className="mb-2 font-headline text-sm font-bold uppercase tracking-wider text-primary">
+          {locale === "en" ? "Chapter Progress" : locale === "zh-Hans" ? "章节撰写进度" : "章節撰寫進度"}
+        </h2>
+        <p className="font-body text-sm text-on-surface-variant">
+          {locale === "en"
+            ? "Chapter workflow has not started."
+            : locale === "zh-Hans"
+              ? "尚未开始本章的自动撰写流程。"
+              : "尚未開始本章的自動撰寫流程。"}
+        </p>
       </section>
     );
   }
@@ -48,51 +58,66 @@ export function WorkflowMonitor({ workflow, variant = "default" }: Props) {
   const conflictNotes = asStringArray(state.human_outline_conflict_notes);
   const alignmentLog = String(state.alignment_log ?? "").trim();
   const directorBrief = String(state.director_state_brief ?? "").trim();
+  const failureType = String(state.failure_type ?? "");
+  const timeoutBucket = String(state.timeout_bucket ?? "");
+  const threadResetDone = state.thread_reset_done === true;
+  const commitExecuted = state.commit_executed === true;
 
   return (
     <section className={shell}>
       <h2 className="mb-4 flex items-center gap-2 font-headline text-sm font-bold uppercase tracking-wider text-primary">
         <span className="material-symbols-outlined text-base">monitoring</span>
-        {compact ? "本次執行" : "章節撰寫進度"}
+        {compact ? (locale === "en" ? "Current Run" : locale === "zh-Hans" ? "本次执行" : "本次執行") : locale === "en" ? "Chapter Progress" : locale === "zh-Hans" ? "章节撰写进度" : "章節撰寫進度"}
       </h2>
       <div className={`grid gap-3 ${compact ? "grid-cols-1 text-xs" : "grid-cols-2 md:grid-cols-4"}`}>
         <div>
-          <div className="font-label text-[10px] uppercase tracking-wider text-outline">執行編號</div>
+          <div className="font-label text-[10px] uppercase tracking-wider text-outline">{locale === "en" ? "Run ID" : locale === "zh-Hans" ? "执行编号" : "執行編號"}</div>
           <div className="break-all font-mono text-on-surface">{workflow.run.run_id}</div>
         </div>
         <div>
-          <div className="font-label text-[10px] uppercase tracking-wider text-outline">目前步驟</div>
+          <div className="font-label text-[10px] uppercase tracking-wider text-outline">{locale === "en" ? "Current Step" : locale === "zh-Hans" ? "当前步骤" : "目前步驟"}</div>
           <div className="text-on-surface">{workflowAgentStepLabel(agentRaw)}</div>
         </div>
         <div>
-          <div className="font-label text-[10px] uppercase tracking-wider text-outline">狀態</div>
+          <div className="font-label text-[10px] uppercase tracking-wider text-outline">{locale === "en" ? "Status" : locale === "zh-Hans" ? "状态" : "狀態"}</div>
           <div className="text-on-surface">{workflowRunStatusLabel(workflow.run.status)}</div>
           {!compact ? (
             <div className="text-xs text-on-surface-variant">
-              內部狀態：{workflowInternalStatusLabel(String(state.workflow_status ?? "-"))}
+              {locale === "en" ? "Internal: " : locale === "zh-Hans" ? "内部状态：" : "內部狀態："}
+              {workflowInternalStatusLabel(String(state.workflow_status ?? "-"))}
             </div>
           ) : null}
         </div>
         <div>
-          <div className="font-label text-[10px] uppercase tracking-wider text-outline">章節</div>
+          <div className="font-label text-[10px] uppercase tracking-wider text-outline">{locale === "en" ? "Chapter" : locale === "zh-Hans" ? "章节" : "章節"}</div>
           <div className="text-on-surface">{workflow.run.chapter_id}</div>
         </div>
       </div>
       {!compact ? (
         <div className="mt-4 flex flex-wrap gap-3 border-t border-outline-variant/10 pt-4 font-label text-xs text-on-surface-variant">
-          <span>視角角色：{String(state.pov_character_id ?? "-")}</span>
-          <span>時間段：{String(state.active_epoch_id ?? "-")}</span>
-          <span>目標里程碑：{String(state.target_anchor_id ?? "-")}</span>
-          <span>創作自由度：{String(state.ai_freedom_level ?? "—")}</span>
-          <span>大綱綁定：{String(state.outline_binding_mode ?? "—")}</span>
-          <span>閱讀評分：{String(state.last_reader_score ?? "-")}</span>
-          <span>暫停原因：{hitlReasonRaw ? hitlReasonTitle(hitlReasonRaw) : "—"}</span>
-          <span>接續位置：{resumeDisplay(String(state.resume_from ?? ""))}</span>
+          <span>{locale === "en" ? "POV Character" : locale === "zh-Hans" ? "视角角色" : "視角角色"}：{String(state.pov_character_id ?? "-")}</span>
+          <span>{locale === "en" ? "Epoch" : locale === "zh-Hans" ? "时间段" : "時間段"}：{String(state.active_epoch_id ?? "-")}</span>
+          <span>{locale === "en" ? "Target Anchor" : locale === "zh-Hans" ? "目标里程碑" : "目標里程碑"}：{String(state.target_anchor_id ?? "-")}</span>
+          <span>{locale === "en" ? "AI Freedom" : locale === "zh-Hans" ? "创作自由度" : "創作自由度"}：{String(state.ai_freedom_level ?? "—")}</span>
+          <span>{locale === "en" ? "Outline Binding" : locale === "zh-Hans" ? "大纲绑定" : "大綱綁定"}：{String(state.outline_binding_mode ?? "—")}</span>
+          <span>{locale === "en" ? "Reader Score" : locale === "zh-Hans" ? "阅读评分" : "閱讀評分"}：{String(state.last_reader_score ?? "-")}</span>
+          <span>{locale === "en" ? "Pause Reason" : locale === "zh-Hans" ? "暂停原因" : "暫停原因"}：{hitlReasonRaw ? hitlReasonTitle(hitlReasonRaw) : "—"}</span>
+          <span>{locale === "en" ? "Resume From" : locale === "zh-Hans" ? "接续位置" : "接續位置"}：{resumeDisplay(String(state.resume_from ?? ""))}</span>
+          {String(state.workflow_status ?? "") === "FAILED" ? (
+            <>
+              <span>失敗類型：{failureType || "ERROR"}</span>
+              <span>Timeout 分級：{timeoutBucket || "—"}</span>
+              <span>資料提交：{commitExecuted ? "已提交" : "未提交"}</span>
+              <span>Thread Reset：{threadResetDone ? "完成" : "未完成"}</span>
+            </>
+          ) : null}
         </div>
       ) : null}
       {!compact && directorBrief ? (
         <div className="mt-4 rounded-lg border border-outline-variant/15 bg-surface-container-highest/40 px-3 py-2">
-          <p className="font-label text-[10px] uppercase tracking-wider text-outline">Director 狀態簡報</p>
+          <p className="font-label text-[10px] uppercase tracking-wider text-outline">
+            {locale === "en" ? "Director Brief" : locale === "zh-Hans" ? "Director 状态简报" : "Director 狀態簡報"}
+          </p>
           <p className="mt-1 whitespace-pre-wrap font-body text-xs text-on-surface">{directorBrief.slice(0, 1200)}{directorBrief.length > 1200 ? "…" : ""}</p>
         </div>
       ) : null}

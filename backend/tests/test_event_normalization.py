@@ -1,4 +1,4 @@
-from app.domain.schema import BeatOutline, EventOutline
+from app.domain.schema import BeatOutline, EventLink, EventLinkType, EventOutline
 from app.services.workflow.event_normalization import (
     coalesce_over_fragmented_events,
     normalize_beats,
@@ -10,11 +10,18 @@ from app.services.workflow.event_normalization import (
 def test_normalize_event_ids_rewrites_legacy_ids_and_causal_links() -> None:
     events = [
         EventOutline(event_id="event_ai_invention_04", description="A", caused_by_event_id=None),
-        EventOutline(event_id="evt_custom", description="B", caused_by_event_id="event_ai_invention_04"),
+        EventOutline(
+            event_id="evt_custom",
+            description="B",
+            caused_by_event_id="event_ai_invention_04",
+            links=[EventLink(target_event_id="event_ai_invention_04", link_type=EventLinkType.CAUSAL)],
+        ),
     ]
     result = normalize_event_ids(12, events)
     assert [event.event_id for event in result.events] == ["event_ch12_01", "event_ch12_02"]
     assert result.events[1].caused_by_event_id == "event_ch12_01"
+    assert result.events[1].links[0].target_event_id == "event_ch12_01"
+    assert result.events[1].links[0].link_type == EventLinkType.CAUSAL
     assert set(result.malformed_ids) == {"event_ai_invention_04", "evt_custom"}
 
 

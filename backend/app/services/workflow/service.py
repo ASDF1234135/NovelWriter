@@ -60,6 +60,7 @@ from app.services.workflow.output_language import (
     strip_leading_chapter_heading_line,
 )
 from app.services.workflow.graph import build_chapter_graph
+from app.services.workflow.graph import WorkflowNodeTimeoutError
 from app.services.workflow.hitl_payload import build_hitl_context_payload, should_expose_hitl_context
 from app.services.workflow.outline_binding import compute_outline_binding_mode
 
@@ -272,17 +273,6 @@ class ChapterSummaryRegenerateFailed(RuntimeError):
 logger = logging.getLogger(__name__)
 
 
-def _existing_cast_node_ids(story: dict) -> list[str]:
-    out: list[str] = []
-    for raw in story.get("cast_json") or []:
-        if not isinstance(raw, dict):
-            continue
-        node_id = str(raw.get("node_id") or "").strip()
-        if node_id:
-            out.append(node_id)
-    return out
-
-
 def _validate_macro_plan_put(body: MacroPlanPut) -> None:
     vol_by_id = {v.volume_id: v for v in body.volumes}
     if len(vol_by_id) != len(body.volumes):
@@ -469,7 +459,6 @@ class WorkflowService:
         story = self.story_repository.get_story(story_id)
         if not story:
             raise KeyError(f"Story not found: {story_id}")
-        stale_cast_ids = _existing_cast_node_ids(story)
         raw_lang = str(story.get("output_language") or "").strip()
         ol: StoryOutputLanguage = normalize_output_language(raw_lang)
         story_input = StoryInput(
@@ -492,7 +481,10 @@ class WorkflowService:
         self.story_repository.store_anchors(story_id, anchors)
         protagonist_id = next((c.node_id for c in cast if c.role == "protagonist"), "")
         self.story_repository.update_story_cast(story_id, cast, protagonist_id)
-        self.graph_store.clear_macro_cast_characters(story_id, include_node_ids=stale_cast_ids)
+        self.graph_store.replace_cast_characters(
+            story_id,
+            keep_cast_node_ids=[member.node_id for member in cast],
+        )
         cast_mutations = [
             NodeMutation(
                 action="CREATE_NODE",
@@ -590,7 +582,6 @@ class WorkflowService:
             raise StoryConfigurationLockedError(
                 "故事已有章節工作流程紀錄，無法再修改宏觀規劃；請在未執行 run_chapter 前調整。"
             )
-        stale_cast_ids = _existing_cast_node_ids(story)
         _validate_macro_plan_put(body)
         try:
             self.story_repository.update_story_bible_json(story_id, dict(body.bible or {}))
@@ -613,7 +604,10 @@ class WorkflowService:
             if not protagonist_id:
                 protagonist_id = next((c.node_id for c in body.cast if c.role == "protagonist"), "")
             self.story_repository.update_story_cast(story_id, list(body.cast), protagonist_id)
-            self.graph_store.clear_macro_cast_characters(story_id, include_node_ids=stale_cast_ids)
+            self.graph_store.replace_cast_characters(
+                story_id,
+                keep_cast_node_ids=[member.node_id for member in body.cast],
+            )
             cast_mutations = [
                 NodeMutation(
                     action="CREATE_NODE",
@@ -734,6 +728,11 @@ class WorkflowService:
             ai_freedom_level=freedom,
             outline_binding_mode=binding_mode,
         )
+        initial_state["workflow_thread_id"] = str(uuid4())
+        initial_state["thread_reset_done"] = False
+        initial_state["commit_executed"] = False
+        initial_state["failure_type"] = ""
+        initial_state["timeout_bucket"] = ""
         _ol = normalize_output_language(str(story.get("output_language") or ""))
         initial_state["story_output_language"] = _ol
         initial_state["target_word_count"] = default_chapter_target_words(_ol)
@@ -845,6 +844,16 @@ class WorkflowService:
                 state["workflow_status"] = WorkflowStatus.FAILED.value
                 state["requires_hitl"] = False
                 state["hitl_reason"] = str(exc)[:500]
+                state["failure_type"] = "TIMEOUT" if isinstance(exc, WorkflowNodeTimeoutError) else "ERROR"
+                if isinstance(exc, WorkflowNodeTimeoutError):
+                    node_name = str(exc.node_name or "").strip().lower()
+                    state["timeout_bucket"] = "llm" if node_name in {"director", "planner", "author", "reader"} else "logic"
+                else:
+                    state["timeout_bucket"] = ""
+                state["thread_reset_done"] = True
+                state["workflow_thread_id"] = str(uuid4())
+                state["pending_db_commit"] = {}
+                state["commit_executed"] = False
                 self.workflow_repository.update_run(run_id, state)
             except Exception:
                 logger.exception(

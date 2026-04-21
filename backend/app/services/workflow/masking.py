@@ -354,6 +354,7 @@ def compact_plan_supervisor_payload_for_prompt(payload: SafeSupervisorPayload) -
                 "event_id": event.event_id,
                 "description": (event.description or "")[:PLAN_SUPERVISOR_EVENT_DESC_CAP],
                 "caused_by_event_id": event.caused_by_event_id,
+                "links": [link.model_dump(mode="json") for link in list(event.links or [])[:4]],
             }
         )
     beats: list[str] = []

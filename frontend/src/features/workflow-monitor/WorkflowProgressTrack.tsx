@@ -1,5 +1,6 @@
 import { FLOW_STEPS } from "../hitl-panel/hitlCopy";
 import type { WorkflowPayload } from "../../types";
+import { useI18n } from "../../i18n/useI18n";
 
 type Props = {
   workflow: WorkflowPayload | null;
@@ -7,10 +8,10 @@ type Props = {
 };
 
 const STAGE_GROUPS = [
-  { id: "planning", label: "規劃", stepIds: ["director", "graph_rag", "planner", "plan_supervisor", "logic_alignment"] },
-  { id: "writing", label: "撰寫", stepIds: ["author", "draft_supervisor", "reader"] },
-  { id: "archive", label: "歸檔", stepIds: ["extraction_gate"] },
-  { id: "finish", label: "收尾", stepIds: ["b_story_resolve", "state_updater"] },
+  { id: "planning", label: { "zh-Hant": "規劃", "zh-Hans": "规划", en: "Planning" }, stepIds: ["director", "graph_rag", "planner", "plan_supervisor", "logic_alignment"] },
+  { id: "writing", label: { "zh-Hant": "撰寫", "zh-Hans": "撰写", en: "Writing" }, stepIds: ["author", "draft_supervisor", "reader"] },
+  { id: "archive", label: { "zh-Hant": "歸檔", "zh-Hans": "归档", en: "Archive" }, stepIds: ["extraction_gate"] },
+  { id: "finish", label: { "zh-Hant": "收尾", "zh-Hans": "收尾", en: "Finish" }, stepIds: ["b_story_resolve", "state_updater"] },
 ] as const;
 
 function getActiveStepIndex(workflow: WorkflowPayload | null): number {
@@ -27,6 +28,7 @@ function getActiveStepIndex(workflow: WorkflowPayload | null): number {
 }
 
 export function WorkflowProgressTrack({ workflow, compact = false }: Props) {
+  const { locale } = useI18n();
   const activeIndex = getActiveStepIndex(workflow);
   const groups = STAGE_GROUPS.map((group) => {
     const indexes = group.stepIds
@@ -40,7 +42,9 @@ export function WorkflowProgressTrack({ workflow, compact = false }: Props) {
 
   return (
     <section className={`rounded-xl border border-outline-variant/15 bg-surface-container-low/60 ${compact ? "p-3" : "p-4"}`}>
-      <p className="mb-2 font-label text-[10px] font-bold uppercase tracking-wider text-secondary">Workflow Progress</p>
+      <p className="mb-2 font-label text-[10px] font-bold uppercase tracking-wider text-secondary">
+        {locale === "en" ? "Workflow Progress" : locale === "zh-Hans" ? "工作流进度" : "工作流程進度"}
+      </p>
       <ol className={`grid ${compact ? "grid-cols-2 gap-2" : "grid-cols-2 gap-3 md:grid-cols-4"}`}>
         {groups.map((group) => (
           <li
@@ -54,7 +58,7 @@ export function WorkflowProgressTrack({ workflow, compact = false }: Props) {
             }`}
           >
             {group.done ? "✓ " : ""}
-            {group.label}
+            {group.label[locale]}
           </li>
         ))}
       </ol>

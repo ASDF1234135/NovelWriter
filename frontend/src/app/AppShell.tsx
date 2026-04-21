@@ -1,20 +1,11 @@
 import type { ReactNode } from "react";
+import { useI18n } from "../i18n/useI18n";
 
 export type AppView = "library" | "setup" | "write" | "review" | "graph" | "export";
 export type TaskFlowStageId = "projectSetup" | "planStructure" | "writeChapter" | "reviewFix" | "export";
 
 type NavItem = { id: AppView; label: string; icon: string };
 type TaskFlowStage = { id: TaskFlowStageId; label: string; done: boolean };
-
-const libraryNav: NavItem = { id: "library", label: "故事庫", icon: "auto_stories" };
-
-const storyScopedNav: NavItem[] = [
-  { id: "setup", label: "設定與規劃", icon: "edit_note" },
-  { id: "write", label: "章節執行", icon: "play_circle" },
-  { id: "review", label: "檢閱與修正", icon: "fact_check" },
-  { id: "graph", label: "一致性圖譜", icon: "hub" },
-  { id: "export", label: "匯出", icon: "upload_file" },
-];
 
 type Props = {
   activeView: AppView;
@@ -41,7 +32,7 @@ function navButtonClass(active: boolean, enabled: boolean): string {
 }
 
 function asideButtonClass(active: boolean, enabled: boolean): string {
-  const base = "flex w-full items-center gap-3 py-3 text-left transition-all";
+  const base = "flex w-full items-center gap-3 py-3 text-left transition-[background-color,color,opacity,transform]";
   if (!enabled) {
     return `${base} cursor-not-allowed px-6 text-on-surface/25 opacity-50`;
   }
@@ -62,8 +53,17 @@ export function AppShell({
   activeStage,
   workflowMiniStatus,
 }: Props) {
+  const { locale, setLocale, t } = useI18n();
   const gatedViews: AppView[] = ["write", "review", "graph", "export"];
   const needsStory = (v: AppView) => gatedViews.includes(v);
+  const libraryNav: NavItem = { id: "library", label: t("common.storyLibrary"), icon: "auto_stories" };
+  const storyScopedNav: NavItem[] = [
+    { id: "setup", label: t("common.settingsAndPlan"), icon: "edit_note" },
+    { id: "write", label: t("common.chapterRun"), icon: "play_circle" },
+    { id: "review", label: t("common.reviewFix"), icon: "fact_check" },
+    { id: "graph", label: t("common.graph"), icon: "hub" },
+    { id: "export", label: t("common.export"), icon: "upload_file" },
+  ];
 
   function tryNavigate(v: AppView) {
     if (needsStory(v) && !hasSelectedStory) {
@@ -74,7 +74,7 @@ export function AppShell({
 
   const storyHeading =
     storySectionLabel.trim() ||
-    (showStorySection && !hasSelectedStory ? "新故事" : hasSelectedStory ? "目前故事" : "");
+    (showStorySection && !hasSelectedStory ? t("common.newStory") : hasSelectedStory ? t("common.currentStory") : "");
 
   return (
     <div className="relative min-h-screen bg-background text-on-surface">
@@ -100,7 +100,7 @@ export function AppShell({
                   <button
                     key={item.id}
                     type="button"
-                    title={!enabled ? "請先從故事庫選擇一則故事" : undefined}
+                    title={!enabled ? t("common.selectStoryFirst") : undefined}
                     onClick={() => tryNavigate(item.id)}
                     disabled={!enabled}
                     className={navButtonClass(activeView === item.id, enabled)}
@@ -112,6 +112,16 @@ export function AppShell({
             : null}
         </nav>
         <div className="flex items-center gap-3">
+          <select
+            aria-label="UI language selector"
+            className="rounded border border-outline-variant/30 bg-surface-container-low px-2 py-1 text-xs text-on-surface"
+            value={locale}
+            onChange={(e) => setLocale(e.target.value as typeof locale)}
+          >
+            <option value="zh-Hant">{t("lang.zhHant")}</option>
+            <option value="zh-Hans">{t("lang.zhHans")}</option>
+            <option value="en">{t("lang.en")}</option>
+          </select>
           <span className="material-symbols-outlined text-primary">auto_fix_high</span>
         </div>
       </header>
@@ -138,7 +148,7 @@ export function AppShell({
             })}
           </ol>
           <div className="rounded-lg border border-outline-variant/20 bg-surface-container-highest/50 px-3 py-1.5 font-body text-xs text-on-surface-variant">
-            工作流程狀態：<span className="font-semibold text-on-surface">{workflowMiniStatus}</span>
+            {t("common.workflowStatus")}：<span className="font-semibold text-on-surface">{workflowMiniStatus}</span>
           </div>
         </div>
       </div>
@@ -147,20 +157,20 @@ export function AppShell({
         <aside className="sticky top-[7.5rem] hidden h-[calc(100vh-7.5rem)] w-64 shrink-0 flex-col gap-1 self-start border-r border-outline-variant/10 bg-[#161d2f] py-8 font-headline text-sm font-medium text-primary shadow-glowSm lg:flex">
           <div className="mb-8 px-6">
             <div className="text-lg font-bold text-secondary">Auteur AI</div>
-            <div className="text-[10px] uppercase tracking-[0.2em] text-on-surface/50">創作引擎</div>
+            <div className="text-[10px] uppercase tracking-[0.2em] text-on-surface/50">Creative Engine</div>
           </div>
 
           <button
             type="button"
             onClick={() => tryNavigate("library")}
-            className={`flex items-center gap-3 px-6 py-3 text-left transition-all ${
+            className={`flex items-center gap-3 px-6 py-3 text-left transition-[background-color,color,opacity,transform] ${
               activeView === "library"
                 ? "rounded-r-full border-l-4 border-primary bg-primary/10 text-primary"
                 : "text-on-surface/50 hover:bg-on-surface/5 hover:text-on-surface"
             }`}
           >
             <span className="material-symbols-outlined text-lg">{libraryNav.icon}</span>
-            故事庫
+            {libraryNav.label}
           </button>
 
           {showStorySection ? (
@@ -175,7 +185,7 @@ export function AppShell({
                     <button
                       key={item.id}
                       type="button"
-                      title={!enabled ? "請先從故事庫選擇一則故事" : undefined}
+                      title={!enabled ? t("common.selectStoryFirst") : undefined}
                       onClick={() => tryNavigate(item.id)}
                       disabled={!enabled}
                       className={asideButtonClass(activeView === item.id, enabled)}
@@ -190,12 +200,12 @@ export function AppShell({
           ) : null}
         </aside>
 
-        <main className="min-w-0 flex-1 overflow-x-hidden">{children}</main>
+        <main className="min-w-0 flex-1 overflow-x-hidden bg-background">{children}</main>
       </div>
 
       <nav className="flex flex-wrap items-center justify-center gap-3 border-t border-outline-variant/10 bg-surface-container-low py-3 font-headline text-xs font-semibold uppercase tracking-widest text-on-surface/70 lg:hidden">
         <button type="button" onClick={() => tryNavigate("library")} className={activeView === "library" ? "text-primary" : ""}>
-          故事庫
+          {libraryNav.label}
         </button>
         {showStorySection
           ? storyScopedNav.map((item) => {
@@ -205,7 +215,7 @@ export function AppShell({
                   key={item.id}
                   type="button"
                   disabled={!enabled}
-                  title={!enabled ? "請先從故事庫選擇一則故事" : undefined}
+                  title={!enabled ? t("common.selectStoryFirst") : undefined}
                   onClick={() => tryNavigate(item.id)}
                   className={activeView === item.id ? "text-primary" : enabled ? "" : "opacity-40"}
                 >
@@ -217,7 +227,7 @@ export function AppShell({
       </nav>
 
       <footer className="border-t border-outline-variant/10 py-6 text-center font-label text-xs uppercase tracking-widest text-outline">
-        Auteur AI · 敘事輔助
+        {locale === "en" ? "Auteur AI · Narrative Assistant" : locale === "zh-Hans" ? "Auteur AI · 叙事辅助" : "Auteur AI · 敘事輔助"}
       </footer>
     </div>
   );

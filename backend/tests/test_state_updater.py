@@ -3,6 +3,9 @@ import pytest
 from app.domain.schema import (
     EdgeMutation,
     EdgeType,
+    EventLink,
+    EventLinkOrigin,
+    EventLinkType,
     EventOutline,
     ExtractedEntity,
     ExtractedRelation,
@@ -187,10 +190,10 @@ def test_state_updater_extracts_entities_relations_and_memory_chunks(workflow_co
 
     output = run_state_updater(state, workflow_context)
 
-    caused_edge = next(
+    temporal_edge = next(
         mutation
         for mutation in output["mutations"]
-        if mutation["action"] == "CREATE_EDGE" and mutation["relation_type"] == "CAUSED"
+        if mutation["action"] == "CREATE_EDGE" and mutation["relation_type"] == "HAPPENED_BEFORE"
     )
     participated_edge = next(
         mutation
@@ -204,8 +207,8 @@ def test_state_updater_extracts_entities_relations_and_memory_chunks(workflow_co
         if document["metadata"]["memory_type"] == "chapter_summary"
     )
 
-    assert caused_edge["source_id"] == "event_ch2_01"
-    assert caused_edge["target_id"] == "event_ch2_02"
+    assert temporal_edge["source_id"] == "event_ch2_01"
+    assert temporal_edge["target_id"] == "event_ch2_02"
     assert participated_edge["source_id"] == "char_kaelen"
     assert participated_edge["target_id"] == "event_ch2_01"
     assert "chapter_summary" in memory_types
@@ -235,13 +238,48 @@ def test_state_updater_normalizes_nonstandard_event_ids(workflow_context: Workfl
     event_nodes = [
         row for row in output["mutations"] if row["action"] in {"CREATE_NODE", "UPDATE_NODE"} and row.get("node_type") == "EVENT"
     ]
-    caused_edge = next(
-        row for row in output["mutations"] if row["action"] == "CREATE_EDGE" and row["relation_type"] == "CAUSED"
+    temporal_edge = next(
+        row
+        for row in output["mutations"]
+        if row["action"] == "CREATE_EDGE" and row["relation_type"] == "HAPPENED_BEFORE"
     )
     event_node_ids = {row["node_id"] for row in event_nodes}
     assert event_node_ids == {"event_ch5_01", "event_ch5_02"}
-    assert caused_edge["source_id"] == "event_ch5_01"
-    assert caused_edge["target_id"] == "event_ch5_02"
+    assert temporal_edge["source_id"] == "event_ch5_01"
+    assert temporal_edge["target_id"] == "event_ch5_02"
+
+
+def test_state_updater_emits_caused_for_typed_causal_links(workflow_context: WorkflowContext) -> None:
+    workflow_context.graph_store.seed_story("story_causal")
+    state = {
+        "story_id": "story_causal",
+        "chapter_id": 3,
+        "active_epoch_id": "epoch_present",
+        "pov_character_id": "char_public_observer",
+        "narrative_directive": "測試因果連結",
+        "ground_truth_events": [
+            EventOutline(event_id="event_ch3_01", description="A").model_dump(mode="json"),
+            EventOutline(
+                event_id="event_ch3_02",
+                description="B",
+                links=[
+                    EventLink(
+                        target_event_id="event_ch3_01",
+                        link_type=EventLinkType.CAUSAL,
+                        origin=EventLinkOrigin.HUMAN_GROUND_TRUTH,
+                    )
+                ],
+            ).model_dump(mode="json"),
+        ],
+        "current_draft": "測試草稿",
+        "best_draft_content": "",
+    }
+    output = run_state_updater(state, workflow_context)
+    caused_edge = next(
+        row for row in output["mutations"] if row["action"] == "CREATE_EDGE" and row["relation_type"] == "CAUSED"
+    )
+    assert caused_edge["source_id"] == "event_ch3_01"
+    assert caused_edge["target_id"] == "event_ch3_02"
 
 
 def test_private_truth_edge_includes_pov_in_known_by() -> None:

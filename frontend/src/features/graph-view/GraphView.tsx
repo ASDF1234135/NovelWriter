@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { GraphSnapshot } from "../../types";
 import { LEGEND_NODE_TYPES, NODE_TYPE_STYLES } from "./nodeTypeStyles";
 import { UniverseGraphAntv } from "./UniverseGraphAntv";
+import { useI18n } from "../../i18n/useI18n";
 
 type Props = {
   graph: GraphSnapshot | null;
@@ -21,18 +22,18 @@ function edgeLabel(e: RawEdge): string {
   return `${e.source_id ?? "?"} —[${rel}]→ ${e.target_id ?? "?"}`;
 }
 
-const NODE_TYPE_ZH: Record<string, string> = {
-  CHARACTER: "角色",
-  PERSONA: "人格／分身",
-  EPOCH: "時間段",
-  LOCATION: "地點",
-  ITEM: "物品",
-  EVENT: "事件",
-  CONCEPT: "概念",
+const NODE_TYPE_ZH: Record<string, { "zh-Hant": string; "zh-Hans": string; en: string }> = {
+  CHARACTER: { "zh-Hant": "角色", "zh-Hans": "角色", en: "Character" },
+  PERSONA: { "zh-Hant": "人格／分身", "zh-Hans": "人格/分身", en: "Persona" },
+  EPOCH: { "zh-Hant": "時間段", "zh-Hans": "时间段", en: "Epoch" },
+  LOCATION: { "zh-Hant": "地點", "zh-Hans": "地点", en: "Location" },
+  ITEM: { "zh-Hant": "物品", "zh-Hans": "物品", en: "Item" },
+  EVENT: { "zh-Hant": "事件", "zh-Hans": "事件", en: "Event" },
+  CONCEPT: { "zh-Hant": "概念", "zh-Hans": "概念", en: "Concept" },
 };
 
-function nodeTypeLegend(t: string): string {
-  return NODE_TYPE_ZH[t] ?? t;
+function nodeTypeLegend(t: string, locale: "zh-Hant" | "zh-Hans" | "en"): string {
+  return NODE_TYPE_ZH[t]?.[locale] ?? t;
 }
 
 function toNodeId(v: unknown): string {
@@ -83,6 +84,7 @@ function bfsNeighborhood(nodeIds: Set<string>, edges: RawEdge[], centerId: strin
 }
 
 export function GraphView({ graph, protagonistCharacterId }: Props) {
+  const { locale } = useI18n();
   const nodes = (graph?.nodes ?? []) as RawNode[];
   const edges = (graph?.edges ?? []) as RawEdge[];
   const [viewMode, setViewMode] = useState<ViewMode>("all");
@@ -221,31 +223,44 @@ export function GraphView({ graph, protagonistCharacterId }: Props) {
   const nodesWithEdges = ((filteredGraph.nodes ?? []) as RawNode[]).filter((n) =>
     connectedNodeIds.has(String(n.node_id ?? "")),
   );
-  const hasCharacterInGraph = nodesWithEdges.some((n) => String(n.node_type).toUpperCase() === "CHARACTER");
+  const displayNodes = pruneIsolatedNodes
+    ? nodesWithEdges
+    : ((filteredGraph.nodes ?? []) as RawNode[]);
+  const hasCharacterInGraph = displayNodes.some((n) => String(n.node_type).toUpperCase() === "CHARACTER");
 
   return (
     <section className="canvas-grid min-h-[60vh] rounded-xl border border-outline-variant/10 bg-background p-6 md:p-10">
-      <h2 className="mb-2 font-headline text-2xl font-bold text-on-surface">世界觀圖譜</h2>
+      <h2 className="mb-2 font-headline text-2xl font-bold text-on-surface">
+        {locale === "en" ? "World Graph" : locale === "zh-Hans" ? "世界观图谱" : "世界觀圖譜"}
+      </h2>
       <p className="mb-6 max-w-3xl font-body text-sm text-on-surface-variant">
-        互動式戰術沙盤：可切換視角、時間切片與情報層級；畫面上最多繪製 400 條關聯線以利閱讀。
+        {locale === "en"
+          ? "Interactive tactical canvas with view modes and time slicing; up to 400 edges are rendered for readability."
+          : locale === "zh-Hans"
+            ? "互动式战术沙盘：可切换视角、时间切片与信息层级；最多绘制 400 条关联线。"
+            : "互動式戰術沙盤：可切換視角、時間切片與情報層級；畫面上最多繪製 400 條關聯線以利閱讀。"}
       </p>
       {!graph ? (
-        <p className="text-on-surface-variant">尚未載入圖譜。</p>
+        <p className="text-on-surface-variant">
+          {locale === "en" ? "Graph not loaded yet." : locale === "zh-Hans" ? "尚未加载图谱。" : "尚未載入圖譜。"}
+        </p>
       ) : (
         <div className="grid gap-6 lg:grid-cols-2">
           <article className="lg:col-span-2">
             <div className="mb-4 grid gap-3 rounded-xl border border-outline-variant/15 bg-surface-container-low p-3 md:grid-cols-6">
               <label className="flex flex-col gap-1 md:col-span-2">
-                <span className="font-label text-[11px] uppercase tracking-wider text-on-surface-variant">視角模式</span>
+                <span className="font-label text-[11px] uppercase tracking-wider text-on-surface-variant">
+                  {locale === "en" ? "View Mode" : locale === "zh-Hans" ? "视角模式" : "視角模式"}
+                </span>
                 <select
                   className="rounded-lg border border-outline-variant/20 bg-surface-container-lowest px-2 py-2 text-sm"
                   value={viewMode}
                   onChange={(e) => setViewMode(e.target.value as ViewMode)}
                 >
-                  <option value="all">全域總覽</option>
-                  <option value="ego">主角中心（Ego）</option>
-                  <option value="location-item">地理與資產</option>
-                  <option value="epoch">時空切片</option>
+                  <option value="all">{locale === "en" ? "Global Overview" : locale === "zh-Hans" ? "全局总览" : "全域總覽"}</option>
+                  <option value="ego">{locale === "en" ? "Ego View" : locale === "zh-Hans" ? "主角中心（Ego）" : "主角中心（Ego）"}</option>
+                  <option value="location-item">{locale === "en" ? "Location & Assets" : locale === "zh-Hans" ? "地理与资产" : "地理與資產"}</option>
+                  <option value="epoch">{locale === "en" ? "Time Slice" : locale === "zh-Hans" ? "时空切片" : "時空切片"}</option>
                 </select>
               </label>
 
@@ -253,24 +268,26 @@ export function GraphView({ graph, protagonistCharacterId }: Props) {
                 <>
                   <label className="flex flex-col gap-1 md:col-span-2">
                     <span className="font-label text-[11px] uppercase tracking-wider text-on-surface-variant">
-                      搜尋中心節點（角色/別名）
+                      {locale === "en" ? "Search Center Node" : locale === "zh-Hans" ? "搜索中心节点（角色/别名）" : "搜尋中心節點（角色/別名）"}
                     </span>
                     <input
                       type="text"
                       className="rounded-lg border border-outline-variant/20 bg-surface-container-lowest px-2 py-2 text-sm"
                       value={egoQuery}
                       onChange={(e) => setEgoQuery(e.target.value)}
-                      placeholder="輸入角色名或 aliases"
+                      placeholder={locale === "en" ? "Type character name or aliases" : locale === "zh-Hans" ? "输入角色名或 aliases" : "輸入角色名或 aliases"}
                     />
                   </label>
                   <label className="flex flex-col gap-1">
-                    <span className="font-label text-[11px] uppercase tracking-wider text-on-surface-variant">中心節點</span>
+                    <span className="font-label text-[11px] uppercase tracking-wider text-on-surface-variant">
+                      {locale === "en" ? "Center Node" : locale === "zh-Hans" ? "中心节点" : "中心節點"}
+                    </span>
                     <select
                       className="rounded-lg border border-outline-variant/20 bg-surface-container-lowest px-2 py-2 text-sm"
                       value={selectedEgoCenterId}
                       onChange={(e) => setSelectedEgoCenterId(e.target.value)}
                     >
-                      <option value="">請選擇</option>
+                      <option value="">{locale === "en" ? "Select..." : locale === "zh-Hans" ? "请选择" : "請選擇"}</option>
                       {egoCandidates.map((c) => (
                         <option key={c.id} value={c.id}>
                           {c.name}
@@ -294,9 +311,9 @@ export function GraphView({ graph, protagonistCharacterId }: Props) {
 
               {viewMode === "epoch" ? (
                 <label className="flex flex-col gap-1 md:col-span-4">
-                  <span className="font-label text-[11px] uppercase tracking-wider text-on-surface-variant">
-                    Epoch 滑桿（依 order_index 排序）
-                  </span>
+                    <span className="font-label text-[11px] uppercase tracking-wider text-on-surface-variant">
+                      {locale === "en" ? "Epoch Slider" : locale === "zh-Hans" ? "Epoch 滑杆（按 order_index）" : "Epoch 滑桿（依 order_index 排序）"}
+                    </span>
                   <input
                     type="range"
                     min={0}
@@ -307,7 +324,13 @@ export function GraphView({ graph, protagonistCharacterId }: Props) {
                     disabled={!epochOptions.length}
                   />
                   <div className="text-xs text-on-surface-variant">
-                    {epochOptions.length ? `目前：${epochOptions[activeEpochIndex]?.label ?? "—"}` : "目前沒有 EPOCH 節點"}
+                    {epochOptions.length
+                      ? `${locale === "en" ? "Current" : locale === "zh-Hans" ? "当前" : "目前"}：${epochOptions[activeEpochIndex]?.label ?? "—"}`
+                      : locale === "en"
+                        ? "No EPOCH node found"
+                        : locale === "zh-Hans"
+                          ? "目前没有 EPOCH 节点"
+                          : "目前沒有 EPOCH 節點"}
                   </div>
                 </label>
               ) : null}
@@ -318,28 +341,60 @@ export function GraphView({ graph, protagonistCharacterId }: Props) {
                   checked={pruneIsolatedNodes}
                   onChange={(e) => setPruneIsolatedNodes(e.target.checked)}
                 />
-                <span className="text-sm text-on-surface-variant">清理無邊界點（Orphan）</span>
+                <span className="text-sm text-on-surface-variant">
+                  {locale === "en" ? "Prune orphan nodes" : locale === "zh-Hans" ? "清理孤立节点（Orphan）" : "清理無邊界點（Orphan）"}
+                </span>
               </label>
             </div>
 
             <h3 className="mb-3 font-headline text-sm font-bold uppercase tracking-wider text-secondary">
-              概覽 · {nodesWithEdges.length} 個節點 · {drawnEdges.length} 條關聯
+              {locale === "en"
+                ? `Overview · ${displayNodes.length} nodes · ${drawnEdges.length} edges`
+                : locale === "zh-Hans"
+                  ? `概览 · ${displayNodes.length} 个节点 · ${drawnEdges.length} 条关联`
+                  : `概覽 · ${displayNodes.length} 個節點 · ${drawnEdges.length} 條關聯`}
             </h3>
-            {nodesWithEdges.length === 0 ? (
+            {displayNodes.length === 0 ? (
               <p className="text-on-surface-variant">
-                {viewMode === "ego" && !selectedEgoCenterId ? "請先在上方選擇 Ego 中心節點。" : "目前沒有節點。"}
+                {viewMode === "ego" && !selectedEgoCenterId
+                  ? locale === "en"
+                    ? "Please select an ego center node first."
+                    : locale === "zh-Hans"
+                      ? "请先在上方选择 Ego 中心节点。"
+                      : "請先在上方選擇 Ego 中心節點。"
+                  : locale === "en"
+                    ? "No nodes currently."
+                    : locale === "zh-Hans"
+                      ? "目前没有节点。"
+                      : "目前沒有節點。"}
               </p>
             ) : (
               <>
                 <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-2">
                   <span className="font-label text-[10px] uppercase tracking-wider text-on-surface-variant">
                     {viewMode === "ego"
-                      ? "佈局：同心/放射（Ego）"
+                      ? locale === "en"
+                        ? "Layout: Concentric/Radial (Ego)"
+                        : locale === "zh-Hans"
+                          ? "布局：同心/放射（Ego）"
+                          : "佈局：同心/放射（Ego）"
                       : viewMode === "location-item"
-                        ? "佈局：力導向/層次（Location & Item）"
+                        ? locale === "en"
+                          ? "Layout: Force/Hierarchical (Location & Item)"
+                          : locale === "zh-Hans"
+                            ? "布局：力导向/层次（Location & Item）"
+                            : "佈局：力導向/層次（Location & Item）"
                         : hasCharacterInGraph
-                          ? "佈局：放射狀（角色優先）"
-                          : "佈局：力導向"}
+                          ? locale === "en"
+                            ? "Layout: Radial (Character-first)"
+                            : locale === "zh-Hans"
+                              ? "布局：放射状（角色优先）"
+                              : "佈局：放射狀（角色優先）"
+                          : locale === "en"
+                            ? "Layout: Force-directed"
+                            : locale === "zh-Hans"
+                              ? "布局：力导向"
+                              : "佈局：力導向"}
                   </span>
                   <div className="flex flex-wrap items-center gap-3 border-l border-outline-variant/20 pl-4">
                     {LEGEND_NODE_TYPES.map((t) => {
@@ -353,17 +408,18 @@ export function GraphView({ graph, protagonistCharacterId }: Props) {
                             className="inline-block h-3 w-3 shrink-0 rounded-full border"
                             style={{ background: s.fill, borderColor: s.stroke }}
                           />
-                          {nodeTypeLegend(t)}
+                          {nodeTypeLegend(t, locale)}
                         </span>
                       );
                     })}
-                    <span className="text-on-surface-variant/70">其他 → 灰</span>
+                    <span className="text-on-surface-variant/70">{locale === "en" ? "Others -> Gray" : locale === "zh-Hans" ? "其他 -> 灰色" : "其他 → 灰"}</span>
                   </div>
                 </div>
                 <UniverseGraphAntv
                   graph={filteredGraph}
                   protagonistCharacterId={viewMode === "ego" ? selectedEgoCenterId || protagonistCharacterId : protagonistCharacterId}
                   viewMode={viewMode}
+                  pruneIsolatedNodes={pruneIsolatedNodes}
                   onSetEgoCenter={(nodeId) => {
                     setViewMode("ego");
                     setSelectedEgoCenterId(nodeId);
@@ -374,18 +430,18 @@ export function GraphView({ graph, protagonistCharacterId }: Props) {
             )}
           </article>
           <article>
-            <h3 className="mb-2 font-headline text-xs font-bold text-primary">節點</h3>
+            <h3 className="mb-2 font-headline text-xs font-bold text-primary">{locale === "en" ? "Nodes" : locale === "zh-Hans" ? "节点" : "節點"}</h3>
             <div className="max-h-80 overflow-auto rounded-xl border border-outline-variant/15 bg-surface-container-low">
               <table className="w-full border-collapse text-left text-xs">
                 <thead className="sticky top-0 bg-surface-container-high">
                   <tr>
-                    <th className="p-2 font-label text-outline">內部編號</th>
-                    <th className="p-2 font-label text-outline">類型</th>
-                    <th className="p-2 font-label text-outline">名稱</th>
+                    <th className="p-2 font-label text-outline">{locale === "en" ? "ID" : locale === "zh-Hans" ? "内部编号" : "內部編號"}</th>
+                    <th className="p-2 font-label text-outline">{locale === "en" ? "Type" : locale === "zh-Hans" ? "类型" : "類型"}</th>
+                    <th className="p-2 font-label text-outline">{locale === "en" ? "Name" : locale === "zh-Hans" ? "名称" : "名稱"}</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {nodesWithEdges.map((n) => (
+                  {displayNodes.map((n) => (
                     <tr key={String(n.node_id)} className="border-t border-outline-variant/10">
                       <td className="p-2 font-mono text-on-surface-variant">{String(n.node_id)}</td>
                       <td className="p-2">{String(n.node_type)}</td>
@@ -397,14 +453,14 @@ export function GraphView({ graph, protagonistCharacterId }: Props) {
             </div>
           </article>
           <article>
-            <h3 className="mb-2 font-headline text-xs font-bold text-primary">關聯</h3>
+            <h3 className="mb-2 font-headline text-xs font-bold text-primary">{locale === "en" ? "Edges" : locale === "zh-Hans" ? "关联" : "關聯"}</h3>
             <div className="max-h-80 overflow-auto rounded-xl border border-outline-variant/15 bg-surface-container-low">
               <table className="w-full border-collapse text-left text-xs">
                 <thead className="sticky top-0 bg-surface-container-high">
                   <tr>
-                    <th className="p-2 font-label text-outline">來源</th>
-                    <th className="p-2 font-label text-outline">關係</th>
-                    <th className="p-2 font-label text-outline">指向</th>
+                    <th className="p-2 font-label text-outline">{locale === "en" ? "Source" : locale === "zh-Hans" ? "来源" : "來源"}</th>
+                    <th className="p-2 font-label text-outline">{locale === "en" ? "Relation" : locale === "zh-Hans" ? "关系" : "關係"}</th>
+                    <th className="p-2 font-label text-outline">{locale === "en" ? "Target" : locale === "zh-Hans" ? "指向" : "指向"}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -420,9 +476,11 @@ export function GraphView({ graph, protagonistCharacterId }: Props) {
             </div>
           </article>
           <article className="lg:col-span-2">
-            <h3 className="mb-2 font-headline text-xs font-bold text-primary">原始資料（進階）</h3>
+            <h3 className="mb-2 font-headline text-xs font-bold text-primary">{locale === "en" ? "Raw Data (Advanced)" : locale === "zh-Hans" ? "原始数据（进阶）" : "原始資料（進階）"}</h3>
             <details className="rounded-xl border border-outline-variant/15 bg-surface-container-lowest p-4">
-              <summary className="cursor-pointer font-label text-sm text-on-surface">展開節點與關聯清單</summary>
+              <summary className="cursor-pointer font-label text-sm text-on-surface">
+                {locale === "en" ? "Expand nodes and edges" : locale === "zh-Hans" ? "展开节点与关联清单" : "展開節點與關聯清單"}
+              </summary>
               <div className="mt-4 grid gap-4 md:grid-cols-2">
                 <pre className="auteur-pre max-h-96 text-[11px]">{JSON.stringify(filteredGraph.nodes, null, 2)}</pre>
                 <pre className="auteur-pre max-h-96 text-[11px]">{JSON.stringify(filteredGraph.edges, null, 2)}</pre>

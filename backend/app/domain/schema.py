@@ -612,12 +612,66 @@ class MilestoneSummaryOutput(BaseModel):
     milestone_summary: str = Field(..., min_length=20, max_length=900)
 
 
+class EventLinkType(str, Enum):
+    CAUSAL = "CAUSAL"
+    TEMPORAL = "TEMPORAL"
+
+
+class EventLinkOrigin(str, Enum):
+    HUMAN_GROUND_TRUTH = "HUMAN_GROUND_TRUTH"
+    AI_INVENTION = "AI_INVENTION"
+
+
+class EventLink(BaseModel):
+    target_event_id: str
+    link_type: EventLinkType = EventLinkType.TEMPORAL
+    origin: Optional[EventLinkOrigin] = None
+
+
 class EventOutline(BaseModel):
+
     event_id: str
     description: str
     caused_by_event_id: Optional[str] = None
+    links: list[EventLink] = Field(default_factory=list)
     is_ai_invention: bool = False
     invention_scope: str = ""
+
+    @model_validator(mode="after")
+    def sync_legacy_cause_and_links(self) -> "EventOutline":
+        normalized_links: list[EventLink] = []
+        for link in self.links:
+            target = (link.target_event_id or "").strip()
+            if not target:
+                continue
+            normalized_links.append(
+                EventLink(
+                    target_event_id=target,
+                    link_type=link.link_type,
+                    origin=link.origin,
+                )
+            )
+        self.links = normalized_links
+
+        legacy_target = (self.caused_by_event_id or "").strip()
+        if legacy_target and not any(
+            link.target_event_id == legacy_target for link in self.links
+        ):
+            self.links.append(
+                EventLink(
+                    target_event_id=legacy_target,
+                    link_type=EventLinkType.TEMPORAL,
+                    origin=(
+                        EventLinkOrigin.AI_INVENTION
+                        if self.is_ai_invention
+                        else EventLinkOrigin.HUMAN_GROUND_TRUTH
+                    ),
+                )
+            )
+
+        if not legacy_target and self.links:
+            self.caused_by_event_id = self.links[0].target_event_id
+        return self
 
 
 class BeatOutline(BaseModel):

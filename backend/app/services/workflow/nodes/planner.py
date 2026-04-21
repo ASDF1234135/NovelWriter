@@ -6,6 +6,9 @@ from app.core.config import get_settings
 from app.domain.schema import (
     BStorySeed,
     BStoryType,
+    EventLink,
+    EventLinkOrigin,
+    EventLinkType,
     EventOutline,
     NodeType,
     PlannerOutput,
@@ -192,11 +195,18 @@ def run_planner(state: dict, context: WorkflowContext) -> tuple[dict, dict, int,
                 event_id=f"event_ch{state['chapter_id']}_01",
                 description=f"The protagonist at {start_location} receives a new clue pointing toward {anchor_hint} and takes new action.",
                 caused_by_event_id=None,
+                links=[],
             ),
             EventOutline(
                 event_id=f"event_ch{state['chapter_id']}_02",
                 description=f"Under pressure the protagonist makes a risky push that changes the situation; chapter ends at {end_location}.",
-                caused_by_event_id=f"event_ch{state['chapter_id']}_01",
+                links=[
+                    EventLink(
+                        target_event_id=f"event_ch{state['chapter_id']}_01",
+                        link_type=EventLinkType.TEMPORAL,
+                        origin=EventLinkOrigin.HUMAN_GROUND_TRUTH,
+                    )
+                ],
             ),
         ],
         narrative_script=(
@@ -382,6 +392,9 @@ def _build_planner_prompt(payload: SafePlannerPayload) -> str:
         "- Event granularity (hard): default-merge continuous fights or continuous dialogue into one macro EVENT; "
         "split only when goals, dominant actors, scene location, or outcome phase changes.\n"
         "- Do not explode one continuous action beat into micro-events (e.g. dodge/punch/counter/roll); summarize as one event.\n"
+        "- Each ground_truth_events item must emit nested links[] only (no separate top-level event_links array). "
+        "Each link requires target_event_id and link_type in {CAUSAL, TEMPORAL}. "
+        "Do not infer CAUSAL from sequence alone; if only order is known, use TEMPORAL.\n"
         "- narrative_script must clearly separate what continues from the prior chapter versus new actions, discoveries, conflict, and end-of-chapter shift this chapter.\n"
         "- You MUST output chapter_start_location; if no hard cut, default-continue last_known_location.\n"
         "- If chapter_start_location differs from last_known_location, ground_truth_events and narrative_script must first plan movement, extraction, travel, scene change, or other extractable transition.\n"

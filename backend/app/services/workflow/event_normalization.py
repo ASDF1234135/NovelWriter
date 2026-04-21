@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from app.domain.schema import BeatOutline, EventOutline
+from app.domain.schema import BeatOutline, EventLink, EventLinkOrigin, EventLinkType, EventOutline
 
 AI_INVENTION_TAG = "[AI_INVENTION]"
 EVENT_ID_PATTERN = re.compile(r"^event_ch(?P<chapter>\d+)_(?P<seq>\d{2})$")
@@ -15,6 +15,14 @@ class EventNormalizationResult:
     events: list[EventOutline]
     id_map: dict[str, str]
     malformed_ids: list[str]
+
+
+@dataclass(frozen=True)
+class NormalizedEventLink:
+    source_event_id: str
+    target_event_id: str
+    link_type: EventLinkType
+    origin: EventLinkOrigin
 
 
 def is_standard_event_id(event_id: str, *, chapter_id: int | None = None) -> bool:
@@ -46,6 +54,7 @@ def normalize_event_ai_flags(events: list[EventOutline]) -> list[EventOutline]:
                 event_id=event.event_id,
                 description=clean_desc,
                 caused_by_event_id=event.caused_by_event_id,
+                links=list(event.links),
                 is_ai_invention=bool(event.is_ai_invention or inferred_flag),
                 invention_scope=(event.invention_scope or inferred_scope).strip(),
             )
@@ -100,6 +109,7 @@ def _merge_event_group(group: list[EventOutline]) -> EventOutline:
         event_id=last.event_id,
         description=merged_description[:300],
         caused_by_event_id=first.caused_by_event_id,
+        links=list(first.links),
         is_ai_invention=any(row.is_ai_invention for row in group),
         invention_scope=last.invention_scope or first.invention_scope,
     )
@@ -121,20 +131,55 @@ def normalize_event_ids(chapter_id: int, events: list[EventOutline]) -> EventNor
                 event_id=normalized_id,
                 description=event.description,
                 caused_by_event_id=event.caused_by_event_id,
+                links=list(event.links),
                 is_ai_invention=event.is_ai_invention,
                 invention_scope=event.invention_scope,
             )
         )
     rewritten: list[EventOutline] = []
+    normalized_ids = {row.event_id for row in normalized_events}
     for event in normalized_events:
         caused_by = (event.caused_by_event_id or "").strip()
+        rewritten_links: list[EventLink] = []
+        for link in event.links:
+            target = (id_map.get(link.target_event_id, link.target_event_id) or "").strip()
+            if not target:
+                continue
+            if target not in normalized_ids:
+                continue
+            rewritten_links.append(EventLink(target_event_id=target, link_type=link.link_type, origin=link.origin))
         rewritten.append(
             EventOutline(
                 event_id=event.event_id,
                 description=event.description,
                 caused_by_event_id=id_map.get(caused_by, caused_by) or None,
+                links=rewritten_links,
                 is_ai_invention=event.is_ai_invention,
                 invention_scope=event.invention_scope,
             )
         )
     return EventNormalizationResult(events=rewritten, id_map=id_map, malformed_ids=malformed_ids)
+
+
+def flatten_event_links(events: list[EventOutline]) -> list[NormalizedEventLink]:
+    by_id = {event.event_id: event for event in events}
+    out: list[NormalizedEventLink] = []
+    for event in events:
+        source_origin = (
+            EventLinkOrigin.AI_INVENTION
+            if event.is_ai_invention
+            else EventLinkOrigin.HUMAN_GROUND_TRUTH
+        )
+        for link in event.links:
+            target_event = by_id.get(link.target_event_id)
+            if target_event is None:
+                continue
+            out.append(
+                NormalizedEventLink(
+                    source_event_id=event.event_id,
+                    target_event_id=link.target_event_id,
+                    link_type=link.link_type,
+                    origin=link.origin or source_origin,
+                )
+            )
+    return out

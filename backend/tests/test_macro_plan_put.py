@@ -3,8 +3,12 @@
 import pytest
 
 from app.domain.schema import (
+    EdgeMutation,
+    EdgeType,
     MacroPlanAnchorBody,
     MacroPlanPut,
+    NodeMutation,
+    NodeType,
     StoryCastMemberStored,
     StoryInput,
     VolumePlan,
@@ -105,6 +109,58 @@ def test_macro_compile_clears_imported_foreign_cast_ids(tmp_path) -> None:
     svc.macro_compile(sid)
 
     assert "story_old_mc_77" not in svc.graph_store.story_nodes[sid]
+
+
+def test_macro_compile_removes_non_cast_character_nodes_and_edges(tmp_path) -> None:
+    svc = _service(str(tmp_path / "stale_character.sqlite3"))
+    sid = svc.create_story(
+        StoryInput(title="T", premise="p", bible={}, target_total_words=30_000),
+    )["story_id"]
+    macro = svc.macro_compile(sid)
+    stale_character_id = "legacy_orphan_character"
+    stale_edge_id = "legacy_orphan_edge"
+    first_cast_id = macro["cast"][0]["node_id"]
+
+    svc.graph_store.apply_mutations(
+        sid,
+        [
+            NodeMutation(
+                action="CREATE_NODE",
+                node_id=stale_character_id,
+                node_type=NodeType.CHARACTER,
+                properties={
+                    "canonical_name": "舊角色",
+                    "description": "舊流程遺留",
+                    "aliases": [],
+                    "is_alive": True,
+                },
+            ),
+            EdgeMutation(
+                action="CREATE_EDGE",
+                edge_id=stale_edge_id,
+                source_id=stale_character_id,
+                relation_type=EdgeType.HAS_RELATION,
+                target_id=first_cast_id,
+                attributes={
+                    "valid_epoch": "epoch_present",
+                    "start_event_id": "event_seed",
+                    "is_truth": True,
+                    "is_public": True,
+                },
+            ),
+        ],
+    )
+
+    svc.macro_compile(sid)
+    graph = svc.graph_store.dump_story_graph(sid)
+    node_ids = {node.node_id for node in graph.nodes}
+    edge_ids = {edge.edge_id for edge in graph.edges}
+    latest_cast_ids = {member["node_id"] for member in svc.get_macro_snapshot(sid)["cast"]}
+
+    assert stale_character_id not in node_ids
+    assert stale_edge_id not in edge_ids
+    assert "char_public_observer" in node_ids
+    assert latest_cast_ids.issubset(node_ids)
 
 
 def test_start_run_chapter_author_plan_in_state(tmp_path) -> None:

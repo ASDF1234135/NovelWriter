@@ -1,14 +1,24 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import type { ReactElement } from "react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { HitlPanel } from "./HitlPanel";
+import { I18nProvider } from "../../i18n/I18nProvider";
 
 const noopAsync = vi.fn().mockResolvedValue(undefined);
 
+function renderPanel(node: ReactElement) {
+  return render(<I18nProvider>{node}</I18nProvider>);
+}
+
 describe("HitlPanel", () => {
+  beforeEach(() => {
+    window.localStorage.setItem("nb.ui.locale", "zh-Hant");
+  });
+
   it("draft loop: dashboard decision calls onDecision and does not show plan-outline panel by default", async () => {
     const onDecision = vi.fn().mockResolvedValue(undefined);
 
-    render(
+    renderPanel(
       <HitlPanel
         workflow={{
           run: {
@@ -42,7 +52,7 @@ describe("HitlPanel", () => {
   });
 
   it("plan loop: shows situation copy and outline panel when selected", async () => {
-    render(
+    renderPanel(
       <HitlPanel
         workflow={{
           run: {
@@ -71,11 +81,11 @@ describe("HitlPanel", () => {
     expect(screen.getByText("大綱反覆未過審")).toBeInTheDocument();
     expect(screen.getByText(/審核意見：大綱與錨點衝突/)).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "手動調整事件大綱" })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "修改章節內文" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "新增事件卡片" })).toBeInTheDocument();
   });
 
   it("resolution tactic cooldown: shows director solution like plan family", async () => {
-    render(
+    renderPanel(
       <HitlPanel
         workflow={{
           run: {
@@ -104,7 +114,7 @@ describe("HitlPanel", () => {
 
   it("alignment rules required: shows dedicated block and submits state injection patch", async () => {
     const onStateInjection = vi.fn().mockResolvedValue(undefined);
-    render(
+    renderPanel(
       <HitlPanel
         workflow={{
           run: {
@@ -148,7 +158,7 @@ describe("HitlPanel", () => {
 
   it("output language mismatch: shows situation and dashboard options", async () => {
     const onDecision = vi.fn().mockResolvedValue(undefined);
-    render(
+    renderPanel(
       <HitlPanel
         workflow={{
           run: {
@@ -191,9 +201,9 @@ describe("HitlPanel", () => {
     expect(onDecision).toHaveBeenCalledWith("language_force_continue");
   });
 
-  it("outline JSON parse error shows message and does not call onOutlineEdit", async () => {
+  it("outline submit uses preview gate before calling onOutlineEdit", async () => {
     const onOutlineEdit = vi.fn().mockResolvedValue(undefined);
-    render(
+    renderPanel(
       <HitlPanel
         workflow={{
           run: {
@@ -214,18 +224,42 @@ describe("HitlPanel", () => {
         onDraftEdit={noopAsync}
       />,
     );
-    const outlineTa = screen
-      .getAllByRole("textbox")
-      .find((el) => (el as HTMLTextAreaElement).value.includes("event_manual_01")) as HTMLTextAreaElement;
-    fireEvent.change(outlineTa, { target: { value: "not json" } });
-    fireEvent.click(screen.getByRole("button", { name: "套用大綱並繼續" }));
-    expect(await screen.findByText(/JSON 格式不正確/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "預覽並套用大綱" }));
+    expect(await screen.findByText("送出前預覽：事件大綱變更")).toBeInTheDocument();
     expect(onOutlineEdit).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "確認套用大綱" }));
+    expect(onOutlineEdit).toHaveBeenCalledTimes(1);
+  });
+
+  it("switches to expert mode tab", () => {
+    renderPanel(
+      <HitlPanel
+        workflow={{
+          run: {
+            run_id: "run-mode",
+            story_id: "story-1",
+            chapter_id: 1,
+            status: "WAITING_HITL",
+            requires_hitl: true,
+            hitl_reason: "Extraction_Gate_Failed",
+            hitl_decision_mode: "MANUAL_EDIT",
+          },
+          state: { pending_hitl_options: [], resume_from: "extraction_gate" },
+          steps: [],
+        }}
+        onDecision={noopAsync}
+        onOutlineEdit={noopAsync}
+        onStateInjection={noopAsync}
+        onDraftEdit={noopAsync}
+      />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "專家模式" }));
+    expect(screen.getByRole("tab", { name: "專家模式" })).toHaveAttribute("aria-selected", "true");
   });
 
   it("busy disables one-click decision buttons", () => {
     const onDecision = vi.fn();
-    render(
+    renderPanel(
       <HitlPanel
         busy
         workflow={{
@@ -255,7 +289,7 @@ describe("HitlPanel", () => {
 
   it("panic button sends ABORT_AND_RESTART decision", async () => {
     const onDecision = vi.fn().mockResolvedValue(undefined);
-    render(
+    renderPanel(
       <HitlPanel
         workflow={{
           run: {

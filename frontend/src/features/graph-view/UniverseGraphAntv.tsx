@@ -14,6 +14,8 @@ type Props = {
   /** Prefer this node as radial center when present in the graph. */
   protagonistCharacterId?: string;
   viewMode?: "all" | "ego" | "location-item" | "epoch";
+  /** When false, keep orphan nodes visible. */
+  pruneIsolatedNodes?: boolean;
   /** Switch parent to Ego mode and center on this node. */
   onSetEgoCenter?: (nodeId: string) => void;
 };
@@ -60,6 +62,7 @@ export function UniverseGraphAntv({
   graph,
   protagonistCharacterId,
   viewMode = "all",
+  pruneIsolatedNodes = true,
   onSetEgoCenter,
 }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -184,15 +187,17 @@ export function UniverseGraphAntv({
       connectedNodeIds.add(String(e.source));
       connectedNodeIds.add(String(e.target));
     }
-    const connected = mappedNodes.filter((n) => connectedNodeIds.has(String(n.id)));
+    const safeNodes = pruneIsolatedNodes
+      ? mappedNodes.filter((n) => connectedNodeIds.has(String(n.id)))
+      : mappedNodes;
 
-    const safeNodeIdSet = new Set(connected.map((n) => String(n.id)));
+    const safeNodeIdSet = new Set(safeNodes.map((n) => String(n.id)));
     const safeEdges = slicedEdges.filter(
       (e) => safeNodeIdSet.has(String(e.source)) && safeNodeIdSet.has(String(e.target)),
     );
 
-    const hasCharacterNode = connected.some((n) => String(n.node_type).toUpperCase() === "CHARACTER");
-    const focusId = pickRadialFocusNode(connected, protagonistCharacterId);
+    const hasCharacterNode = safeNodes.some((n) => String(n.node_type).toUpperCase() === "CHARACTER");
+    const focusId = pickRadialFocusNode(safeNodes, protagonistCharacterId);
 
     let layoutCfg: Record<string, unknown>;
     if (viewMode === "ego" && focusId) {
@@ -235,8 +240,8 @@ export function UniverseGraphAntv({
       };
     }
 
-    return { safeNodes: connected, safeEdges, layoutCfg };
-  }, [graph, protagonistCharacterId, viewMode]);
+    return { safeNodes, safeEdges, layoutCfg };
+  }, [graph, protagonistCharacterId, viewMode, pruneIsolatedNodes]);
 
   useEffect(() => {
     const container = containerRef.current;

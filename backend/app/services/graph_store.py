@@ -29,6 +29,8 @@ from app.domain.schema import (
     RuleNode,
 )
 
+RESERVED_CHARACTER_NODE_IDS: frozenset[str] = frozenset({"char_public_observer"})
+
 
 def _tags_from_storage(props: dict[str, Any]) -> list[str]:
     raw = props.get("tags")
@@ -102,6 +104,10 @@ class GraphStore(Protocol):
 
     def clear_macro_cast_characters(self, story_id: str, include_node_ids: Iterable[str] = ()) -> None:
         """Remove macro cast CHARACTER nodes by story prefix and explicit node ids."""
+        ...
+
+    def replace_cast_characters(self, story_id: str, keep_cast_node_ids: Iterable[str] = ()) -> None:
+        """Keep only reserved + current cast CHARACTER nodes for this story."""
         ...
 
     def list_enforced_rules_for_context(
@@ -254,6 +260,28 @@ class InMemoryGraphStore:
             ):
                 del edges[eid]
 
+    def replace_cast_characters(self, story_id: str, keep_cast_node_ids: Iterable[str] = ()) -> None:
+        self.seed_story(story_id)
+        keep_ids = {str(nid).strip() for nid in keep_cast_node_ids if str(nid).strip()}
+        keep_ids.update(RESERVED_CHARACTER_NODE_IDS)
+        nodes = self.story_nodes[story_id]
+        removed_ids: set[str] = set()
+        for nid in list(nodes.keys()):
+            node = nodes[nid]
+            if node.node_type != NodeType.CHARACTER:
+                continue
+            if nid in keep_ids:
+                continue
+            removed_ids.add(nid)
+            del nodes[nid]
+        if not removed_ids:
+            return
+        edges = self.story_edges[story_id]
+        for eid in list(edges.keys()):
+            edge = edges[eid]
+            if edge.source_id in removed_ids or edge.target_id in removed_ids:
+                del edges[eid]
+
     def remove_story(self, story_id: str) -> None:
         self.story_nodes.pop(story_id, None)
         self.story_edges.pop(story_id, None)
@@ -360,6 +388,24 @@ class Neo4jGraphStore:
                     story_id=story_id,
                     prefix=prefix,
                     extra_ids=extra_ids,
+                )
+
+        self._run_with_retry(operation)
+
+    def replace_cast_characters(self, story_id: str, keep_cast_node_ids: Iterable[str] = ()) -> None:
+        keep_ids = {str(nid).strip() for nid in keep_cast_node_ids if str(nid).strip()}
+        keep_ids.update(RESERVED_CHARACTER_NODE_IDS)
+
+        def operation() -> None:
+            with self.driver.session(database=self.database) as session:
+                session.run(
+                    """
+                    MATCH (n:StoryNode:CHARACTER {story_id: $story_id})
+                    WHERE NOT n.node_id IN $keep_ids
+                    DETACH DELETE n
+                    """,
+                    story_id=story_id,
+                    keep_ids=sorted(keep_ids),
                 )
 
         self._run_with_retry(operation)

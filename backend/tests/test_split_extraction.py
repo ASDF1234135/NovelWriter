@@ -6,6 +6,9 @@ import pytest
 
 from app.domain.schema import (
     ChapterExtractionOutput,
+    EventLink,
+    EventLinkType,
+    ChapterMemory,
     ChapterMemoryExtractionOutput,
     EntityExtractionOutput,
     EventOutline,
@@ -28,6 +31,7 @@ from app.services.vector_store import InMemoryVectorStore
 from app.services.workflow.context import WorkflowContext
 from app.core.config import get_settings
 from app.services.workflow.extraction import (
+    _validation_gate,
     build_extraction_context,
     canonicalize_entity_candidates,
     extract_chapter_artifacts,
@@ -187,7 +191,6 @@ def test_relation_extractor_batches_canonical_entities_with_small_batch_size(mon
     """With N=2, five entities should trigger three relation_extractor JSON calls."""
     monkeypatch.setenv("NOVEL_BUILDER_EXTRACTION_RELATION_ENTITY_BATCH_SIZE", "2")
     get_settings.cache_clear()
-
     class MultiEntityCountingFake(FakeSplitLLMClient):
         def __init__(self) -> None:
             self.relation_calls = 0
@@ -278,3 +281,82 @@ def test_relation_extractor_batches_canonical_entities_with_small_batch_size(mon
     assert len(output.relations) == 1
 
     get_settings.cache_clear()
+
+
+def test_validation_gate_rejects_unbacked_caused_between_ground_truth_events() -> None:
+    state = {
+        "chapter_id": 1,
+        "active_epoch_id": "epoch_present",
+        "pov_character_id": "char_public_observer",
+    }
+    events = [
+        EventOutline(event_id="event_ch1_01", description="A"),
+        EventOutline(
+            event_id="event_ch1_02",
+            description="B",
+            links=[
+                EventLink(
+                    target_event_id="event_ch1_01",
+                    link_type=EventLinkType.TEMPORAL,
+                )
+            ],
+        ),
+    ]
+    output = ChapterExtractionOutput(
+        entities=[],
+        relations=[
+            ExtractedRelation(
+                source_node_id="event_ch1_01",
+                relation_type=EdgeType.CAUSED,
+                target_node_id="event_ch1_02",
+                context_details="unsupported causal edge",
+                is_truth=True,
+                is_public=True,
+            )
+        ],
+        chapter_memory=ChapterMemory(
+            summary="s",
+            unresolved_threads=[],
+            notable_entities=[],
+            latest_location="",
+        ),
+    )
+    validated = _validation_gate(output, state, GraphSnapshot(nodes=[], edges=[]), events)
+    assert validated.relations == []
+
+
+def test_validation_gate_allows_caused_when_ai_invention_involved() -> None:
+    state = {
+        "chapter_id": 1,
+        "active_epoch_id": "epoch_present",
+        "pov_character_id": "char_public_observer",
+    }
+    events = [
+        EventOutline(event_id="event_ch1_01", description="A"),
+        EventOutline(
+            event_id="event_ch1_02",
+            description="B",
+            is_ai_invention=True,
+        ),
+    ]
+    output = ChapterExtractionOutput(
+        entities=[],
+        relations=[
+            ExtractedRelation(
+                source_node_id="event_ch1_01",
+                relation_type=EdgeType.CAUSED,
+                target_node_id="event_ch1_02",
+                context_details="ai invention branch",
+                is_truth=True,
+                is_public=False,
+            )
+        ],
+        chapter_memory=ChapterMemory(
+            summary="s",
+            unresolved_threads=[],
+            notable_entities=[],
+            latest_location="",
+        ),
+    )
+    validated = _validation_gate(output, state, GraphSnapshot(nodes=[], edges=[]), events)
+    assert len(validated.relations) == 1

@@ -55,6 +55,7 @@ import type {
 } from "../types";
 import { AppShell, type AppView, type TaskFlowStageId } from "./AppShell";
 import { mergeMacroBibles } from "../features/macro-plan/macroPlanHelpers";
+import { useI18n } from "../i18n/useI18n";
 
 /** Same heuristic as backend OUTLINE_MIN_CHARS_FOR_FULL_BINDING — UX hint only. */
 const OUTLINE_FULL_BINDING_MIN_CHARS = 100;
@@ -416,6 +417,7 @@ function downloadJsonFile(filename: string, payload: unknown) {
 }
 
 export default function App() {
+  const { locale } = useI18n();
   const navigate = useNavigate();
   const location = useLocation();
   const [viewState, setViewState] = useState<AppView>(() => pathToView(location.pathname));
@@ -441,6 +443,7 @@ export default function App() {
   const [writingPreamble, setWritingPreamble] = useState<WritingPreambleResponse | null>(null);
   const [preamblePanelOpen, setPreamblePanelOpen] = useState(false);
   const [writePanelTab, setWritePanelTab] = useState<"progress" | "logs">("progress");
+  const [uiBusyVisible, setUiBusyVisible] = useState(false);
   const [regenSummaryBusyChapter, setRegenSummaryBusyChapter] = useState<number | null>(null);
   const [configVersion, setConfigVersion] = useState(0);
   const [hasExportedChapter, setHasExportedChapter] = useState(false);
@@ -488,6 +491,15 @@ export default function App() {
       workflowEventsUnsubRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    if (!busy) {
+      setUiBusyVisible(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setUiBusyVisible(true), 120);
+    return () => window.clearTimeout(timer);
+  }, [busy]);
 
   useEffect(() => {
     if (!storyId && (view === "write" || view === "review" || view === "graph" || view === "export")) {
@@ -582,14 +594,23 @@ export default function App() {
 
   const storySummary = useMemo(() => {
     if (!macroData) {
-      return "尚未完成世界觀編譯。";
+      return locale === "en" ? "World compile not completed yet." : locale === "zh-Hans" ? "尚未完成世界观编译。" : "尚未完成世界觀編譯。";
     }
     const volumes = macroData.volumes ?? [];
     const anchors = macroData.anchors ?? [];
     const cast = macroData.cast ?? [];
-    const castPart = cast.length > 0 ? ` · 人物 ${cast.length} 位` : "";
+    const castPart =
+      cast.length > 0
+        ? locale === "en"
+          ? ` · Cast ${cast.length}`
+          : locale === "zh-Hans"
+            ? ` · 人物 ${cast.length} 位`
+            : ` · 人物 ${cast.length} 位`
+        : "";
+    if (locale === "en") return `Volumes ${volumes.length} · Milestones ${anchors.length}${castPart}`;
+    if (locale === "zh-Hans") return `分卷 ${volumes.length} · 里程碑 ${anchors.length}${castPart}`;
     return `分卷 ${volumes.length} · 里程碑 ${anchors.length}${castPart}`;
-  }, [macroData]);
+  }, [locale, macroData]);
 
   const preambleHasNonLlmSummary = useMemo(() => {
     if (!writingPreamble || chapterId <= 1) return false;
@@ -760,7 +781,11 @@ export default function App() {
     try {
       if (!configurationLocked && isStoryConfigDirty(storyConfigSnapshot, persistedStoryConfig) && storyConfigSnapshot) {
         const confirmed = window.confirm(
-          "偵測到未儲存的故事設定（包含輸出語言）。是否先儲存設定再執行 compile？",
+          locale === "en"
+            ? "Unsaved story settings detected (including output language). Save settings before running compile?"
+            : locale === "zh-Hans"
+              ? "检测到未保存的故事设置（含输出语言）。是否先保存设置再执行编译？"
+              : "偵測到未儲存的故事設定（包含輸出語言）。是否先儲存設定再執行 compile？",
         );
         if (!confirmed) {
           setNotice("已取消 compile；請先儲存設定後再試。");
@@ -991,12 +1016,45 @@ export default function App() {
     if (!storyId || configurationLocked) return;
     const { story: parsedStory, macro_plan: parsedMacroRaw } = parseProjectBundleJson(jsonText);
     const parsedMacro = parsedMacroRaw ? namespaceMacroPlanIdsForStory(parsedMacroRaw, storyId) : undefined;
-    const modeLabel = mode === "replace" ? "覆蓋" : "合併";
-    const storySummary = parsedStory ? `故事：${parsedStory.title}` : "（無故事區塊）";
+    const modeLabel =
+      mode === "replace"
+        ? locale === "en"
+          ? "Replace"
+          : locale === "zh-Hans"
+            ? "覆盖"
+            : "覆蓋"
+        : locale === "en"
+          ? "Merge"
+          : locale === "zh-Hans"
+            ? "合并"
+            : "合併";
+    const storySummary = parsedStory
+      ? locale === "en"
+        ? `Story: ${parsedStory.title}`
+        : `故事：${parsedStory.title}`
+      : locale === "en"
+        ? "(No story block)"
+        : locale === "zh-Hans"
+          ? "（无故事区块）"
+          : "（無故事區塊）";
     const macroSummary = parsedMacro
-      ? `宏觀：分卷 ${parsedMacro.volumes.length} · 里程碑 ${parsedMacro.anchors.length} · 人物 ${parsedMacro.cast.length}`
-      : "（無宏觀區塊）";
-    const proceed = window.confirm(`即將匯入專案 JSON（${modeLabel}）\n${storySummary}\n${macroSummary}\n\n確定要繼續嗎？`);
+      ? locale === "en"
+        ? `Macro: Volumes ${parsedMacro.volumes.length} · Milestones ${parsedMacro.anchors.length} · Cast ${parsedMacro.cast.length}`
+        : locale === "zh-Hans"
+          ? `宏观：分卷 ${parsedMacro.volumes.length} · 里程碑 ${parsedMacro.anchors.length} · 人物 ${parsedMacro.cast.length}`
+          : `宏觀：分卷 ${parsedMacro.volumes.length} · 里程碑 ${parsedMacro.anchors.length} · 人物 ${parsedMacro.cast.length}`
+      : locale === "en"
+        ? "(No macro block)"
+        : locale === "zh-Hans"
+          ? "（无宏观区块）"
+          : "（無宏觀區塊）";
+    const proceed = window.confirm(
+      locale === "en"
+        ? `About to import project JSON (${modeLabel})\n${storySummary}\n${macroSummary}\n\nContinue?`
+        : locale === "zh-Hans"
+          ? `即将导入项目 JSON（${modeLabel}）\n${storySummary}\n${macroSummary}\n\n确定继续吗？`
+          : `即將匯入專案 JSON（${modeLabel}）\n${storySummary}\n${macroSummary}\n\n確定要繼續嗎？`,
+    );
     if (!proceed) return;
 
     if (parsedStory) {
@@ -1055,12 +1113,24 @@ export default function App() {
 
     if (parsedStory || parsedMacro) {
       setConfigVersion((v) => v + 1);
-      setNotice(`專案 JSON 已匯入（${modeLabel}）`);
+      setNotice(
+        locale === "en"
+          ? `Project JSON imported (${modeLabel})`
+          : locale === "zh-Hans"
+            ? `项目 JSON 已导入（${modeLabel}）`
+            : `專案 JSON 已匯入（${modeLabel}）`,
+      );
     }
   }
 
   function askImportMode(): ImportMergeMode {
-    const replace = window.confirm("匯入模式：按「確定」= 覆蓋目前資料；按「取消」= 合併（已有值優先）");
+    const replace = window.confirm(
+      locale === "en"
+        ? "Import mode: OK = Replace current data; Cancel = Merge (prefer existing values)."
+        : locale === "zh-Hans"
+          ? "导入模式：按“确定”= 覆盖当前数据；按“取消”= 合并（已有值优先）"
+          : "匯入模式：按「確定」= 覆蓋目前資料；按「取消」= 合併（已有值優先）",
+    );
     return replace ? "replace" : "merge";
   }
 
@@ -1081,106 +1151,40 @@ export default function App() {
     }
   }
 
+  async function runHitlAction<TPayload>(
+    send: (runId: string, payload: TPayload) => Promise<WorkflowPayload>,
+    payload: TPayload,
+    fallbackMessage: string,
+  ) {
+    if (!workflow) return;
+    setBusy(true);
+    setError("");
+    try {
+      applyHitlWorkflowResponse(await send(workflow.run.run_id, payload));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : fallbackMessage);
+      setBusy(false);
+    }
+  }
+
   const hitlHandlers = {
-    onDecision: async (optionId: string) => {
-      if (!workflow) return;
-      setBusy(true);
-      setError("");
-      try {
-        applyHitlWorkflowResponse(await sendHitlDecision(workflow.run.run_id, optionId));
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "無法送出您的選擇");
-        setBusy(false);
-      }
-    },
-    onOutlineEdit: async (payload: Parameters<typeof sendOutlineEdit>[1]) => {
-      if (!workflow) return;
-      setBusy(true);
-      setError("");
-      try {
-        applyHitlWorkflowResponse(await sendOutlineEdit(workflow.run.run_id, payload));
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "無法套用大綱變更");
-        setBusy(false);
-      }
-    },
-    onDraftEdit: async (payload: Parameters<typeof sendDraftEdit>[1]) => {
-      if (!workflow) return;
-      setBusy(true);
-      setError("");
-      try {
-        applyHitlWorkflowResponse(await sendDraftEdit(workflow.run.run_id, payload));
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "無法套用內文變更");
-        setBusy(false);
-      }
-    },
-    onStateInjection: async (payload: Parameters<typeof sendStateInjection>[1]) => {
-      if (!workflow) return;
-      setBusy(true);
-      setError("");
-      try {
-        applyHitlWorkflowResponse(await sendStateInjection(workflow.run.run_id, payload));
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "無法寫入資料");
-        setBusy(false);
-      }
-    },
-    onDirectorPatch: async (payload: Parameters<typeof sendDirectorPatch>[1]) => {
-      if (!workflow) return;
-      setBusy(true);
-      setError("");
-      try {
-        applyHitlWorkflowResponse(await sendDirectorPatch(workflow.run.run_id, payload));
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "無法套用章節方向調整");
-        setBusy(false);
-      }
-    },
-    onExtractionRemap: async (payload: Parameters<typeof sendExtractionRemap>[1]) => {
-      if (!workflow) return;
-      setBusy(true);
-      setError("");
-      try {
-        applyHitlWorkflowResponse(await sendExtractionRemap(workflow.run.run_id, payload));
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "無法套用名稱對照");
-        setBusy(false);
-      }
-    },
-    onBStoryJudgement: async (payload: Parameters<typeof sendBStoryJudgement>[1]) => {
-      if (!workflow) return;
-      setBusy(true);
-      setError("");
-      try {
-        applyHitlWorkflowResponse(await sendBStoryJudgement(workflow.run.run_id, payload));
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "無法送出副線判定");
-        setBusy(false);
-      }
-    },
-    onAnchorDelay: async (payload: Parameters<typeof sendAnchorDelay>[1]) => {
-      if (!workflow) return;
-      setBusy(true);
-      setError("");
-      try {
-        applyHitlWorkflowResponse(await sendAnchorDelay(workflow.run.run_id, payload));
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "無法延後里程碑");
-        setBusy(false);
-      }
-    },
-    onContextPrune: async (payload: Parameters<typeof sendContextPrune>[1]) => {
-      if (!workflow) return;
-      setBusy(true);
-      setError("");
-      try {
-        applyHitlWorkflowResponse(await sendContextPrune(workflow.run.run_id, payload));
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "無法套用背景精簡");
-        setBusy(false);
-      }
-    },
+    onDecision: async (optionId: string) => runHitlAction(sendHitlDecision, optionId, "無法送出您的選擇"),
+    onOutlineEdit: async (payload: Parameters<typeof sendOutlineEdit>[1]) =>
+      runHitlAction(sendOutlineEdit, payload, "無法套用大綱變更"),
+    onDraftEdit: async (payload: Parameters<typeof sendDraftEdit>[1]) =>
+      runHitlAction(sendDraftEdit, payload, "無法套用內文變更"),
+    onStateInjection: async (payload: Parameters<typeof sendStateInjection>[1]) =>
+      runHitlAction(sendStateInjection, payload, "無法寫入資料"),
+    onDirectorPatch: async (payload: Parameters<typeof sendDirectorPatch>[1]) =>
+      runHitlAction(sendDirectorPatch, payload, "無法套用章節方向調整"),
+    onExtractionRemap: async (payload: Parameters<typeof sendExtractionRemap>[1]) =>
+      runHitlAction(sendExtractionRemap, payload, "無法套用名稱對照"),
+    onBStoryJudgement: async (payload: Parameters<typeof sendBStoryJudgement>[1]) =>
+      runHitlAction(sendBStoryJudgement, payload, "無法送出副線判定"),
+    onAnchorDelay: async (payload: Parameters<typeof sendAnchorDelay>[1]) =>
+      runHitlAction(sendAnchorDelay, payload, "無法延後里程碑"),
+    onContextPrune: async (payload: Parameters<typeof sendContextPrune>[1]) =>
+      runHitlAction(sendContextPrune, payload, "無法套用背景精簡"),
   };
 
   const showStorySection = Boolean(storyId) || view === "setup";
@@ -1191,12 +1195,28 @@ export default function App() {
   const hasReviewed = Boolean(selectedChapter || chapters.length > 0);
   const hasExported = hasExportedChapter || hasExportedProject;
   const workflowMiniStatus = useMemo(() => {
-    if (!workflow) return "尚未執行章節";
+    if (!workflow) return locale === "en" ? "Chapter not run yet" : locale === "zh-Hans" ? "尚未执行章节" : "尚未執行章節";
     const status = String(workflow.state.workflow_status ?? workflow.run.status ?? "");
-    if (status === "WAITING_HITL") return "等待人工決策";
-    if (status === "COMPLETED") return "章節流程已完成";
-    if (status === "FAILED") return "章節流程失敗";
-    return "章節流程執行中";
+    if (status === "WAITING_HITL") return locale === "en" ? "Waiting for human decision" : locale === "zh-Hans" ? "等待人工决策" : "等待人工決策";
+    if (status === "COMPLETED") return locale === "en" ? "Chapter workflow completed" : locale === "zh-Hans" ? "章节流程已完成" : "章節流程已完成";
+    if (status === "FAILED") return locale === "en" ? "Chapter workflow failed" : locale === "zh-Hans" ? "章节流程失败" : "章節流程失敗";
+    return locale === "en" ? "Chapter workflow running" : locale === "zh-Hans" ? "章节流程执行中" : "章節流程執行中";
+  }, [locale, workflow]);
+  const failureNotice = useMemo(() => {
+    if (!workflow) return "";
+    const status = String(workflow.state.workflow_status ?? workflow.run.status ?? "");
+    if (status !== "FAILED") return "";
+    const failureType = String(workflow.state.failure_type ?? "");
+    const timeoutBucket = String(workflow.state.timeout_bucket ?? "");
+    const resetDone = workflow.state.thread_reset_done === true;
+    const commitExecuted = workflow.state.commit_executed === true;
+    const reason = String(workflow.state.hitl_reason ?? workflow.run.hitl_reason ?? "").trim();
+    const typeLabel = failureType === "TIMEOUT" ? "節點逾時" : "流程錯誤";
+    const bucketLabel =
+      timeoutBucket === "llm" ? "（LLM 節點 8-10 分鐘級）" : timeoutBucket === "logic" ? "（邏輯/API 節點 2-3 分鐘級）" : "";
+    const commitLabel = commitExecuted ? "已提交資料" : "未提交資料";
+    const resetLabel = resetDone ? "thread 已重置" : "thread 未重置";
+    return `${typeLabel}${bucketLabel}，本次執行已安全終止（${commitLabel} / ${resetLabel}）。${reason ? ` 原因：${reason}` : ""}`;
   }, [workflow]);
   const activeStage: TaskFlowStageId = useMemo(() => {
     if (view === "setup") return hasMacroCompiled ? "planStructure" : "projectSetup";
@@ -1227,17 +1247,35 @@ export default function App() {
       setNavCount((prev) => prev + 1);
     };
     if (!storyId && nextView !== "library" && nextView !== "setup") {
-      setNotice("請先在故事庫選擇或建立故事。");
+      setNotice(
+        locale === "en"
+          ? "Select or create a story in library first."
+          : locale === "zh-Hans"
+            ? "请先在故事库选择或创建故事。"
+            : "請先在故事庫選擇或建立故事。",
+      );
       setView("library");
       return;
     }
     if (nextView === "write" && !hasMacroCompiled) {
-      setNotice("請先在「設定與規劃」完成世界觀編譯。");
+      setNotice(
+        locale === "en"
+          ? "Finish macro compile in Setup & Planning first."
+          : locale === "zh-Hans"
+            ? "请先在“设置与规划”完成世界观编译。"
+            : "請先在「設定與規劃」完成世界觀編譯。",
+      );
       setView("setup");
       return;
     }
     if ((nextView === "review" || nextView === "export") && !hasChapterRun) {
-      setNotice("請先執行至少一輪章節流程。");
+      setNotice(
+        locale === "en"
+          ? "Run at least one chapter workflow first."
+          : locale === "zh-Hans"
+            ? "请先执行至少一轮章节流程。"
+            : "請先執行至少一輪章節流程。",
+      );
       setView("write");
       return;
     }
@@ -1264,16 +1302,19 @@ export default function App() {
       activeStage={activeStage}
       workflowMiniStatus={workflowMiniStatus}
     >
-      {error ? (
-        <div className="mx-4 mt-4 rounded-xl border border-error/40 bg-error/10 px-4 py-3 font-label text-sm text-error">
-          {error}
-        </div>
-      ) : null}
-      {!error && notice ? (
-        <div className="mx-4 mt-4 rounded-xl border border-secondary/35 bg-secondary/10 px-4 py-3 font-label text-sm text-secondary">
-          {notice}
-        </div>
-      ) : null}
+      <div className="mx-4 mt-4 min-h-[3.5rem]">
+        {error ? (
+          <div className="rounded-xl border border-error/40 bg-error/10 px-4 py-3 font-label text-sm text-error">{error}</div>
+        ) : null}
+        {!error && failureNotice ? (
+          <div className="mt-2 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 font-label text-sm text-on-surface">
+            {failureNotice}
+          </div>
+        ) : null}
+        {!error && notice ? (
+          <div className="rounded-xl border border-secondary/35 bg-secondary/10 px-4 py-3 font-label text-sm text-secondary">{notice}</div>
+        ) : null}
+      </div>
       {!error && alignmentRulesPromptActive && view !== "setup" && view !== "library" ? (
         <div className="mx-4 mt-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 font-label text-sm text-on-surface">
           偵測到複雜智鬥，需補充硬性規則。你可以先留在此頁查看流程，或前往「故事設定」填寫 `chapter_hard_rules`。
@@ -1283,31 +1324,45 @@ export default function App() {
         </div>
       ) : null}
       {view === "library" ? (
-        <StoryLibrary
-          onSelectStory={handleSelectStoryFromLibrary}
-          onNewStory={handleNewStoryFromLibrary}
-          onStoryDeleted={handleStoryDeleted}
-          busy={busy}
-          blockSelectingStories={workflowConflictLocked}
-        />
+        <div className="min-h-[calc(100vh-12rem)]">
+          <StoryLibrary
+            onSelectStory={handleSelectStoryFromLibrary}
+            onNewStory={handleNewStoryFromLibrary}
+            onStoryDeleted={handleStoryDeleted}
+            busy={busy}
+            blockSelectingStories={workflowConflictLocked}
+          />
+        </div>
       ) : null}
 
       {view === "setup" ? (
-        <div className="px-4 pb-12 pt-8 md:px-10 lg:px-12">
+        <div className="min-h-[calc(100vh-12rem)] px-4 pb-12 pt-8 md:px-10 lg:px-12">
           <div className="mb-10 max-w-7xl">
             <span className="mb-2 block font-label text-xs font-semibold uppercase tracking-[0.3em] text-secondary">
-              專案設定
+              {locale === "en" ? "Project Setup" : locale === "zh-Hans" ? "项目设置" : "專案設定"}
             </span>
-            <h1 className="mb-3 font-headline text-4xl font-black tracking-tighter text-on-surface">故事設定</h1>
+            <h1 className="mb-3 font-headline text-4xl font-black tracking-tighter text-on-surface">
+              {locale === "en" ? "Story Settings" : locale === "zh-Hans" ? "故事设置" : "故事設定"}
+            </h1>
             <p className="max-w-2xl font-body text-lg italic text-on-surface-variant">
-              在此整理故事梗概與參數，並執行世界觀編譯以生成分卷、人物與里程碑。
+              {locale === "en"
+                ? "Define premise and parameters here, then run world compile to generate volumes, cast, and milestones."
+                : locale === "zh-Hans"
+                  ? "在此整理故事梗概与参数，并执行世界观编译以生成分卷、人物与里程碑。"
+                  : "在此整理故事梗概與參數，並執行世界觀編譯以生成分卷、人物與里程碑。"}
             </p>
           </div>
 
           {storyId && !configurationLocked ? (
             <div className="mb-4 max-w-7xl rounded-xl border border-tertiary/25 bg-tertiary/5 px-4 py-3 font-body text-sm leading-relaxed text-on-surface">
-              <span className="font-headline font-bold text-tertiary">重新執行世界觀編譯</span>
-              會覆寫自動產生的角色節點，以及目前儲存的世界觀總表、分卷與里程碑；若你曾在圖譜上手動改過這些自動產生的角色，那些修改會消失。
+              <span className="font-headline font-bold text-tertiary">
+                {locale === "en" ? "Re-run World Compile" : locale === "zh-Hans" ? "重新执行世界观编译" : "重新執行世界觀編譯"}
+              </span>
+              {locale === "en"
+                ? " will overwrite auto-generated cast nodes and current world bible/volumes/milestones. Manual edits on those generated nodes will be lost."
+                : locale === "zh-Hans"
+                  ? "会覆写自动生成的角色节点，以及当前保存的世界观总表、分卷与里程碑；若你曾在图谱手动修改这些自动生成角色，这些改动会消失。"
+                  : "會覆寫自動產生的角色節點，以及目前儲存的世界觀總表、分卷與里程碑；若你曾在圖譜上手動改過這些自動產生的角色，那些修改會消失。"}
             </div>
           ) : null}
 
@@ -1320,10 +1375,10 @@ export default function App() {
                 disabled={!storyId || busy || workflowConflictLocked || configurationLocked}
               >
                 <span className="material-symbols-outlined text-lg">auto_awesome</span>
-                產生世界觀與結構
+                {locale === "en" ? "Compile World & Structure" : locale === "zh-Hans" ? "生成世界观与结构" : "產生世界觀與結構"}
               </button>
               <button type="button" className="btn-secondary" onClick={storyId ? exportProjectBundle : undefined} disabled={!storyId || busy}>
-                匯出專案 JSON
+                {locale === "en" ? "Export Project JSON" : locale === "zh-Hans" ? "导出项目 JSON" : "匯出專案 JSON"}
               </button>
               <button
                 type="button"
@@ -1331,7 +1386,7 @@ export default function App() {
                 onClick={() => toolbarImportInputRef.current?.click()}
                 disabled={!storyId || busy || configurationLocked}
               >
-                匯入專案 JSON
+                {locale === "en" ? "Import Project JSON" : locale === "zh-Hans" ? "导入项目 JSON" : "匯入專案 JSON"}
               </button>
               <input
                 ref={toolbarImportInputRef}
@@ -1344,7 +1399,8 @@ export default function App() {
           </div>
 
           <div className="mb-6 max-w-7xl rounded-xl border border-outline-variant/10 bg-surface-container-low px-6 py-4 font-label text-sm text-on-surface-variant">
-            <span className="text-secondary">故事編號</span> {storyId || "未建立"} · {storySummary}
+            <span className="text-secondary">{locale === "en" ? "Story ID" : locale === "zh-Hans" ? "故事编号" : "故事編號"}</span>{" "}
+            {storyId || (locale === "en" ? "Not created" : locale === "zh-Hans" ? "未建立" : "未建立")} · {storySummary}
           </div>
 
           <div className="grid max-w-7xl grid-cols-1 items-start gap-8 lg:grid-cols-12">
@@ -1368,7 +1424,7 @@ export default function App() {
               <div className="rounded-xl border border-outline-variant/10 bg-surface-container-low/50 p-3">
                 <div className="mb-3 px-1">
                   <h3 className="font-label text-xs font-semibold uppercase tracking-wider text-on-surface-variant">
-                    世界觀與結構編修
+                    {locale === "en" ? "World & Structure Editor" : locale === "zh-Hans" ? "世界观与结构编修" : "世界觀與結構編修"}
                   </h3>
                 </div>
                 <MacroPlanPanel
@@ -1386,7 +1442,7 @@ export default function App() {
       ) : null}
 
       {view === "review" ? (
-        <div className="flex h-[calc(100vh-4rem)] flex-col bg-surface-container-lowest lg:flex-row">
+        <div className="flex min-h-[calc(100vh-12rem)] flex-col bg-surface-container-lowest lg:flex-row">
           <ChapterReader
             storyId={storyId}
             currentChapterId={selectedChapter?.chapter_id ?? chapterId}
@@ -1445,13 +1501,13 @@ export default function App() {
       ) : null}
 
       {view === "graph" ? (
-        <div className="min-h-[calc(100vh-4rem)] bg-background p-4 md:p-8">
+        <div className="min-h-[calc(100vh-12rem)] bg-background p-4 md:p-8">
           <div className="mb-4 flex items-center justify-end gap-3">
             <button type="button" className="btn-secondary" onClick={() => setView("setup")}>
-              回到設定與規劃
+              {locale === "en" ? "Back to Setup & Planning" : locale === "zh-Hans" ? "回到设置与规划" : "回到設定與規劃"}
             </button>
             <span className="rounded-full border border-secondary/20 bg-secondary/10 px-3 py-1 font-label text-[10px] font-bold uppercase tracking-widest text-secondary">
-              僅供閱覽
+              {locale === "en" ? "Read Only" : locale === "zh-Hans" ? "仅供阅览" : "僅供閱覽"}
             </span>
           </div>
           <GraphView graph={graph} protagonistCharacterId={macroData?.protagonist_character_id} />
@@ -1459,12 +1515,14 @@ export default function App() {
       ) : null}
 
       {view === "write" ? (
-        <div className="min-h-[calc(100vh-4rem)] bg-background px-4 py-6 md:px-8 md:py-8">
+        <div className="min-h-[calc(100vh-12rem)] bg-background px-4 py-6 md:px-8 md:py-8">
           <div className="mx-auto flex w-full max-w-7xl flex-col gap-6">
             <section className="rounded-xl border border-outline-variant/15 bg-surface-container-low/70 p-4 shadow-glow">
               <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(180px,220px)_minmax(220px,280px)_auto] lg:items-end">
                 <div className="flex flex-col gap-1.5">
-                  <span className="font-label text-[10px] uppercase tracking-wider text-outline">章節</span>
+                  <span className="font-label text-[10px] uppercase tracking-wider text-outline">
+                    {locale === "en" ? "Chapter" : locale === "zh-Hans" ? "章节" : "章節"}
+                  </span>
                   <div className="flex items-center gap-2">
                     <input
                       type="number"
@@ -1476,26 +1534,40 @@ export default function App() {
                     <button
                       type="button"
                       className="btn-secondary h-10"
-                      title="將章節選擇設為目前已有的最大章節"
+                      title={locale === "en" ? "Set to latest existing chapter" : locale === "zh-Hans" ? "将章节设为当前最新章节" : "將章節選擇設為目前已有的最大章節"}
                       disabled={!storyId || busy || chapters.length === 0}
                       onClick={() => setChapterId(latestChapterId)}
                     >
                       <span className="material-symbols-outlined align-middle text-base">skip_next</span>
-                      最新章
+                      {locale === "en" ? "Latest" : locale === "zh-Hans" ? "最新章" : "最新章"}
                     </button>
                   </div>
                 </div>
                 <label className="flex min-w-0 flex-col gap-1.5 font-body text-sm text-on-surface">
-                  <span className="font-label text-[10px] uppercase tracking-wider text-outline">創作自由度</span>
+                  <span className="font-label text-[10px] uppercase tracking-wider text-outline">
+                    {locale === "en" ? "AI Freedom" : locale === "zh-Hans" ? "创作自由度" : "創作自由度"}
+                  </span>
                   <select
                     value={aiFreedomLevel}
                     onChange={(e) => setAiFreedomLevel(e.target.value as AiFreedomLevel)}
                     disabled={!storyId || busy || workflowConflictLocked || chapterAlreadyCompleted}
                     className="auteur-input h-10 w-full text-sm"
                   >
-                    <option value="strict">嚴格（已寫明處不可改；大綱需較具體才 FULL 綁定）</option>
-                    <option value="balanced">平衡（預設）</option>
-                    <option value="wild">狂野（留白腦補多，仍標 [AI_INVENTION]）</option>
+                    <option value="strict">
+                      {locale === "en"
+                        ? "Strict (fixed facts cannot change; outline must be specific)"
+                        : locale === "zh-Hans"
+                          ? "严格（已写明处不可改；大纲需更具体）"
+                          : "嚴格（已寫明處不可改；大綱需較具體才 FULL 綁定）"}
+                    </option>
+                    <option value="balanced">{locale === "en" ? "Balanced (default)" : locale === "zh-Hans" ? "平衡（预设）" : "平衡（預設）"}</option>
+                    <option value="wild">
+                      {locale === "en"
+                        ? "Wild (more creative fill-in, still marked [AI_INVENTION])"
+                        : locale === "zh-Hans"
+                          ? "狂野（留白脑补更多，仍标 [AI_INVENTION]）"
+                          : "狂野（留白腦補多，仍標 [AI_INVENTION]）"}
+                    </option>
                   </select>
                 </label>
                 <div className="flex items-end">
@@ -1505,26 +1577,38 @@ export default function App() {
                     onClick={handleRunChapter}
                     disabled={!storyId || busy || workflowConflictLocked || chapterAlreadyCompleted}
                   >
-                    撰寫本章
+                    {locale === "en" ? "Run Chapter" : locale === "zh-Hans" ? "撰写本章" : "撰寫本章"}
                   </button>
                 </div>
               </div>
               {chapterAlreadyCompleted ? (
                 <div className="mt-3">
                   <span className="rounded-full border border-tertiary/30 bg-tertiary/10 px-2 py-1 text-xs text-tertiary">
-                    第 {chapterId} 章已完成，請改章號後再執行
+                    {locale === "en"
+                      ? `Chapter ${chapterId} already completed. Change chapter number to continue.`
+                      : locale === "zh-Hans"
+                        ? `第 ${chapterId} 章已完成，请改章节号后再执行`
+                        : `第 ${chapterId} 章已完成，請改章號後再執行`}
                   </span>
                 </div>
               ) : null}
               <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
                 <div>
-                  <p className="mb-2 font-label text-[10px] font-bold uppercase tracking-wider text-secondary">Chapter Direction</p>
+                  <p className="mb-2 font-label text-[10px] font-bold uppercase tracking-wider text-secondary">
+                    {locale === "en" ? "Chapter Direction" : locale === "zh-Hans" ? "章节方向" : "Chapter Direction"}
+                  </p>
                   <textarea
                     value={chapterOutline}
                     onChange={(e) => setChapterOutline(e.target.value)}
                     maxLength={2000}
                     rows={4}
-                    placeholder="例如：本章以對話推進謎底、避免打鬥場面…"
+                    placeholder={
+                      locale === "en"
+                        ? "e.g. advance mystery through dialogue, avoid combat scenes..."
+                        : locale === "zh-Hans"
+                          ? "例如：本章以对话推进谜底、避免打斗场面…"
+                          : "例如：本章以對話推進謎底、避免打鬥場面…"
+                    }
                     disabled={!storyId || busy || workflowConflictLocked || chapterAlreadyCompleted}
                     className="w-full resize-y rounded-lg border border-outline-variant/20 bg-surface-container-highest px-3 py-2 font-body text-sm text-on-surface placeholder:text-on-surface-variant/50"
                   />
@@ -1535,14 +1619,22 @@ export default function App() {
                   ) : null}
                 </div>
                 <div>
-                  <p className="mb-2 font-label text-[10px] font-bold uppercase tracking-wider text-secondary">本章硬性規則</p>
+                  <p className="mb-2 font-label text-[10px] font-bold uppercase tracking-wider text-secondary">
+                    {locale === "en" ? "Hard Rules for This Chapter" : locale === "zh-Hans" ? "本章硬性规则" : "本章硬性規則"}
+                  </p>
                   <textarea
                     value={chapterHardRules}
                     onChange={(e) => setChapterHardRules(e.target.value)}
                     ref={chapterHardRulesRef}
                     maxLength={8000}
                     rows={4}
-                    placeholder="例如：遊戲規則、勝負條件、不可違背的系統法則（POV 不可知的底牌請標示清楚）"
+                    placeholder={
+                      locale === "en"
+                        ? "e.g. game rules, win conditions, immutable system laws..."
+                        : locale === "zh-Hans"
+                          ? "例如：游戏规则、胜负条件、不可违背的系统法则（POV 不可知底牌请标清）"
+                          : "例如：遊戲規則、勝負條件、不可違背的系統法則（POV 不可知的底牌請標示清楚）"
+                    }
                     disabled={!storyId || busy || workflowConflictLocked || chapterAlreadyCompleted}
                     className="w-full resize-y rounded-lg border border-outline-variant/20 bg-surface-container-highest px-3 py-2 font-body text-sm text-on-surface placeholder:text-on-surface-variant/50"
                   />
@@ -1556,9 +1648,15 @@ export default function App() {
                     onClick={() => setPreamblePanelOpen((o) => !o)}
                   >
                     <span className="flex min-w-0 flex-1 items-center gap-2">
-                      <span className="font-label text-[11px] font-bold uppercase tracking-wider text-secondary">開寫前參考</span>
+                      <span className="font-label text-[11px] font-bold uppercase tracking-wider text-secondary">
+                        {locale === "en" ? "Pre-write Reference" : locale === "zh-Hans" ? "开写前参考" : "開寫前參考"}
+                      </span>
                       <span className="truncate font-body text-sm text-on-surface-variant">
-                        劇情進度（至第 {Math.max(0, chapterId - 1)} 章）
+                        {locale === "en"
+                          ? `Story progress (through chapter ${Math.max(0, chapterId - 1)})`
+                          : locale === "zh-Hans"
+                            ? `剧情进度（至第 ${Math.max(0, chapterId - 1)} 章）`
+                            : `劇情進度（至第 ${Math.max(0, chapterId - 1)} 章）`}
                       </span>
                     </span>
                     <span className="material-symbols-outlined shrink-0 text-on-surface-variant">
@@ -1566,14 +1664,24 @@ export default function App() {
                     </span>
                   </button>
                   {preamblePanelOpen && !writingPreamble ? (
-                    <div className="border-t border-outline-variant/10 px-4 py-3 font-body text-sm text-on-surface-variant">載入提示中…</div>
+                    <div className="border-t border-outline-variant/10 px-4 py-3 font-body text-sm text-on-surface-variant">
+                      {locale === "en" ? "Loading..." : locale === "zh-Hans" ? "加载中…" : "載入提示中…"}
+                    </div>
                   ) : null}
                   {preamblePanelOpen && writingPreamble ? (
                     <div className="space-y-2 border-t border-outline-variant/10 px-4 py-3 font-body text-sm text-on-surface-variant">
-                      <p>上一章：{writingPreamble.plot_progress.previous_chapter.plot_summary || "尚無結構化摘要"}</p>
+                      <p>
+                        {locale === "en" ? "Previous chapter: " : locale === "zh-Hans" ? "上一章：" : "上一章："}
+                        {writingPreamble.plot_progress.previous_chapter.plot_summary ||
+                          (locale === "en" ? "No structured summary yet" : locale === "zh-Hans" ? "尚无结构化摘要" : "尚無結構化摘要")}
+                      </p>
                       {preambleHasNonLlmSummary ? (
                         <p className="rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-xs text-on-surface">
-                          偵測到非章節整理器摘要，建議在對應章節重新產生摘要。
+                          {locale === "en"
+                            ? "Detected non-summarizer summary; regenerate summary for the related chapter."
+                            : locale === "zh-Hans"
+                              ? "检测到非章节整理器摘要，建议在对应章节重新生成摘要。"
+                              : "偵測到非章節整理器摘要，建議在對應章節重新產生摘要。"}
                         </p>
                       ) : null}
                       {writingPreamble.plot_progress.previous_chapter.chapter_id != null &&
@@ -1584,7 +1692,17 @@ export default function App() {
                           disabled={regenSummaryBusyChapter !== null || busy}
                           onClick={() => void handleRegenerateChapterSummary(writingPreamble.plot_progress.previous_chapter.chapter_id!)}
                         >
-                          {regenSummaryBusyChapter === writingPreamble.plot_progress.previous_chapter.chapter_id ? "處理中…" : "重新產生上一章摘要"}
+                          {regenSummaryBusyChapter === writingPreamble.plot_progress.previous_chapter.chapter_id
+                            ? locale === "en"
+                              ? "Processing..."
+                              : locale === "zh-Hans"
+                                ? "处理中…"
+                                : "處理中…"
+                            : locale === "en"
+                              ? "Regenerate Previous Summary"
+                              : locale === "zh-Hans"
+                                ? "重新生成上一章摘要"
+                                : "重新產生上一章摘要"}
                         </button>
                       ) : null}
                     </div>
@@ -1595,31 +1713,39 @@ export default function App() {
 
             <WorkflowProgressTrack workflow={workflow} />
             <section className="rounded-xl border border-outline-variant/15 bg-surface-container-low/70 p-2">
-              <div className="inline-flex rounded-md bg-surface-container-lowest/40 p-1">
+              <div className="inline-flex rounded-md bg-surface-container-lowest/40 p-1" role="tablist" aria-label="撰寫資訊檢視模式">
                 <button
                   type="button"
+                  id="write-tab-progress"
+                  role="tab"
+                  aria-controls="write-panel-progress"
+                  aria-selected={writePanelTab === "progress"}
                   className={`rounded-md px-3 py-1.5 text-xs font-semibold ${
                     writePanelTab === "progress" ? "bg-primary/20 text-primary" : "text-on-surface-variant"
                   }`}
                   onClick={() => setWritePanelTab("progress")}
                   aria-pressed={writePanelTab === "progress"}
                 >
-                  章節撰寫進度
+                  {locale === "en" ? "Chapter Progress" : locale === "zh-Hans" ? "章节撰写进度" : "章節撰寫進度"}
                 </button>
                 <button
                   type="button"
+                  id="write-tab-logs"
+                  role="tab"
+                  aria-controls="write-panel-logs"
+                  aria-selected={writePanelTab === "logs"}
                   className={`rounded-md px-3 py-1.5 text-xs font-semibold ${
                     writePanelTab === "logs" ? "bg-secondary/20 text-secondary" : "text-on-surface-variant"
                   }`}
                   onClick={() => setWritePanelTab("logs")}
                   aria-pressed={writePanelTab === "logs"}
                 >
-                  撰寫過程紀錄
+                  {locale === "en" ? "Run Logs" : locale === "zh-Hans" ? "撰写过程记录" : "撰寫過程紀錄"}
                 </button>
               </div>
             </section>
             {writePanelTab === "progress" ? (
-              <div className="grid grid-cols-1 gap-6">
+              <div id="write-panel-progress" role="tabpanel" aria-labelledby="write-tab-progress" className="grid grid-cols-1 gap-6">
                 <div className="min-w-0">
                   <WorkflowMonitor workflow={workflow} />
                   <div className="mt-4">
@@ -1628,7 +1754,7 @@ export default function App() {
                 </div>
               </div>
             ) : (
-              <div className="min-w-0">
+              <div id="write-panel-logs" role="tabpanel" aria-labelledby="write-tab-logs" className="min-w-0">
                 <AgentOutputView workflow={workflow} />
               </div>
             )}
@@ -1636,7 +1762,7 @@ export default function App() {
         </div>
       ) : null}
       {view === "export" ? (
-        <div className="px-4 py-8 md:px-10">
+        <div className="min-h-[calc(100vh-12rem)] px-4 py-8 md:px-10">
           <ExportCenter
             storyId={storyId}
             chapters={chapters}
@@ -1663,6 +1789,14 @@ export default function App() {
           />
         </div>
       ) : null}
+      <div
+        aria-hidden={!uiBusyVisible}
+        className={`pointer-events-none fixed inset-0 z-40 transition-opacity duration-150 ${
+          uiBusyVisible ? "opacity-100" : "opacity-0"
+        }`}
+      >
+        <div className="absolute inset-0 bg-background/22 backdrop-blur-[1px]" />
+      </div>
     </AppShell>
   );
 }

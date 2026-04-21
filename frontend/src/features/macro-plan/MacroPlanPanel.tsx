@@ -20,6 +20,7 @@ import {
   parseBStories,
   splitBibleForForm,
 } from "./macroPlanHelpers";
+import { useI18n } from "../../i18n/useI18n";
 
 type Props = {
   macroData: MacroCompileData | null;
@@ -33,15 +34,15 @@ type Props = {
 type MacroTab = "bible" | "volumes" | "cast" | "anchors";
 type EditSurface = "off" | "bible" | "volume" | "cast" | "anchor";
 
-const FIELD_LABELS: Record<(typeof BIBLE_LINE_KEYS)[number], string> = {
-  genre: "故事類型",
-  tone: "氛圍基調",
-  theme: "主題（選填）",
-  narrative_pov: "敘事視角（選填）",
-  writing_style: "文風（選填）",
-  world_rules: "世界規則",
-  factions: "勢力與陣營",
-  writing_note: "寫作備註",
+const FIELD_LABELS: Record<(typeof BIBLE_LINE_KEYS)[number], { "zh-Hant": string; "zh-Hans": string; en: string }> = {
+  genre: { "zh-Hant": "故事類型", "zh-Hans": "故事类型", en: "Genre" },
+  tone: { "zh-Hant": "氛圍基調", "zh-Hans": "氛围基调", en: "Tone" },
+  theme: { "zh-Hant": "主題（選填）", "zh-Hans": "主题（选填）", en: "Theme (optional)" },
+  narrative_pov: { "zh-Hant": "敘事視角（選填）", "zh-Hans": "叙事视角（选填）", en: "Narrative POV (optional)" },
+  writing_style: { "zh-Hant": "文風（選填）", "zh-Hans": "文风（选填）", en: "Writing Style (optional)" },
+  world_rules: { "zh-Hant": "世界規則", "zh-Hans": "世界规则", en: "World Rules" },
+  factions: { "zh-Hant": "勢力與陣營", "zh-Hans": "势力与阵营", en: "Factions" },
+  writing_note: { "zh-Hant": "寫作備註", "zh-Hans": "写作备注", en: "Writing Notes" },
 };
 
 type FormState = {
@@ -63,6 +64,11 @@ type AnchorEdit = {
   chapter_target: string;
   chapter_goal: string;
 };
+function tr(locale: "zh-Hant" | "zh-Hans" | "en", zhHant: string, zhHans: string, en: string): string {
+  if (locale === "en") return en;
+  if (locale === "zh-Hans") return zhHans;
+  return zhHant;
+}
 
 function isEditingSurface(surface: EditSurface): boolean {
   return surface !== "off";
@@ -150,16 +156,16 @@ function findVolumeIdByChapter(
   return hit?.volume_id ?? "";
 }
 
-function formatBibleReadRows(form: FormState): Array<{ label: string; value: string }> {
+function formatBibleReadRows(locale: "zh-Hant" | "zh-Hans" | "en", form: FormState): Array<{ label: string; value: string }> {
   return [
-    { label: "故事類型", value: form.genre.trim() || "—" },
-    { label: "氛圍基調", value: form.tone.trim() || "—" },
-    { label: "主題", value: form.theme.trim() || "—" },
-    { label: "敘事視角", value: form.narrative_pov.trim() || "—" },
-    { label: "文風", value: form.writing_style.trim() || "—" },
-    { label: "世界規則", value: form.world_rules.trim() || "—" },
-    { label: "勢力與陣營", value: form.factions.trim() || "—" },
-    { label: "寫作備註", value: form.writing_note.trim() || "—" },
+    { label: FIELD_LABELS.genre[locale], value: form.genre.trim() || "—" },
+    { label: FIELD_LABELS.tone[locale], value: form.tone.trim() || "—" },
+    { label: tr(locale, "主題", "主题", "Theme"), value: form.theme.trim() || "—" },
+    { label: tr(locale, "敘事視角", "叙事视角", "Narrative POV"), value: form.narrative_pov.trim() || "—" },
+    { label: tr(locale, "文風", "文风", "Writing Style"), value: form.writing_style.trim() || "—" },
+    { label: FIELD_LABELS.world_rules[locale], value: form.world_rules.trim() || "—" },
+    { label: FIELD_LABELS.factions[locale], value: form.factions.trim() || "—" },
+    { label: FIELD_LABELS.writing_note[locale], value: form.writing_note.trim() || "—" },
   ];
 }
 
@@ -182,6 +188,7 @@ export function MacroPlanPanel({
   onBusy,
   onError,
 }: Props) {
+  const { locale } = useI18n();
   const canEdit = Boolean(storyId && !configurationLocked);
 
   const [tab, setTab] = useState<MacroTab>("bible");
@@ -230,7 +237,14 @@ export function MacroPlanPanel({
   function switchTab(next: MacroTab) {
     if (next === tab) return;
     if (isDirtySession && editSurface !== "off") {
-      const ok = window.confirm("尚未儲存的變更會被捨棄。確定要切換分頁嗎？");
+      const ok = window.confirm(
+        tr(
+          locale,
+          "尚未儲存的變更會被捨棄。確定要切換分頁嗎？",
+          "尚未保存的变更会被舍弃。确定切换分页吗？",
+          "Unsaved changes will be discarded. Switch tab anyway?",
+        ),
+      );
       if (!ok) return;
       cancelEdit();
     }
@@ -319,7 +333,7 @@ export function MacroPlanPanel({
       const cs = Number(v.chapter_start);
       const ce = Number(v.chapter_end);
       if (!Number.isFinite(cs) || !Number.isFinite(ce)) throw new Error(`「${v.title || v.volume_id}」的章節範圍需為有效數字。`);
-      if (cs > ce) throw new Error(`「${v.title || v.volume_id}」的起始章不可大於結束章。`);
+      if (cs > ce) throw new Error(tr(locale, `「${v.title || v.volume_id}」的起始章不可大於結束章。`, `「${v.title || v.volume_id}」的起始章不可大于结束章。`, `Start chapter cannot exceed end chapter for "${v.title || v.volume_id}".`));
     }
     const overlaps = findOverlappingVolumes(
       volumes.map((v) => ({
@@ -333,15 +347,22 @@ export function MacroPlanPanel({
       const [a, b] = overlaps[0] ?? ["", ""];
       const ta = volumes.find((x) => x.volume_id === a)?.title ?? a;
       const tb = volumes.find((x) => x.volume_id === b)?.title ?? b;
-      throw new Error(`分卷章節範圍不可重疊：「${ta}」與「${tb}」區間相衝突。請調整範圍或合併分卷。`);
+      throw new Error(
+        tr(
+          locale,
+          `分卷章節範圍不可重疊：「${ta}」與「${tb}」區間相衝突。請調整範圍或合併分卷。`,
+          `分卷章节范围不可重叠：「${ta}」与「${tb}」区间冲突。请调整范围或合并分卷。`,
+          `Volume chapter ranges overlap between "${ta}" and "${tb}". Please adjust ranges.`,
+        ),
+      );
     }
 
     const cast = [...(d.cast ?? [])];
-    if (cast.length === 0) throw new Error("請至少保留一位人物。");
+    if (cast.length === 0) throw new Error(tr(locale, "請至少保留一位人物。", "请至少保留一位人物。", "Keep at least one character."));
 
     const prot = d.protagonist_character_id?.trim() || "";
     if (prot && !cast.some((c) => c.node_id === prot)) {
-      throw new Error("敘事視角主角所選的人物不在人物清單中。");
+      throw new Error(tr(locale, "敘事視角主角所選的人物不在人物清單中。", "叙事视角主角所选人物不在清单中。", "Selected POV protagonist is not in cast list."));
     }
 
     const rawAnchors = [...(d.anchors ?? [])];
@@ -372,16 +393,23 @@ export function MacroPlanPanel({
     }));
 
     for (const a of anchorsPayload) {
-      if (!a.volume_id) throw new Error("情節節點的目標章節未落在任何分卷範圍，請先調整分卷章節區間。");
+      if (!a.volume_id) throw new Error(tr(locale, "情節節點的目標章節未落在任何分卷範圍，請先調整分卷章節區間。", "情节节点目标章节未落在任何分卷范围，请先调整分卷区间。", "Anchor chapter is outside all volume ranges."));
       if (!volumeModels.some((v) => v.volume_id === a.volume_id)) {
-        throw new Error("情節節點所掛的分卷不存在，請重新選擇。");
+        throw new Error(tr(locale, "情節節點所掛的分卷不存在，請重新選擇。", "情节节点挂载的分卷不存在，请重新选择。", "Anchor volume does not exist."));
       }
       if (!Number.isFinite(a.chapter_target) || a.chapter_target < 1) {
-        throw new Error("情節節點的「發生章節」需為有效的章次。");
+        throw new Error(tr(locale, "情節節點的「發生章節」需為有效的章次。", "情节节点的“发生章节”需为有效章次。", "Anchor chapter target must be valid."));
       }
       const vol = volumeModels.find((v) => v.volume_id === a.volume_id);
       if (vol && (a.chapter_target < vol.chapter_start || a.chapter_target > vol.chapter_end)) {
-        throw new Error(`情節節點「${a.title || a.anchor_id}」的章次需落在所選分卷的範圍內。`);
+        throw new Error(
+          tr(
+            locale,
+            `情節節點「${a.title || a.anchor_id}」的章次需落在所選分卷的範圍內。`,
+            `情节节点「${a.title || a.anchor_id}」章次需落在所选分卷范围内。`,
+            `Anchor "${a.title || a.anchor_id}" chapter must be inside selected volume range.`,
+          ),
+        );
       }
     }
 
@@ -404,7 +432,7 @@ export function MacroPlanPanel({
       const biblePayload = buildBiblePayload(form);
       body = validateAndBuildPutBody(d, biblePayload);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "無法儲存";
+      const msg = err instanceof Error ? err.message : tr(locale, "無法儲存", "无法保存", "Unable to save");
       setInlineError(msg);
       onError(msg);
       return;
@@ -424,7 +452,7 @@ export function MacroPlanPanel({
       });
       cancelEdit();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "儲存失敗";
+      const msg = err instanceof Error ? err.message : tr(locale, "儲存失敗", "保存失败", "Save failed");
       setInlineError(msg);
       onError(msg);
     } finally {
@@ -436,7 +464,12 @@ export function MacroPlanPanel({
     const dm = ensureDraft();
     if (!dm) return;
     setInlineError(
-      "提醒：新增或調整分卷章節後，可能讓既有情節節點與分卷範圍衝突。建議避免大幅調整；必要時可先更新故事設定重新編譯，再進行微調。",
+      tr(
+        locale,
+        "提醒：新增或調整分卷章節後，可能讓既有情節節點與分卷範圍衝突。建議避免大幅調整；必要時可先更新故事設定重新編譯，再進行微調。",
+        "提醒：新增或调整分卷章节后，可能与既有情节节点范围冲突。建议避免大幅调整。",
+        "Note: changing volume ranges may conflict with existing anchors. Avoid major adjustments.",
+      ),
     );
     setDraftMacro({
       ...dm,
@@ -458,10 +491,10 @@ export function MacroPlanPanel({
     if (!dm) return;
     const used = (dm.anchors ?? []).filter((a) => a.volume_id === volumeId);
     if (used.length > 0) {
-      window.alert("仍有情節節點掛在此分卷上，請先刪除或改掛節點後再刪除分卷。");
+      window.alert(tr(locale, "仍有情節節點掛在此分卷上，請先刪除或改掛節點後再刪除分卷。", "仍有情节节点挂在此分卷上，请先处理后再删除分卷。", "This volume still has anchors. Reassign/remove them before deleting."));
       return;
     }
-    if (!window.confirm("確定要刪除此分卷嗎？此動作無法復原。")) return;
+    if (!window.confirm(tr(locale, "確定要刪除此分卷嗎？此動作無法復原。", "确定删除此分卷吗？此操作不可恢复。", "Delete this volume? This cannot be undone."))) return;
     const next = (dm.volumes ?? []).filter((v) => v.volume_id !== volumeId);
     setDraftMacro({ ...dm, volumes: next });
     if (selectedEntityId === volumeId) setSelectedEntityId(next[0]?.volume_id ?? null);
@@ -472,10 +505,10 @@ export function MacroPlanPanel({
     if (!dm) return;
     const list = dm.cast ?? [];
     if (list.length <= 1) {
-      window.alert("至少需要保留一位人物。");
+      window.alert(tr(locale, "至少需要保留一位人物。", "至少需要保留一位人物。", "At least one character is required."));
       return;
     }
-    if (!window.confirm("確定要刪除此人物嗎？")) return;
+    if (!window.confirm(tr(locale, "確定要刪除此人物嗎？", "确定删除此人物吗？", "Delete this character?"))) return;
     const next = list.filter((c) => c.node_id !== nodeId);
     let prot = dm.protagonist_character_id;
     if (prot === nodeId) prot = next[0]?.node_id ?? "";
@@ -486,7 +519,7 @@ export function MacroPlanPanel({
   function deleteAnchor(anchorId: string) {
     const dm = ensureDraft();
     if (!dm) return;
-    if (!window.confirm("確定要刪除此情節節點嗎？")) return;
+    if (!window.confirm(tr(locale, "確定要刪除此情節節點嗎？", "确定删除此情节节点吗？", "Delete this anchor?"))) return;
     const nextAnchors = (dm.anchors ?? []).filter((a) => a.anchor_id !== anchorId);
     const nextEdits = { ...anchorEdits };
     delete nextEdits[anchorId];
@@ -499,12 +532,17 @@ export function MacroPlanPanel({
     const dm = ensureDraft();
     if (!dm) return;
     setInlineError(
-      "提醒：新增分卷後，請留意情節節點章節是否仍落在正確範圍。若要大幅改結構，建議先更新故事設定重新編譯，再回來微調。",
+      tr(
+        locale,
+        "提醒：新增分卷後，請留意情節節點章節是否仍落在正確範圍。若要大幅改結構，建議先更新故事設定重新編譯，再回來微調。",
+        "提醒：新增分卷后，请留意情节节点章节范围是否正确。",
+        "Note: after adding volumes, verify anchor chapter ranges are still valid.",
+      ),
     );
     const id = newLocalId("vol");
     const next: VolumePlan = {
       volume_id: id,
-      title: "新分卷",
+      title: tr(locale, "新分卷", "新分卷", "New Volume"),
       summary: "",
       chapter_start: 1,
       chapter_end: 1,
@@ -521,7 +559,7 @@ export function MacroPlanPanel({
     const id = newLocalId("char");
     const row: CastMember = {
       node_id: id,
-      canonical_name: "新人物",
+      canonical_name: tr(locale, "新人物", "新人物", "New Character"),
       role: "supporting",
       short_bio: "",
     };
@@ -541,7 +579,7 @@ export function MacroPlanPanel({
     const row: Anchor = {
       anchor_id: id,
       volume_id: defaultVol,
-      title: "新節點",
+      title: tr(locale, "新節點", "新节点", "New Anchor"),
       description: "",
       chapter_target: ct,
       target_state: {},
@@ -552,7 +590,7 @@ export function MacroPlanPanel({
     setAnchorEdits({
       ...anchorEditsFromMacro(merged),
       [id]: {
-        title: "新節點",
+        title: tr(locale, "新節點", "新节点", "New Anchor"),
         description: "",
         chapter_target: String(ct),
         chapter_goal: "",
@@ -587,7 +625,13 @@ export function MacroPlanPanel({
   if (!macroData) {
     return (
       <section className="rounded-xl border border-outline-variant/15 bg-surface-container-low p-5 text-on-surface-variant">
-        <p className="font-body text-sm">尚無世界觀與結構資料。請先完成宏觀規畫編譯或匯入專案。</p>
+        <p className="font-body text-sm">
+          {locale === "en"
+            ? "No world/structure data yet. Run macro compile or import a project first."
+            : locale === "zh-Hans"
+              ? "尚无世界观与结构资料。请先完成宏观规划编译或导入项目。"
+              : "尚無世界觀與結構資料。請先完成宏觀規畫編譯或匯入專案。"}
+        </p>
       </section>
     );
   }
@@ -597,15 +641,19 @@ export function MacroPlanPanel({
   return (
     <section className="rounded-xl border border-outline-variant/15 bg-surface-container-low p-4 sm:p-5">
       <div className="mb-4 flex flex-col gap-2 border-b border-outline-variant/10 pb-3">
-        <p className="font-label text-[10px] font-bold uppercase tracking-wider text-secondary">全書結構</p>
-        <h2 className="font-title text-lg text-on-surface">世界觀與結構產出</h2>
+        <p className="font-label text-[10px] font-bold uppercase tracking-wider text-secondary">
+          {locale === "en" ? "Book Structure" : locale === "zh-Hans" ? "全书结构" : "全書結構"}
+        </p>
+        <h2 className="font-title text-lg text-on-surface">
+          {locale === "en" ? "World & Structure Output" : locale === "zh-Hans" ? "世界观与结构产出" : "世界觀與結構產出"}
+        </h2>
         <div className="flex flex-wrap gap-2">
           {(
             [
-              ["bible", "世界觀總表"],
-              ["volumes", "分卷"],
-              ["cast", "人物"],
-              ["anchors", "情節節點"],
+              ["bible", locale === "en" ? "World Bible" : locale === "zh-Hans" ? "世界观总表" : "世界觀總表"],
+              ["volumes", locale === "en" ? "Volumes" : locale === "zh-Hans" ? "分卷" : "分卷"],
+              ["cast", locale === "en" ? "Cast" : locale === "zh-Hans" ? "人物" : "人物"],
+              ["anchors", locale === "en" ? "Anchors" : locale === "zh-Hans" ? "情节节点" : "情節節點"],
             ] as const
           ).map(([id, label]) => (
             <button
@@ -639,14 +687,14 @@ export function MacroPlanPanel({
             disabled={!canEdit}
             className="rounded-lg bg-secondary px-4 py-2 text-sm font-semibold text-on-secondary disabled:opacity-40"
           >
-            儲存
+            {tr(locale, "儲存", "保存", "Save")}
           </button>
           <button
             type="button"
             onClick={() => cancelEdit()}
             className="rounded-lg border border-outline-variant/30 px-4 py-2 text-sm text-on-surface"
           >
-            取消
+            {tr(locale, "取消", "取消", "Cancel")}
           </button>
         </div>
       ) : null}
@@ -656,8 +704,16 @@ export function MacroPlanPanel({
         <div className="space-y-6">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div>
-              <h3 className="font-body font-semibold text-on-surface">世界觀總表</h3>
-              <p className="mt-1 text-xs text-on-surface-variant">全書世界設定與長線副線（與故事設定中的聖經欄位分開維護）。</p>
+              <h3 className="font-body font-semibold text-on-surface">
+                {locale === "en" ? "World Bible" : locale === "zh-Hans" ? "世界观总表" : "世界觀總表"}
+              </h3>
+              <p className="mt-1 text-xs text-on-surface-variant">
+                {locale === "en"
+                  ? "Book-level world settings and long-arc subplots (maintained separately from story settings bible fields)."
+                  : locale === "zh-Hans"
+                    ? "全书世界设定与长线副线（与故事设置中的圣经栏位分开维护）。"
+                    : "全書世界設定與長線副線（與故事設定中的聖經欄位分開維護）。"}
+              </p>
             </div>
             {canEdit && editSurface !== "bible" ? (
               <button
@@ -665,7 +721,7 @@ export function MacroPlanPanel({
                 onClick={startEditBible}
                 className="shrink-0 rounded-lg border border-secondary/40 px-3 py-2 text-sm font-semibold text-secondary"
               >
-                編輯世界觀總表
+                {locale === "en" ? "Edit World Bible" : locale === "zh-Hans" ? "编辑世界观总表" : "編輯世界觀總表"}
               </button>
             ) : null}
           </div>
@@ -677,7 +733,7 @@ export function MacroPlanPanel({
                 onClick={addBStory}
                 className="rounded-lg bg-surface-container-highest px-3 py-2 text-sm font-medium text-on-surface ring-1 ring-outline-variant/20"
               >
-                新增長線副線
+                {tr(locale, "新增長線副線", "新增长线副线", "Add Long-arc Subplot")}
               </button>
               <button
                 type="button"
@@ -689,7 +745,7 @@ export function MacroPlanPanel({
                 }
                 className="rounded-lg bg-surface-container-highest px-3 py-2 text-sm font-medium text-on-surface ring-1 ring-outline-variant/20"
               >
-                新增延伸筆記
+                {tr(locale, "新增延伸筆記", "新增延伸笔记", "Add Extra Note")}
               </button>
             </div>
           ) : null}
@@ -700,7 +756,7 @@ export function MacroPlanPanel({
                 {BIBLE_LINE_KEYS.map((key) => (
                   <label key={key} className="block min-w-0">
                     <span className="mb-1 block font-label text-[10px] font-semibold uppercase tracking-wide text-on-surface-variant">
-                      {FIELD_LABELS[key]}
+                      {FIELD_LABELS[key][locale]}
                     </span>
                     {key === "genre" || key === "tone" ? (
                       <input
@@ -721,7 +777,9 @@ export function MacroPlanPanel({
               </div>
 
               <div>
-                <h4 className="mb-2 font-body text-sm font-semibold text-on-surface">長線副線</h4>
+                <h4 className="mb-2 font-body text-sm font-semibold text-on-surface">
+                  {tr(locale, "長線副線", "长线副线", "Long-arc Subplots")}
+                </h4>
                 <div className="space-y-3">
                   {form.activeBStories.map((row) => {
                     const selected = selectedBStoryId === row.id;
@@ -732,10 +790,12 @@ export function MacroPlanPanel({
                       >
                         <div className="grid grid-cols-12 gap-3">
                           <div className="col-span-12 sm:col-span-2">
-                            <ReadonlyId label="內部編號" value={row.id} />
+                            <ReadonlyId label={tr(locale, "內部編號", "内部编号", "Internal ID")} value={row.id} />
                           </div>
                           <label className="col-span-12 block min-w-0 sm:col-span-5">
-                            <span className="mb-1 block font-label text-[10px] font-semibold text-on-surface-variant">說明</span>
+                            <span className="mb-1 block font-label text-[10px] font-semibold text-on-surface-variant">
+                              {tr(locale, "說明", "说明", "Description")}
+                            </span>
                             <textarea
                               value={row.desc}
                               onChange={(e) =>
@@ -751,10 +811,15 @@ export function MacroPlanPanel({
                             />
                           </label>
                           <div className="col-span-12 sm:col-span-2">
-                            <ReadonlyId label="類型（自動）" value={row.type === "UNKNOWN" || !row.type ? "未分類" : row.type} />
+                            <ReadonlyId
+                              label={tr(locale, "類型（自動）", "类型（自动）", "Type (auto)")}
+                              value={row.type === "UNKNOWN" || !row.type ? tr(locale, "未分類", "未分类", "Uncategorized") : row.type}
+                            />
                           </div>
                           <label className="col-span-12 block min-w-0 sm:col-span-2">
-                            <span className="mb-1 block font-label text-[10px] font-semibold text-on-surface-variant">收尾條件</span>
+                            <span className="mb-1 block font-label text-[10px] font-semibold text-on-surface-variant">
+                              {tr(locale, "收尾條件", "收尾条件", "Resolution Condition")}
+                            </span>
                             <textarea
                               value={row.resolution_condition}
                               onChange={(e) =>
@@ -775,7 +840,7 @@ export function MacroPlanPanel({
                               onClick={() => removeBStory(row.id)}
                               className="rounded-lg border border-outline-variant/30 px-2 py-1 text-xs text-on-surface-variant hover:bg-surface-container"
                             >
-                              移除
+                              {tr(locale, "移除", "移除", "Remove")}
                             </button>
                           </div>
                         </div>
@@ -786,13 +851,19 @@ export function MacroPlanPanel({
               </div>
 
               <div>
-                <h4 className="mb-2 font-body text-sm font-semibold text-on-surface">延伸筆記</h4>
-                <p className="mb-2 text-xs text-on-surface-variant">自訂欄位名與內容；若內容為多行清單，請勾選「多行清單」。</p>
+                <h4 className="mb-2 font-body text-sm font-semibold text-on-surface">
+                  {tr(locale, "延伸筆記", "延伸笔记", "Extra Notes")}
+                </h4>
+                <p className="mb-2 text-xs text-on-surface-variant">
+                  {tr(locale, "自訂欄位名與內容；若內容為多行清單，請勾選「多行清單」。", "自定义栏位名与内容；若内容为多行清单，请勾选“多行清单”。", "Use custom field name/content; if value is a list, enable multiline list.")}
+                </p>
                 <div className="space-y-3">
                   {form.extraRows.map((row, idx) => (
                     <div key={`${row.key}-${idx}`} className="grid grid-cols-12 gap-3 rounded-xl border border-outline-variant/15 bg-surface-container-highest/40 p-3">
                       <label className="col-span-12 min-w-0 sm:col-span-3">
-                        <span className="mb-1 block font-label text-[10px] font-semibold text-on-surface-variant">欄位名稱</span>
+                        <span className="mb-1 block font-label text-[10px] font-semibold text-on-surface-variant">
+                          {tr(locale, "欄位名稱", "栏位名称", "Field Name")}
+                        </span>
                         <input
                           value={row.key}
                           onChange={(e) =>
@@ -807,7 +878,9 @@ export function MacroPlanPanel({
                         />
                       </label>
                       <label className="col-span-12 min-w-0 sm:col-span-6">
-                        <span className="mb-1 block font-label text-[10px] font-semibold text-on-surface-variant">內容</span>
+                        <span className="mb-1 block font-label text-[10px] font-semibold text-on-surface-variant">
+                          {tr(locale, "內容", "内容", "Content")}
+                        </span>
                         <textarea
                           value={row.value}
                           onChange={(e) =>
@@ -823,7 +896,9 @@ export function MacroPlanPanel({
                         />
                       </label>
                       <label className="col-span-6 flex flex-col justify-end sm:col-span-2">
-                        <span className="mb-1 block font-label text-[10px] font-semibold text-on-surface-variant">多行清單</span>
+                        <span className="mb-1 block font-label text-[10px] font-semibold text-on-surface-variant">
+                          {tr(locale, "多行清單", "多行清单", "Multiline List")}
+                        </span>
                         <input
                           type="checkbox"
                           checked={row.isList}
@@ -844,7 +919,7 @@ export function MacroPlanPanel({
                           onClick={() => setForm((f) => ({ ...f, extraRows: f.extraRows.filter((_, j) => j !== idx) }))}
                           className="rounded-lg border border-outline-variant/30 px-2 py-1 text-xs"
                         >
-                          刪除
+                          {tr(locale, "刪除", "删除", "Delete")}
                         </button>
                       </div>
                     </div>
@@ -854,32 +929,34 @@ export function MacroPlanPanel({
             </div>
           ) : (
             <div className="space-y-3 text-sm text-on-surface">
-              {formatBibleReadRows(form).map((row) => (
+              {formatBibleReadRows(locale, form).map((row) => (
                 <div key={row.label}>
                   <p className="text-on-surface-variant">{row.label}</p>
                   <p className="whitespace-pre-wrap">{row.value}</p>
                 </div>
               ))}
               <div>
-                <p className="text-on-surface-variant">長線副線</p>
+                <p className="text-on-surface-variant">{tr(locale, "長線副線", "长线副线", "Long-arc Subplots")}</p>
                 <ul className="mt-1 list-disc space-y-1 pl-5">
                   {parseBStories(macroData.bible?.active_b_stories).map((r) => (
                     <li key={r.id}>
                       <p>{r.desc || r.id}</p>
                       {r.resolution_condition ? (
-                        <p className="text-xs text-on-surface-variant">收尾條件：{r.resolution_condition}</p>
+                        <p className="text-xs text-on-surface-variant">
+                          {tr(locale, "收尾條件", "收尾条件", "Resolution Condition")}：{r.resolution_condition}
+                        </p>
                       ) : null}
                     </li>
                   ))}
                 </ul>
               </div>
               <div>
-                <p className="text-on-surface-variant">延伸筆記</p>
+                <p className="text-on-surface-variant">{tr(locale, "延伸筆記", "延伸笔记", "Extra Notes")}</p>
                 <div className="mt-1 space-y-2">
                   {form.extraRows.length === 0 ? <p>—</p> : null}
                   {form.extraRows.map((row, idx) => (
                     <div key={`${row.key}-${idx}`} className="rounded-lg border border-outline-variant/15 bg-surface-container-highest/40 p-2">
-                      <p className="text-xs text-on-surface-variant">{row.key || "（未命名欄位）"}</p>
+                      <p className="text-xs text-on-surface-variant">{row.key || tr(locale, "（未命名欄位）", "（未命名栏位）", "(Unnamed field)")}</p>
                       <p className="whitespace-pre-wrap">{row.value || "—"}</p>
                     </div>
                   ))}
@@ -893,10 +970,10 @@ export function MacroPlanPanel({
       {tab === "volumes" ? (
         <div className="space-y-4">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <h3 className="font-body font-semibold text-on-surface">分卷</h3>
+            <h3 className="font-body font-semibold text-on-surface">{tr(locale, "分卷", "分卷", "Volumes")}</h3>
             {canEdit ? (
               <button type="button" onClick={() => addVolume()} className="rounded-lg border border-secondary/40 px-3 py-2 text-sm font-semibold text-secondary">
-                新增分卷
+                {tr(locale, "新增分卷", "新增分卷", "Add Volume")}
               </button>
             ) : null}
           </div>
@@ -909,9 +986,13 @@ export function MacroPlanPanel({
                 <div key={v.volume_id} className="rounded-xl border border-outline-variant/15 bg-surface-container-highest/40 p-4">
                   <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-start">
                     <div className="min-w-0 flex-1 space-y-2">
-                      <p className="font-medium text-on-surface">{dataVol.title || "（未命名分卷）"}</p>
+                      <p className="font-medium text-on-surface">{dataVol.title || tr(locale, "（未命名分卷）", "（未命名分卷）", "(Untitled volume)")}</p>
                       <p className="text-xs text-on-surface-variant">
-                        第 {dataVol.chapter_start}–{dataVol.chapter_end} 章
+                        {locale === "en"
+                          ? `Chapter ${dataVol.chapter_start}-${dataVol.chapter_end}`
+                          : locale === "zh-Hans"
+                            ? `第 ${dataVol.chapter_start}–${dataVol.chapter_end} 章`
+                            : `第 ${dataVol.chapter_start}–${dataVol.chapter_end} 章`}
                       </p>
                       <p className="text-sm text-on-surface">{dataVol.summary || "—"}</p>
                     </div>
@@ -922,11 +1003,11 @@ export function MacroPlanPanel({
                           onClick={() => startEditVolume(v.volume_id)}
                           className="rounded-lg border border-outline-variant/30 px-3 py-1.5 text-sm"
                         >
-                          編輯
+                          {tr(locale, "編輯", "编辑", "Edit")}
                         </button>
                         {show ? (
                           <button type="button" onClick={() => deleteVolume(v.volume_id)} className="rounded-lg border border-red-500/30 px-3 py-1.5 text-sm text-red-300">
-                            刪除
+                            {tr(locale, "刪除", "删除", "Delete")}
                           </button>
                         ) : null}
                       </div>
@@ -935,10 +1016,10 @@ export function MacroPlanPanel({
                   {show && draftMacro ? (
                     <div className="grid grid-cols-12 gap-3 border-t border-outline-variant/10 pt-3">
                       <div className="col-span-12 sm:col-span-3">
-                        <ReadonlyId label="內部編號" value={v.volume_id} />
+                        <ReadonlyId label={tr(locale, "內部編號", "内部编号", "Internal ID")} value={v.volume_id} />
                       </div>
                       <label className="col-span-12 sm:col-span-9">
-                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">分卷標題</span>
+                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">{tr(locale, "分卷標題", "分卷标题", "Volume title")}</span>
                         <input
                           value={dataVol.title}
                           onChange={(e) => updateVolume(v.volume_id, { title: e.target.value })}
@@ -946,7 +1027,7 @@ export function MacroPlanPanel({
                         />
                       </label>
                       <label className="col-span-12 sm:col-span-12">
-                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">梗概</span>
+                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">{tr(locale, "梗概", "梗概", "Summary")}</span>
                         <textarea
                           value={dataVol.summary}
                           onChange={(e) => updateVolume(v.volume_id, { summary: e.target.value })}
@@ -955,7 +1036,7 @@ export function MacroPlanPanel({
                         />
                       </label>
                       <label className="col-span-6 sm:col-span-3">
-                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">起始章</span>
+                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">{tr(locale, "起始章", "起始章", "Start chapter")}</span>
                         <input
                           type="number"
                           value={dataVol.chapter_start}
@@ -964,7 +1045,7 @@ export function MacroPlanPanel({
                         />
                       </label>
                       <label className="col-span-6 sm:col-span-3">
-                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">結束章</span>
+                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">{tr(locale, "結束章", "结束章", "End chapter")}</span>
                         <input
                           type="number"
                           value={dataVol.chapter_end}
@@ -973,7 +1054,7 @@ export function MacroPlanPanel({
                         />
                       </label>
                       <label className="col-span-12 sm:col-span-3">
-                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">本卷字數目標（選填）</span>
+                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">{tr(locale, "本卷字數目標（選填）", "本卷字数目标（选填）", "Target words (optional)")}</span>
                         <input
                           type="number"
                           value={dataVol.target_volume_words ?? ""}
@@ -997,16 +1078,16 @@ export function MacroPlanPanel({
       {tab === "cast" ? (
         <div className="space-y-4">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <h3 className="font-body font-semibold text-on-surface">人物</h3>
+            <h3 className="font-body font-semibold text-on-surface">{tr(locale, "人物", "人物", "Cast")}</h3>
             {canEdit ? (
               <button type="button" onClick={() => addCastMember()} className="rounded-lg border border-secondary/40 px-3 py-2 text-sm font-semibold text-secondary">
-                新增人物
+                {tr(locale, "新增人物", "新增人物", "Add Character")}
               </button>
             ) : null}
           </div>
           {canEdit ? (
             <label className="mb-2 block max-w-md">
-              <span className="mb-1 block font-label text-[10px] text-on-surface-variant">敘事視角主角</span>
+              <span className="mb-1 block font-label text-[10px] text-on-surface-variant">{tr(locale, "敘事視角主角", "叙事视角主角", "POV Protagonist")}</span>
               <select
                 value={displayMacro?.protagonist_character_id ?? ""}
                 onChange={(e) => {
@@ -1017,7 +1098,7 @@ export function MacroPlanPanel({
                 }}
                 className="w-full rounded-lg border border-outline-variant/25 bg-surface-container-highest px-3 py-2 text-sm"
               >
-                <option value="">（未指定）</option>
+                <option value="">{tr(locale, "（未指定）", "（未指定）", "(Unspecified)")}</option>
                 {castList.map((c) => (
                   <option key={c.node_id} value={c.node_id}>
                     {c.canonical_name}
@@ -1035,30 +1116,30 @@ export function MacroPlanPanel({
                   <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-start">
                     <div className="min-w-0 flex-1 space-y-1">
                       <p className="font-medium">{c.canonical_name}</p>
-                      <p className="text-xs text-on-surface-variant">{roleLabel(c.role)}</p>
+                      <p className="text-xs text-on-surface-variant">{roleLabel(c.role, locale)}</p>
                       <p className="text-sm">{c.short_bio || "—"}</p>
-                      <p className="text-xs text-on-surface-variant">核心動機：{c.core_motivation || "—"}</p>
-                      <p className="text-xs text-on-surface-variant">核心價值：{c.core_value || "—"}</p>
+                      <p className="text-xs text-on-surface-variant">{tr(locale, "核心動機", "核心动机", "Core Motivation")}：{c.core_motivation || "—"}</p>
+                      <p className="text-xs text-on-surface-variant">{tr(locale, "核心價值", "核心价值", "Core Value")}：{c.core_value || "—"}</p>
                       <details className="mt-2 rounded-lg border border-outline-variant/15 bg-surface-container-highest/40 p-2">
-                        <summary className="cursor-pointer text-xs font-semibold text-secondary">展開完整人物資訊</summary>
+                        <summary className="cursor-pointer text-xs font-semibold text-secondary">{tr(locale, "展開完整人物資訊", "展开完整人物信息", "Expand full character info")}</summary>
                         <div className="mt-2 grid grid-cols-1 gap-1 text-xs text-on-surface-variant sm:grid-cols-2">
-                          <p>別名：{(c.aliases ?? []).join("、") || "—"}</p>
-                          <p>年齡：{c.age || "—"}</p>
-                          <p>個性：{c.personality || "—"}</p>
-                          <p>語氣風格：{c.speech_style || "—"}</p>
-                          <p>致命弱點：{c.fatal_flaw || "—"}</p>
-                          <p>習慣與怪癖：{c.quirks_and_habits || "—"}</p>
+                          <p>{tr(locale, "別名", "别名", "Aliases")}：{(c.aliases ?? []).join("、") || "—"}</p>
+                          <p>{tr(locale, "年齡", "年龄", "Age")}：{c.age || "—"}</p>
+                          <p>{tr(locale, "個性", "个性", "Personality")}：{c.personality || "—"}</p>
+                          <p>{tr(locale, "語氣風格", "语气风格", "Speech Style")}：{c.speech_style || "—"}</p>
+                          <p>{tr(locale, "致命弱點", "致命弱点", "Fatal Flaw")}：{c.fatal_flaw || "—"}</p>
+                          <p>{tr(locale, "習慣與怪癖", "习惯与怪癖", "Quirks & Habits")}：{c.quirks_and_habits || "—"}</p>
                         </div>
                       </details>
                     </div>
                     {canEdit ? (
                       <div className="flex min-w-[5.5rem] shrink-0 flex-col gap-2 self-start">
                         <button type="button" onClick={() => startEditCast(c.node_id)} className="rounded-lg border border-outline-variant/30 px-3 py-1.5 text-sm">
-                          編輯
+                          {tr(locale, "編輯", "编辑", "Edit")}
                         </button>
                         {show ? (
                           <button type="button" onClick={() => deleteCastMember(c.node_id)} className="rounded-lg border border-red-500/30 px-3 py-1.5 text-sm text-red-300">
-                            刪除
+                            {tr(locale, "刪除", "删除", "Delete")}
                           </button>
                         ) : null}
                       </div>
@@ -1067,10 +1148,10 @@ export function MacroPlanPanel({
                   {show && draftMacro ? (
                     <div className="grid grid-cols-12 gap-3 border-t border-outline-variant/10 pt-3">
                       <div className="col-span-12 sm:col-span-3">
-                        <ReadonlyId label="內部編號" value={c.node_id} />
+                        <ReadonlyId label={tr(locale, "內部編號", "内部编号", "Internal ID")} value={c.node_id} />
                       </div>
                       <label className="col-span-12 sm:col-span-4">
-                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">姓名／稱呼</span>
+                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">{tr(locale, "姓名／稱呼", "姓名/称呼", "Name / Display Name")}</span>
                         <input
                           value={c.canonical_name}
                           onChange={(e) => updateCastMember(c.node_id, { canonical_name: e.target.value })}
@@ -1078,19 +1159,19 @@ export function MacroPlanPanel({
                         />
                       </label>
                       <label className="col-span-12 sm:col-span-3">
-                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">戲劇角色</span>
+                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">{tr(locale, "戲劇角色", "戏剧角色", "Role")}</span>
                         <select
                           value={c.role}
                           onChange={(e) => updateCastMember(c.node_id, { role: e.target.value })}
                           className="w-full rounded-lg border border-outline-variant/25 bg-surface-container-highest px-3 py-2 text-sm"
                         >
-                          <option value="protagonist">主角</option>
-                          <option value="supporting">配角</option>
-                          <option value="antagonist">對立角色</option>
+                          <option value="protagonist">{tr(locale, "主角", "主角", "Protagonist")}</option>
+                          <option value="supporting">{tr(locale, "配角", "配角", "Supporting")}</option>
+                          <option value="antagonist">{tr(locale, "對立角色", "对立角色", "Antagonist")}</option>
                         </select>
                       </label>
                       <label className="col-span-12">
-                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">簡短小傳</span>
+                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">{tr(locale, "簡短小傳", "简短小传", "Short Bio")}</span>
                         <textarea
                           value={c.short_bio ?? ""}
                           onChange={(e) => updateCastMember(c.node_id, { short_bio: e.target.value })}
@@ -1099,7 +1180,7 @@ export function MacroPlanPanel({
                         />
                       </label>
                       <label className="col-span-12 sm:col-span-6">
-                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">別名（每行一個）</span>
+                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">{tr(locale, "別名（每行一個）", "别名（每行一个）", "Aliases (one per line)")}</span>
                         <textarea
                           value={(c.aliases ?? []).join("\n")}
                           onChange={(e) =>
@@ -1115,7 +1196,7 @@ export function MacroPlanPanel({
                         />
                       </label>
                       <label className="col-span-12 sm:col-span-3">
-                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">年齡（選填）</span>
+                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">{tr(locale, "年齡（選填）", "年龄（选填）", "Age (optional)")}</span>
                         <input
                           value={c.age ?? ""}
                           onChange={(e) => updateCastMember(c.node_id, { age: e.target.value })}
@@ -1123,7 +1204,7 @@ export function MacroPlanPanel({
                         />
                       </label>
                       <label className="col-span-12 sm:col-span-3">
-                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">個性（選填）</span>
+                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">{tr(locale, "個性（選填）", "个性（选填）", "Personality (optional)")}</span>
                         <input
                           value={c.personality ?? ""}
                           onChange={(e) => updateCastMember(c.node_id, { personality: e.target.value })}
@@ -1131,7 +1212,7 @@ export function MacroPlanPanel({
                         />
                       </label>
                       <label className="col-span-12 sm:col-span-6">
-                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">核心動機</span>
+                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">{tr(locale, "核心動機", "核心动机", "Core Motivation")}</span>
                         <input
                           value={c.core_motivation ?? ""}
                           onChange={(e) => updateCastMember(c.node_id, { core_motivation: e.target.value })}
@@ -1139,7 +1220,7 @@ export function MacroPlanPanel({
                         />
                       </label>
                       <label className="col-span-12 sm:col-span-6">
-                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">核心價值</span>
+                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">{tr(locale, "核心價值", "核心价值", "Core Value")}</span>
                         <input
                           value={c.core_value ?? ""}
                           onChange={(e) => updateCastMember(c.node_id, { core_value: e.target.value })}
@@ -1147,7 +1228,7 @@ export function MacroPlanPanel({
                         />
                       </label>
                       <label className="col-span-12 sm:col-span-6">
-                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">語氣風格</span>
+                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">{tr(locale, "語氣風格", "语气风格", "Speech Style")}</span>
                         <textarea
                           value={c.speech_style ?? ""}
                           onChange={(e) => updateCastMember(c.node_id, { speech_style: e.target.value })}
@@ -1156,7 +1237,7 @@ export function MacroPlanPanel({
                         />
                       </label>
                       <label className="col-span-12 sm:col-span-6">
-                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">致命弱點</span>
+                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">{tr(locale, "致命弱點", "致命弱点", "Fatal Flaw")}</span>
                         <textarea
                           value={c.fatal_flaw ?? ""}
                           onChange={(e) => updateCastMember(c.node_id, { fatal_flaw: e.target.value })}
@@ -1165,7 +1246,7 @@ export function MacroPlanPanel({
                         />
                       </label>
                       <label className="col-span-12">
-                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">習慣與怪癖</span>
+                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">{tr(locale, "習慣與怪癖", "习惯与怪癖", "Quirks & Habits")}</span>
                         <textarea
                           value={c.quirks_and_habits ?? ""}
                           onChange={(e) => updateCastMember(c.node_id, { quirks_and_habits: e.target.value })}
@@ -1185,14 +1266,14 @@ export function MacroPlanPanel({
       {tab === "anchors" ? (
         <div className="space-y-4">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <h3 className="font-body font-semibold text-on-surface">情節節點</h3>
+            <h3 className="font-body font-semibold text-on-surface">{tr(locale, "情節節點", "情节节点", "Anchors")}</h3>
             {canEdit ? (
               <button
                 type="button"
                 onClick={() => addAnchor()}
                 className="rounded-lg border border-secondary/40 px-3 py-2 text-sm font-semibold text-secondary"
               >
-                新增情節節點
+                {tr(locale, "新增情節節點", "新增情节节点", "Add Anchor")}
               </button>
             ) : null}
           </div>
@@ -1208,24 +1289,24 @@ export function MacroPlanPanel({
               };
               const resolvedVolumeId = findVolumeIdByChapter(displayMacro?.volumes ?? [], e.chapter_target);
               const resolvedVolumeName =
-                (displayMacro?.volumes ?? []).find((v) => v.volume_id === resolvedVolumeId)?.title || resolvedVolumeId || "未匹配到分卷";
+                (displayMacro?.volumes ?? []).find((v) => v.volume_id === resolvedVolumeId)?.title || resolvedVolumeId || tr(locale, "未匹配到分卷", "未匹配到分卷", "No matched volume");
               return (
                 <div key={a.anchor_id} className="rounded-xl border border-outline-variant/15 bg-surface-container-highest/40 p-4">
                   <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-start">
                     <div className="min-w-0 flex-1 space-y-1">
                       <p className="font-medium">
-                        第 {a.chapter_target} 章 · {a.title}
+                        {locale === "en" ? `Chapter ${a.chapter_target}` : `第 ${a.chapter_target} 章`} · {a.title}
                       </p>
                       <p className="text-sm text-on-surface-variant">{a.description || "—"}</p>
                     </div>
                     {canEdit ? (
                       <div className="flex min-w-[5.5rem] shrink-0 flex-col gap-2 self-start">
                         <button type="button" onClick={() => startEditAnchor(a.anchor_id)} className="rounded-lg border border-outline-variant/30 px-3 py-1.5 text-sm">
-                          編輯
+                          {tr(locale, "編輯", "编辑", "Edit")}
                         </button>
                         {show ? (
                           <button type="button" onClick={() => deleteAnchor(a.anchor_id)} className="rounded-lg border border-red-500/30 px-3 py-1.5 text-sm text-red-300">
-                            刪除
+                            {tr(locale, "刪除", "删除", "Delete")}
                           </button>
                         ) : null}
                       </div>
@@ -1234,10 +1315,10 @@ export function MacroPlanPanel({
                   {show && draftMacro ? (
                     <div className="grid grid-cols-12 gap-3 border-t border-outline-variant/10 pt-3">
                       <div className="col-span-12 sm:col-span-3">
-                        <ReadonlyId label="內部編號" value={a.anchor_id} />
+                        <ReadonlyId label={tr(locale, "內部編號", "内部编号", "Internal ID")} value={a.anchor_id} />
                       </div>
                       <label className="col-span-12 sm:col-span-5">
-                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">節點標題</span>
+                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">{tr(locale, "節點標題", "节点标题", "Anchor Title")}</span>
                         <input
                           value={e.title}
                           onChange={(ev) =>
@@ -1250,7 +1331,7 @@ export function MacroPlanPanel({
                         />
                       </label>
                       <label className="col-span-12 sm:col-span-4">
-                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">發生章節</span>
+                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">{tr(locale, "發生章節", "发生章节", "Chapter Target")}</span>
                         <input
                           type="number"
                           value={e.chapter_target}
@@ -1264,12 +1345,12 @@ export function MacroPlanPanel({
                         />
                       </label>
                       <div className="col-span-12 sm:col-span-3">
-                        <ReadonlyId label="自動匹配分卷" value={resolvedVolumeName} />
+                        <ReadonlyId label={tr(locale, "自動匹配分卷", "自动匹配分卷", "Matched Volume")} value={resolvedVolumeName} />
                       </div>
                       <label className="col-span-12">
-                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">本章敘事目標</span>
+                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">{tr(locale, "本章敘事目標", "本章叙事目标", "Narrative Goal")}</span>
                         <textarea
-                          aria-label="本章敘事目標（可留空；細節可交給後續流程補全）"
+                          aria-label={tr(locale, "本章敘事目標（可留空；細節可交給後續流程補全）", "本章叙事目标（可留空；细节可交给后续流程补全）", "Narrative goal (optional)") }
                           value={e.chapter_goal}
                           onChange={(ev) =>
                             setAnchorEdits((prev) => ({
@@ -1280,7 +1361,9 @@ export function MacroPlanPanel({
                           rows={3}
                           className="w-full resize-y rounded-lg border border-outline-variant/25 bg-surface-container-highest px-3 py-2 text-sm"
                         />
-                        <p className="mt-1 text-xs text-on-surface-variant">僅需描述此章要達成的敘事目標；細節可由後續步驟協助補齊。</p>
+                        <p className="mt-1 text-xs text-on-surface-variant">
+                          {tr(locale, "僅需描述此章要達成的敘事目標；細節可由後續步驟協助補齊。", "仅需描述本章叙事目标；细节可由后续步骤补齐。", "Describe this chapter's narrative goal; details can be filled by later steps.")}
+                        </p>
                       </label>
                     </div>
                   ) : null}
@@ -1294,9 +1377,9 @@ export function MacroPlanPanel({
   );
 }
 
-function roleLabel(role: string): string {
-  if (role === "protagonist") return "主角";
-  if (role === "supporting") return "配角";
-  if (role === "antagonist") return "對立角色";
+function roleLabel(role: string, locale: "zh-Hant" | "zh-Hans" | "en"): string {
+  if (role === "protagonist") return tr(locale, "主角", "主角", "Protagonist");
+  if (role === "supporting") return tr(locale, "配角", "配角", "Supporting");
+  if (role === "antagonist") return tr(locale, "對立角色", "对立角色", "Antagonist");
   return role || "—";
 }

@@ -37,6 +37,7 @@ def test_extraction_prompt_documents_all_edge_types() -> None:
     assert "RULE" in prompt
     assert "Truth vs publicity" in prompt
     assert "Rhetoric filter" in prompt
+    assert "Planner typed-link policy" in prompt
     assert "planner_visibility_contract" in prompt
     assert "守衛長官暗中監視" in prompt
 

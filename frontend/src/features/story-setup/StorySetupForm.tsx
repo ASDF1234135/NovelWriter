@@ -1,5 +1,6 @@
 import { type ChangeEvent, useEffect, useRef, useState } from "react";
 import type { ImportMergeMode, StoryInput, StoryOutputLanguage } from "../../types";
+import { useI18n } from "../../i18n/useI18n";
 
 const MACRO_NOTES_SOFT_MAX = 8000;
 
@@ -80,13 +81,20 @@ export function StorySetupForm({
   onBusy,
   onError,
 }: Props) {
-  const [title, setTitle] = useState("王都疑雲");
-  const [premise, setPremise] = useState("一名被流放的年輕騎士回到王都，追查皇室命案背後的真正凶手。");
+  const { locale, t } = useI18n();
+  const seedTitle = locale === "en" ? "Mists of the Royal Capital" : "王都疑雲";
+  const seedPremise =
+    locale === "en"
+      ? "A young exiled knight returns to the capital to uncover the truth behind a royal murder."
+      : "一名被流放的年輕騎士回到王都，追查皇室命案背後的真正凶手。";
+  const seedOutputLanguage: StoryOutputLanguage = locale === "en" ? "en" : locale === "zh-Hans" ? "zh-Hans" : "zh-Hant";
+  const [title, setTitle] = useState(seedTitle);
+  const [premise, setPremise] = useState(seedPremise);
   const [targetTotalWords, setTargetTotalWords] = useState(100000);
   const [planRetryLimit, setPlanRetryLimit] = useState(3);
   const [draftLoopRetryLimit, setDraftLoopRetryLimit] = useState(3);
   const [macroAuthorNotes, setMacroAuthorNotes] = useState("");
-  const [outputLanguage, setOutputLanguage] = useState<StoryOutputLanguage>("zh-Hant");
+  const [outputLanguage, setOutputLanguage] = useState<StoryOutputLanguage>(seedOutputLanguage);
   const [saveBusy, setSaveBusy] = useState(false);
   const importInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -101,16 +109,16 @@ export function StorySetupForm({
       setMacroAuthorNotes(h.macroAuthorNotes);
       setOutputLanguage(h.outputLanguage);
     } else {
-      setTitle("王都疑雲");
-      setPremise("一名被流放的年輕騎士回到王都，追查皇室命案背後的真正凶手。");
+      setTitle(seedTitle);
+      setPremise(seedPremise);
       setTargetTotalWords(100000);
       setPlanRetryLimit(3);
       setDraftLoopRetryLimit(3);
       setMacroAuthorNotes("");
-      setOutputLanguage("zh-Hant");
+      setOutputLanguage(seedOutputLanguage);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- hydrate only when resetKey bumps
-  }, [resetKey]);
+  }, [resetKey, seedOutputLanguage, seedPremise, seedTitle]);
 
   useEffect(() => {
     if (locked || !onValuesChange) return;
@@ -182,7 +190,7 @@ export function StorySetupForm({
   }
 
   function askImportMode(): ImportMergeMode {
-    const replace = window.confirm("匯入模式：按「確定」= 覆蓋目前資料；按「取消」= 合併（已有值優先）");
+    const replace = window.confirm(t("setup.importModeConfirm"));
     return replace ? "replace" : "merge";
   }
 
@@ -197,7 +205,7 @@ export function StorySetupForm({
       const text = await file.text();
       await onImportProjectBundle(text, mode);
     } catch (err) {
-      onError?.(err instanceof Error ? err.message : "匯入專案 JSON 失敗");
+      onError?.(err instanceof Error ? err.message : t("setup.importFailed"));
     } finally {
       onBusy?.(false);
     }
@@ -208,25 +216,25 @@ export function StorySetupForm({
       <div className="flex flex-wrap items-center gap-3">
         <h2 className="flex items-center gap-2 font-headline text-lg font-bold text-primary">
           <span className="material-symbols-outlined">tune</span>
-          設定項目
+          {t("setup.items")}
         </h2>
         {locked ? (
           <span className="rounded-full border border-primary/30 bg-primary/15 px-3 py-1 font-label text-[10px] font-bold uppercase tracking-widest text-primary">
-            已鎖定（撰寫本章後不可修改）
+            {t("setup.locked")}
           </span>
         ) : null}
       </div>
       <p className="font-body text-sm text-on-surface-variant">
-        世界觀總表會依你的故事梗概與補充筆記，在執行世界觀編譯後自動產生；一般無需手動編輯結構化檔案。
+        {t("setup.worldHint")}
       </p>
       <form className="flex flex-col gap-5" onSubmit={handleSubmit}>
         <div className="space-y-1">
-          <label className="auteur-label">書名</label>
+          <label className="auteur-label">{t("setup.title")}</label>
           <input className="auteur-input" value={title} onChange={(e) => setTitle(e.target.value)} disabled={fieldDisabled} readOnly={locked} />
         </div>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div className="space-y-1">
-            <label className="auteur-label">全書目標字數</label>
+            <label className="auteur-label">{t("setup.targetWords")}</label>
             <input
               type="number"
               className="auteur-input text-center font-label"
@@ -237,7 +245,7 @@ export function StorySetupForm({
             />
           </div>
           <div className="space-y-1">
-            <label className="auteur-label">大綱重試次數上限</label>
+            <label className="auteur-label">{t("setup.planRetryLimit")}</label>
             <input
               type="number"
               min={0}
@@ -250,7 +258,7 @@ export function StorySetupForm({
             />
           </div>
           <div className="space-y-1 sm:col-span-2">
-            <label className="auteur-label">內文與閱讀檢查重試次數</label>
+            <label className="auteur-label">{t("setup.draftRetryLimit")}</label>
             <input
               type="number"
               min={0}
@@ -264,7 +272,7 @@ export function StorySetupForm({
           </div>
         </div>
         <div className="space-y-1">
-          <label className="auteur-label">產出語言 / Output language</label>
+          <label className="auteur-label">{t("setup.outputLanguage")}</label>
           <select
             className="auteur-input font-body"
             value={outputLanguage}
@@ -272,16 +280,16 @@ export function StorySetupForm({
             disabled={fieldDisabled}
             aria-label="Story output language"
           >
-            <option value="zh-Hant">繁體中文（Traditional Chinese）</option>
-            <option value="zh-Hans">简体中文（Simplified Chinese）</option>
-            <option value="en">English</option>
+            <option value="zh-Hant">{t("lang.zhHant")}</option>
+            <option value="zh-Hans">{t("lang.zhHans")}</option>
+            <option value="en">{t("lang.en")}</option>
           </select>
           <p className="text-xs text-on-surface-variant">
-            影響章節正文、大綱、審稿回饋與圖譜摘要的用語（系統指令仍為英文）。
+            {t("setup.outputLanguageHint")}
           </p>
         </div>
         <div className="space-y-1">
-          <label className="auteur-label">故事核心／梗概</label>
+          <label className="auteur-label">{t("setup.premise")}</label>
           <textarea
             className="auteur-input min-h-[120px] resize-y font-body leading-relaxed"
             value={premise}
@@ -293,10 +301,10 @@ export function StorySetupForm({
         </div>
         <div className="space-y-1 rounded-xl border border-outline-variant/15 bg-surface-container-highest/40 p-3">
           <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <label className="auteur-label">作者補充（重要）</label>
+            <label className="auteur-label">{t("setup.authorNotes")}</label>
             <span className={`font-mono text-xs ${notesWarn ? "text-tertiary" : "text-on-surface-variant"}`}>
-              {notesLen} / ~{MACRO_NOTES_SOFT_MAX} 建議上限
-              {notesWarn ? "（過長時系統會自動截短）" : ""}
+              {t("setup.notesSoftCap", undefined, { count: notesLen, max: MACRO_NOTES_SOFT_MAX })}
+              {notesWarn ? t("setup.notesSoftCapOverflow") : ""}
             </span>
           </div>
           <textarea
@@ -304,7 +312,7 @@ export function StorySetupForm({
             value={macroAuthorNotes}
             onChange={(e) => setMacroAuthorNotes(e.target.value)}
             rows={6}
-            placeholder="世界觀細節、角色關係、禁忌、篇幅節奏……格式不拘（Markdown、條列皆可）。"
+            placeholder={t("setup.authorNotesPlaceholder")}
             disabled={fieldDisabled}
             readOnly={locked}
           />
@@ -314,7 +322,7 @@ export function StorySetupForm({
             {showCreateButton ? (
               <button type="submit" className="btn-primary-gradient flex-1 justify-center" disabled={disabled}>
                 <span className="material-symbols-outlined">add_circle</span>
-                建立故事
+                {t("setup.createStory")}
               </button>
             ) : null}
             {onSaveSettings ? (
@@ -325,13 +333,13 @@ export function StorySetupForm({
                 onClick={() => void handleSaveSettings()}
               >
                 <span className="material-symbols-outlined">save</span>
-                儲存設定
+                {t("setup.saveSettings")}
               </button>
             ) : null}
           </div>
         )}
         <div className="border-t border-outline-variant/10 pt-4">
-          <p className="font-label text-[10px] font-bold uppercase tracking-wider text-secondary">專案檔案（重要）</p>
+          <p className="font-label text-[10px] font-bold uppercase tracking-wider text-secondary">{t("setup.projectFiles")}</p>
           <input
             ref={importInputRef}
             type="file"
@@ -346,7 +354,7 @@ export function StorySetupForm({
               onClick={onExportProjectBundle}
               disabled={!onExportProjectBundle}
             >
-              匯出專案 JSON
+              {t("setup.exportProjectJson")}
             </button>
             <button
               type="button"
@@ -354,7 +362,7 @@ export function StorySetupForm({
               onClick={() => importInputRef.current?.click()}
               disabled={!onImportProjectBundle || fieldDisabled}
             >
-              匯入專案 JSON
+              {t("setup.importProjectJson")}
             </button>
           </div>
         </div>

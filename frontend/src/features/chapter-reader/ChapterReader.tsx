@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import type { ChapterContent, ChapterSummary, StoryOutputLanguage } from "../../types";
 import { chapterStatusLabel } from "../ui-copy/workflowDisplay";
+import { useI18n } from "../../i18n/useI18n";
 
 /** Whitespace-separated tokens; aligns with backend English chapter length for typical prose. */
 function englishWordCount(text: string): number {
@@ -33,24 +34,33 @@ export function ChapterReader({
   onDownloadChapter,
   rightRail,
 }: Props) {
+  const { locale } = useI18n();
   const content = chapter?.content ?? "";
   const isEn = outputLanguage === "en";
   const lengthStat = isEn ? englishWordCount(content) : content.replace(/\s/g, "").length;
-  const lengthLabel = isEn ? "詞數（words）" : "字元量（近似）";
+  const lengthLabel = isEn ? "Words" : locale === "en" ? "Characters (approx.)" : locale === "zh-Hans" ? "字数（近似）" : "字元量（近似）";
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden lg:flex-row">
       {!storyId ? (
         <div className="flex flex-1 items-center justify-center p-12 font-body text-on-surface-variant">
-          請先到「故事設定」建立故事並產生章節。
+          {locale === "en"
+            ? "Create a story in Setup first, then generate chapters."
+            : locale === "zh-Hans"
+              ? "请先到“故事设置”建立故事并生成章节。"
+              : "請先到「故事設定」建立故事並產生章節。"}
         </div>
       ) : (
         <>
           <aside className="w-full shrink-0 border-b border-outline-variant/10 bg-surface-container-low lg:w-56 lg:border-b-0 lg:border-r">
             <div className="p-4">
-              <h3 className="mb-3 font-headline text-xs font-bold uppercase tracking-wider text-primary">章節列表</h3>
+              <h3 className="mb-3 font-headline text-xs font-bold uppercase tracking-wider text-primary">
+                {locale === "en" ? "Chapters" : locale === "zh-Hans" ? "章节列表" : "章節列表"}
+              </h3>
               {chapters.length === 0 ? (
-                <p className="font-body text-sm text-on-surface-variant">尚無已落盤章節。</p>
+                <p className="font-body text-sm text-on-surface-variant">
+                  {locale === "en" ? "No chapters available yet." : locale === "zh-Hans" ? "尚无已落盘章节。" : "尚無已落盤章節。"}
+                </p>
               ) : (
                 <div className="flex max-h-48 flex-col gap-2 overflow-y-auto no-scrollbar lg:max-h-[calc(100vh-12rem)]">
                   {chapters.map((item) => (
@@ -80,10 +90,14 @@ export function ChapterReader({
             <div className="mx-auto max-w-read">
               <header className="mb-12">
                 <span className="font-label text-sm font-bold uppercase tracking-[0.2em] text-secondary">
-                  {chapter ? `第 ${chapter.chapter_id} 章` : "—"}
+                  {chapter
+                    ? locale === "en"
+                      ? `Chapter ${chapter.chapter_id}`
+                      : `第 ${chapter.chapter_id} 章`
+                    : "—"}
                 </span>
                 <h1 className="mt-4 font-body text-4xl italic leading-tight text-on-surface md:text-5xl">
-                  {chapter?.title ?? "尚未選擇章節"}
+                  {chapter?.title ?? (locale === "en" ? "No chapter selected" : locale === "zh-Hans" ? "尚未选择章节" : "尚未選擇章節")}
                 </h1>
                 {chapter ? (
                   <div className="mt-8 flex flex-wrap items-center gap-4 font-label text-xs uppercase tracking-widest text-on-surface-variant">
@@ -100,14 +114,18 @@ export function ChapterReader({
                   <pre className="whitespace-pre-wrap font-body text-lg leading-[1.8]">{chapter.content}</pre>
                 </article>
               ) : (
-                <p className="font-body text-on-surface-variant">選擇左側章節以閱讀內容。</p>
+                <p className="font-body text-on-surface-variant">
+                  {locale === "en" ? "Choose a chapter from the left." : locale === "zh-Hans" ? "选择左侧章节以阅读内容。" : "選擇左側章節以閱讀內容。"}
+                </p>
               )}
             </div>
           </section>
 
           <div className="flex w-full flex-col border-t border-outline-variant/10 bg-surface-container-low lg:w-80 lg:border-l lg:border-t-0">
             <div className="flex items-center justify-between border-b border-outline-variant/10 p-4">
-              <h2 className="font-label text-xs font-extrabold uppercase tracking-[0.2em] text-primary">操作</h2>
+              <h2 className="font-label text-xs font-extrabold uppercase tracking-[0.2em] text-primary">
+                {locale === "en" ? "Actions" : locale === "zh-Hans" ? "操作" : "操作"}
+              </h2>
               {chapter ? (
                 <button
                   type="button"
@@ -116,7 +134,7 @@ export function ChapterReader({
                   className="btn-primary-gradient flex items-center gap-2 py-2 pl-4 pr-5 text-xs"
                 >
                   <span className="material-symbols-outlined text-base">download</span>
-                  下載純文字
+                  {locale === "en" ? "Download TXT" : locale === "zh-Hans" ? "下载纯文本" : "下載純文字"}
                 </button>
               ) : null}
             </div>

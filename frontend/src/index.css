@@ -3,8 +3,32 @@
 @tailwind utilities;
 
 @layer base {
+  html,
+  body,
+  #root {
+    min-height: 100%;
+  }
+
   body {
     @apply m-0 min-h-screen bg-background font-body text-on-surface antialiased selection:bg-primary/30;
+    font-family:
+      Newsreader,
+      "Noto Serif TC",
+      "PingFang TC",
+      "Microsoft JhengHei",
+      Georgia,
+      serif;
+    text-rendering: optimizeLegibility;
+  }
+
+  #root {
+    @apply min-h-screen bg-background;
+    opacity: 0;
+    transition: opacity 160ms ease-out;
+  }
+
+  #root.app-ready {
+    opacity: 1;
   }
 }
 
@@ -44,13 +68,13 @@
     @apply rounded-xl bg-surface-container-lowest p-4 font-mono text-sm text-on-surface-variant overflow-auto max-h-[min(420px,50vh)] border border-outline-variant/15;
   }
   .auteur-input {
-    @apply w-full rounded-xl border-none bg-surface-container-highest px-4 py-3 text-on-surface font-headline transition-all focus:outline-none focus:ring-2 focus:ring-primary/20;
+    @apply w-full rounded-xl border-none bg-surface-container-highest px-4 py-3 text-on-surface font-headline transition-[box-shadow,background-color,color] focus:outline-none focus:ring-2 focus:ring-primary/20;
   }
   .auteur-label {
     @apply font-label text-xs font-semibold uppercase tracking-wider text-outline;
   }
   .btn-primary-gradient {
-    @apply inline-flex items-center justify-center gap-2 rounded-full bg-gradient-to-br from-primary to-primary-container px-6 py-3 font-headline font-bold text-on-primary shadow-lg transition-all hover:scale-[1.02] hover:shadow-primarySoft active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:scale-100;
+    @apply inline-flex items-center justify-center gap-2 rounded-full bg-gradient-to-br from-primary to-primary-container px-6 py-3 font-headline font-bold text-on-primary shadow-lg transition-[transform,box-shadow,opacity,filter] hover:scale-[1.02] hover:shadow-primarySoft active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:scale-100;
   }
   .btn-secondary {
     @apply rounded-full border border-outline-variant/30 bg-surface-container-high px-4 py-2 font-label text-xs font-bold uppercase tracking-wider text-on-surface transition-colors hover:bg-surface-bright/40 disabled:opacity-50;

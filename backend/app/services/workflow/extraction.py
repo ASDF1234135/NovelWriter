@@ -17,6 +17,7 @@ from app.domain.schema import (
     ChapterMemoryExtractionOutput,
     EntityExtractionOutput,
     EventOutline,
+    EventLinkType,
     ExtractedEntity,
     ExtractedEntityCandidate,
     ExtractedRelation,
@@ -73,6 +74,7 @@ RELATION_EXTRACTION_GUIDELINES: list[str] = [
     "Truth vs publicity: is_truth and is_public are different axes—true does not imply public.",
     "BELIEVED_AS discipline: do not label trust, dependency, enmity, or emotion as BELIEVED_AS—use HAS_RELATION with context_details. For disguise/doubles with both sides named, prefer IS_ACTUALLY (PERSONA→CHARACTER) or a CONCEPT for the wrong label; avoid ambiguous CHARACTER→CHARACTER BELIEVED_AS.",
     "Causality: use CAUSED only when A is a direct physical/logical prerequisite for B (e.g., switch flip CAUSED explosion). For mere temporal order, never use CAUSED—use HAPPENED_BEFORE or omit.",
+    "Planner typed-link policy: between ground_truth_events, obey provided links strictly (CAUSAL vs TEMPORAL). If relation involves AI-invented event/entity, you may extract a new structurally valid relation.",
     "HAS_ITEM filter: no HAS_ITEM for mundane consumables or meaningless background props.",
     "Public facts: is_public=true only for objectively observable public interaction, possession, or position.",
     "Secret moves, solo clues, surveillance, private knowledge, inner misbelief, or covert travel must use is_public=false.",
@@ -536,6 +538,16 @@ def _validation_gate(
     chapter_id = int(state.get("chapter_id") or 0)
     standard_event_ids = {ev.event_id for ev in events if is_standard_event_id(ev.event_id, chapter_id=chapter_id)}
     event_ids = standard_event_ids or {ev.event_id for ev in events}
+    event_by_id = {ev.event_id: ev for ev in events}
+    allowed_causal_pairs: set[tuple[str, str]] = set()
+    allowed_temporal_pairs: set[tuple[str, str]] = set()
+    for ev in events:
+        for link in ev.links:
+            pair = (link.target_event_id, ev.event_id)
+            if link.link_type == EventLinkType.CAUSAL:
+                allowed_causal_pairs.add(pair)
+            else:
+                allowed_temporal_pairs.add(pair)
     malformed_event_ids = [ev.event_id for ev in events if ev.event_id not in event_ids]
     if malformed_event_ids:
         logger.warning("validation_gate_nonstandard_event_ids", extra={"chapter_id": chapter_id, "event_ids": malformed_event_ids})
@@ -573,6 +585,23 @@ def _validation_gate(
             continue
         if not relation_direction_is_valid(rel.relation_type, sid, tid, node_types):
             continue
+        if (
+            rel.relation_type in {EdgeType.CAUSED, EdgeType.HAPPENED_BEFORE}
+            and sid in event_ids
+            and tid in event_ids
+        ):
+            src_event = event_by_id.get(sid)
+            tgt_event = event_by_id.get(tid)
+            involves_ai_invention = bool(
+                (src_event and src_event.is_ai_invention)
+                or (tgt_event and tgt_event.is_ai_invention)
+            )
+            if not involves_ai_invention:
+                pair = (sid, tid)
+                if rel.relation_type == EdgeType.CAUSED and pair not in allowed_causal_pairs:
+                    continue
+                if rel.relation_type == EdgeType.HAPPENED_BEFORE and pair not in allowed_temporal_pairs:
+                    continue
         details = (rel.context_details or "").casefold()
         if rel.relation_type in {EdgeType.BELIEVED_AS, EdgeType.HAS_ATTRIBUTE} and any(t in details for t in figurative_tokens):
             continue
