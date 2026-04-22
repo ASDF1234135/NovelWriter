@@ -404,11 +404,6 @@ export function solutionsForReason(reason: string): { id: HitlSolutionId; title:
         ),
       },
       {
-        id: "anchor",
-        title: pick("延後故事里程碑", "延后故事里程碑", "Delay Story Milestone"),
-        blurb: pick("把某個關鍵節點改到較晚的章再達成。", "把某个关键节点改到较晚章节达成。", "Move a key milestone to a later chapter."),
-      },
-      {
         id: "director",
         title: pick("微調章節方向", "微调章节方向", "Tune Chapter Direction"),
         blurb: pick(
@@ -507,7 +502,7 @@ export const HITL_REASON_MATRIX: HitlReasonMatrixRow[] = [
     reason: HITL_REASON.PLAN_LOOP,
     title: getSituationCopy(HITL_REASON.PLAN_LOOP).title,
     defaultSolution: "outline",
-    solutionIds: ["outline", "anchor", "director"],
+    solutionIds: ["outline", "director"],
     optionIds: ["allow_adjust_anchor", "force_rewrite_plan", "force_approve_plan"],
   },
   {

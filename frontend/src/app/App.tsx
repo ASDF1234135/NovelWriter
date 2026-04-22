@@ -420,8 +420,7 @@ export default function App() {
   const { locale } = useI18n();
   const navigate = useNavigate();
   const location = useLocation();
-  const [viewState, setViewState] = useState<AppView>(() => pathToView(location.pathname));
-  const view = viewState;
+  const view = pathToView(location.pathname);
   const [storyId, setStoryId] = useState<string>("");
   const [storyTitle, setStoryTitle] = useState<string>("");
   const [chapterId, setChapterId] = useState<number>(1);
@@ -464,19 +463,11 @@ export default function App() {
   const toolbarImportInputRef = useRef<HTMLInputElement | null>(null);
 
   function setView(nextView: AppView, replace = false) {
-    setViewState(nextView);
     const targetPath = VIEW_PATH_MAP[nextView];
     if (location.pathname !== targetPath) {
       navigate(targetPath, { replace });
     }
   }
-
-  useEffect(() => {
-    const fromPath = pathToView(location.pathname);
-    if (fromPath !== viewState) {
-      setViewState(fromPath);
-    }
-  }, [location.pathname, viewState]);
 
   useEffect(() => {
     storyIdRef.current = storyId;
@@ -1488,6 +1479,8 @@ export default function App() {
                 <WorkflowMonitor workflow={workflow} variant="compact" />
                 <HitlPanel
                   workflow={workflow}
+                  graph={graph}
+                  storyId={storyId || null}
                   variant="compact"
                   busy={busy}
                   workflowError={workflowHitlActive ? error : ""}
@@ -1749,7 +1742,14 @@ export default function App() {
                 <div className="min-w-0">
                   <WorkflowMonitor workflow={workflow} />
                   <div className="mt-4">
-                    <HitlPanel workflow={workflow} busy={busy} workflowError={workflowHitlActive ? error : ""} {...hitlHandlers} />
+                    <HitlPanel
+                      workflow={workflow}
+                      graph={graph}
+                      storyId={storyId || null}
+                      busy={busy}
+                      workflowError={workflowHitlActive ? error : ""}
+                      {...hitlHandlers}
+                    />
                   </div>
                 </div>
               </div>

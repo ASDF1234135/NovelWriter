@@ -1,9 +1,11 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter } from "react-router-dom";
 import App from "./app/App";
 import "./index.css";
 import { I18nProvider } from "./i18n/I18nProvider";
+import { queryClient } from "./app/queryClient";
 
 const rootElement = document.getElementById("root");
 const isLocalDevHost =
@@ -35,11 +37,13 @@ if (isLocalDevHost && "PerformanceObserver" in window) {
 
 ReactDOM.createRoot(rootElement!).render(
   <React.StrictMode>
-    <I18nProvider>
-      <BrowserRouter>
-        <App />
-      </BrowserRouter>
-    </I18nProvider>
+    <QueryClientProvider client={queryClient}>
+      <I18nProvider>
+        <BrowserRouter>
+          <App />
+        </BrowserRouter>
+      </I18nProvider>
+    </QueryClientProvider>
   </React.StrictMode>,
 );
 

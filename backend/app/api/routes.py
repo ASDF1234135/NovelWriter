@@ -53,8 +53,14 @@ def create_story(
 
 
 @router.get("/stories")
-def list_stories(story_repository: StoryRepository = Depends(get_story_repository)) -> list[dict]:
-    return story_repository.list_stories()
+def list_stories(story_repository: StoryRepository = Depends(get_story_repository)) -> JSONResponse:
+    payload = story_repository.list_stories()
+    return JSONResponse(
+        content=payload,
+        headers={
+            "Cache-Control": "private, max-age=5",
+        },
+    )
 
 
 @router.get("/stories/{story_id}")

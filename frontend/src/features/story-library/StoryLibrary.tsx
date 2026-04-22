@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { deleteStory, fetchStories } from "../../api";
 import type { StoryListItem } from "../../types";
 import { useI18n } from "../../i18n/useI18n";
@@ -13,6 +14,13 @@ type Props = {
   /** While a chapter workflow is auto-running, block switching stories or starting a new one. */
   blockSelectingStories?: boolean;
 };
+
+let storyLibraryMountSeq = 0;
+const shouldDebugStories =
+  typeof window !== "undefined" &&
+  (window.location.hostname === "localhost" ||
+    window.location.hostname === "127.0.0.1" ||
+    window.location.hostname.endsWith(".local"));
 
 function formatCreatedAt(iso: string, locale: "zh-Hant" | "zh-Hans" | "en"): string {
   try {
@@ -39,29 +47,42 @@ export function StoryLibrary({
   blockSelectingStories = false,
 }: Props) {
   const { t, locale } = useI18n();
-  const [stories, setStories] = useState<StoryListItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState("");
+  const queryClient = useQueryClient();
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState("");
 
   useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      setLoading(true);
-      setLoadError("");
-      try {
-        const rows = await fetchStories();
-        if (!cancelled) setStories(rows);
-      } catch (err) {
-        if (!cancelled) setLoadError(err instanceof Error ? err.message : t("library.loadFailed"));
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
+    if (!shouldDebugStories) return;
+    storyLibraryMountSeq += 1;
+    const mountId = storyLibraryMountSeq;
+    console.debug("[story-library] mounted", {
+      mountId,
+      pathname: window.location.pathname,
+      visibility: document.visibilityState,
+      at: new Date().toISOString(),
+    });
     return () => {
-      cancelled = true;
+      console.debug("[story-library] unmounted", {
+        mountId,
+        pathname: window.location.pathname,
+        visibility: document.visibilityState,
+        at: new Date().toISOString(),
+      });
     };
   }, []);
+
+  const storiesQuery = useQuery<StoryListItem[], Error>({
+    queryKey: ["stories-list"],
+    queryFn: fetchStories,
+    staleTime: 60_000,
+    gcTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    refetchOnMount: false,
+  });
+  const stories = storiesQuery.data ?? [];
+  const loading = storiesQuery.isPending;
+  const loadError = storiesQuery.error?.message ?? "";
 
   return (
     <div className="px-4 pb-16 pt-8 md:px-10 lg:px-12">
@@ -84,8 +105,10 @@ export function StoryLibrary({
         </button>
       </div>
 
-      {loadError ? (
-        <div className="mb-8 max-w-2xl rounded-xl bg-error/10 px-4 py-3 font-label text-sm text-error">{loadError}</div>
+      {loadError || deleteError ? (
+        <div className="mb-8 max-w-2xl rounded-xl bg-error/10 px-4 py-3 font-label text-sm text-error">
+          {loadError || deleteError}
+        </div>
       ) : null}
 
       {loading ? (
@@ -122,13 +145,15 @@ export function StoryLibrary({
                     e.stopPropagation();
                     if (!window.confirm(t("library.deleteConfirm", undefined, { title: s.title }))) return;
                     setDeletingId(s.story_id);
-                    setLoadError("");
+                    setDeleteError("");
                     try {
                       await deleteStory(s.story_id);
-                      setStories((prev) => prev.filter((x) => x.story_id !== s.story_id));
+                      queryClient.setQueryData<StoryListItem[]>(["stories-list"], (prev) =>
+                        (prev ?? []).filter((x) => x.story_id !== s.story_id),
+                      );
                       onStoryDeleted?.(s.story_id);
                     } catch (err) {
-                      setLoadError(err instanceof Error ? err.message : t("library.deleteFailed"));
+                      setDeleteError(err instanceof Error ? err.message : t("library.deleteFailed"));
                     } finally {
                       setDeletingId(null);
                     }

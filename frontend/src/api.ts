@@ -51,6 +51,18 @@ export async function createStory(payload: StoryInput): Promise<Record<string, u
 }
 
 export async function fetchStories(): Promise<StoryListItem[]> {
+  const shouldDebugStories =
+    typeof window !== "undefined" &&
+    (window.location.hostname === "localhost" ||
+      window.location.hostname === "127.0.0.1" ||
+      window.location.hostname.endsWith(".local"));
+  if (shouldDebugStories) {
+    console.debug("[api] fetchStories", {
+      pathname: window.location.pathname,
+      visibility: document.visibilityState,
+      at: new Date().toISOString(),
+    });
+  }
   const response = await fetch(`${API_BASE}/stories`);
   return parseJson(response);
 }

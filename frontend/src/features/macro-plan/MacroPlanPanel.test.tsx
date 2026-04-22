@@ -1,7 +1,13 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import type { ReactElement } from "react";
 import { describe, expect, it, vi } from "vitest";
+import { I18nProvider } from "../../i18n/I18nProvider";
 import { MacroPlanPanel } from "./MacroPlanPanel";
 import { putMacroPlan } from "../../api";
+
+function renderMacro(ui: ReactElement) {
+  return render(<I18nProvider>{ui}</I18nProvider>);
+}
 
 vi.mock("../../api", () => ({
   putMacroPlan: vi.fn().mockResolvedValue({
@@ -18,7 +24,7 @@ vi.mock("../../api", () => ({
 
 describe("MacroPlanPanel", () => {
   it("shows read mode by default and enters bible edit mode", async () => {
-    render(
+    renderMacro(
       <MacroPlanPanel
         macroData={{
           story_id: "s1",
@@ -44,7 +50,7 @@ describe("MacroPlanPanel", () => {
   });
 
   it("shows validation error when required bible fields are empty", async () => {
-    render(
+    renderMacro(
       <MacroPlanPanel
         macroData={{
           story_id: "s1",
@@ -78,7 +84,7 @@ describe("MacroPlanPanel", () => {
 
   it("saves with extra list and optional empty target_state", async () => {
     const onMacroDataUpdate = vi.fn();
-    render(
+    renderMacro(
       <MacroPlanPanel
         macroData={{
           story_id: "s1",
@@ -111,7 +117,7 @@ describe("MacroPlanPanel", () => {
   });
 
   it("shows volume id as non-input readout in volume edit mode", () => {
-    render(
+    renderMacro(
       <MacroPlanPanel
         macroData={{
           story_id: "s1",
