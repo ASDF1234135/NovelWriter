@@ -167,7 +167,7 @@ def run_extraction_gate(state: dict, context: WorkflowContext) -> dict:
         }
 
     return {
-        "post_polish_route": "resolve_subplots",
+        "post_polish_route": "anchor_resolve",
         "pending_chapter_extraction": extracted.model_dump(mode="json"),
         "extraction_gate_error": "",
     }

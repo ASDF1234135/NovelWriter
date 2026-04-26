@@ -126,6 +126,10 @@ def run_planner(state: dict, context: WorkflowContext) -> tuple[dict, dict, int,
             s.model_dump(mode="json") if isinstance(s, BStorySeed) else s for s in seeds
         ]
         out["target_word_count"] = clamped
+        out["selected_anchor_ids"] = [str(x).strip() for x in (state.get("selected_anchor_ids") or []) if str(x).strip()][
+            :2
+        ]
+        out["next_anchor_ids"] = [str(x).strip() for x in (state.get("next_anchor_ids") or []) if str(x).strip()][:2]
         out["ground_truth_events"] = [event.model_dump(mode="json") for event in id_result.events]
         out["must_include_beats"] = normalized_beats
         out["must_include_beat_outlines"] = [beat.model_dump(mode="json") for beat in normalized_beat_outlines]
@@ -217,6 +221,8 @@ def run_planner(state: dict, context: WorkflowContext) -> tuple[dict, dict, int,
             f"{continuity_notes}"
         ),
         target_word_count=mock_target,
+        selected_anchor_ids=[str(x).strip() for x in (state.get("selected_anchor_ids") or []) if str(x).strip()][:2],
+        next_anchor_ids=[str(x).strip() for x in (state.get("next_anchor_ids") or []) if str(x).strip()][:2],
         chapter_start_location=start_location,
         author_goal="Deliver one clear plot advance this chapter and push the protagonist into the next move.",
         must_include_beats=[
@@ -346,6 +352,7 @@ def _build_planner_prompt(payload: SafePlannerPayload) -> str:
         f"- current_anchor_id: {payload.target_anchor_id}\n"
         f"- current_anchor_title: {payload.current_anchor_title}\n"
         f"- current_anchor_description: {payload.current_anchor_description}\n"
+        f"- selected_anchor_ids: {json.dumps(payload.target_anchor_id and [payload.target_anchor_id] or [], ensure_ascii=False)}\n"
         "- upcoming_unachieved_anchors: sliding window of nearest unfinished anchors (id/title/chapter_target); "
         "**treat current_anchor as this chapter's primary target**—others are pacing only; do not script concrete bridges or endings for far future anchors.\n"
         f"- upcoming_unachieved_anchors: {upcoming_json}\n\n"

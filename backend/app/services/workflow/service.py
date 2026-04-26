@@ -7,10 +7,12 @@ import sqlite3
 from uuid import uuid4
 
 from app.domain.schema import (
+    AnchorNode,
+    AnchorStatus,
     AuthorExtractionSurfaceHintEntry,
-    BStoryResolutionOutput,
     HitlAnchorDelayRequest,
     HitlBStoryJudgementRequest,
+    HitlAnchorResolutionRequest,
     HitlContextPruneRequest,
     HitlDecisionRequest,
     HitlDirectorPatchRequest,
@@ -23,18 +25,17 @@ from app.domain.schema import (
     MacroPlanPut,
     NodeMutation,
     NodeType,
-    StateAnchor,
     StateTransactionStatus,
     StateUpdaterOutput,
     StoryCastMemberStored,
     StoryInput,
     StoryOutputLanguage,
     StoryPatch,
+    StorylineTier,
     VolumePlan,
     WorkflowStatus,
 )
 from app.domain.state import apply_length_bounds_to_state, build_initial_state, normalize_workflow_state
-from app.services.workflow.chapter_pipeline import extraction_substantiated_event_ids, validate_b_story_resolution
 from app.services.workflow.constants import AUTHOR_CHAPTER_PLAN_MAX_CHARS, CHAPTER_HARD_RULES_MAX_CHARS
 from app.repositories.sqlite.story_repository import StoryRepository
 from app.repositories.sqlite.workflow_repository import WorkflowRepository
@@ -76,7 +77,7 @@ _ALLOWED_HITL_RESUME_NODES = frozenset(
         "extraction_gate",
         "copyeditor",
         "output_language_gate",
-        "b_story_resolve",
+        "anchor_resolve",
         "profile_expander",
         "state_updater",
     }
@@ -86,10 +87,10 @@ _ALLOWED_HITL_RESUME_NODES = frozenset(
 def _refresh_unachieved_anchors(story_repository: StoryRepository, state: dict) -> None:
     chapter_id = int(state["chapter_id"])
     story_id = str(state["story_id"])
-    raw = story_repository.list_anchors(story_id)
-    unachieved = [a for a in raw if int(a["chapter_target"]) >= chapter_id]
+    story = story_repository.get_story(story_id) or {}
+    unachieved = _unachieved_from_anchor_nodes(story, chapter_id)
     state["unachieved_anchors"] = unachieved
-    state["target_anchor_id"] = str(unachieved[0]["anchor_id"]) if unachieved else None
+    state["target_anchor_id"] = str(unachieved[0].get("anchor_id") or "") if unachieved else None
     state["distance_to_anchor"] = chapter_distance_to_anchor(chapter_id, unachieved)
 
 
@@ -128,6 +129,63 @@ def _pick_volume_id_for_chapter(story_repository: StoryRepository, story_id: str
     return str(vols[0]["volume_id"]) if vols else "vol_unknown"
 
 
+def _validate_anchor_selection_guardrails(
+    anchor_nodes: list[dict], resolved_anchors: list[str], selected: list[str], nxt: list[str]
+) -> None:
+    by_id = {str(n.get("id") or ""): n for n in anchor_nodes if str(n.get("id") or "").strip()}
+    resolved = {str(x).strip() for x in resolved_anchors if str(x).strip()}
+    selected_ids = [x for x in selected if x in by_id]
+    next_ids = [x for x in nxt if x in by_id]
+    if selected and len(selected_ids) != len(selected):
+        raise ValueError("invalid selected_anchor_ids: unknown anchor id")
+    if nxt and len(next_ids) != len(nxt):
+        raise ValueError("invalid next_anchor_ids: unknown anchor id")
+    if selected_ids and not next_ids:
+        raise ValueError("next_anchor_ids is required when selected_anchor_ids is provided")
+
+    children: dict[str, list[str]] = {nid: [] for nid in by_id.keys()}
+    for node in by_id.values():
+        nid = str(node.get("id") or "")
+        for dep in node.get("depends_on") or []:
+            dep_id = str(dep).strip()
+            if dep_id in children:
+                children[dep_id].append(nid)
+
+    def _reachable_to_any(start: str, targets: set[str]) -> bool:
+        stack = [start]
+        seen: set[str] = set()
+        while stack:
+            cur = stack.pop()
+            if cur in targets:
+                return True
+            if cur in seen:
+                continue
+            seen.add(cur)
+            stack.extend(children.get(cur, []))
+        return False
+
+    for nid in next_ids:
+        node = by_id[nid]
+        deps = [str(x).strip() for x in (node.get("depends_on") or []) if str(x).strip()]
+        if any(dep not in resolved and dep not in selected_ids for dep in deps):
+            raise ValueError(f"next_anchor {nid} has unmet dependencies")
+        if str(node.get("node_kind") or "").upper() in {"CHECKPOINT", "ENDING"}:
+            raise ValueError(f"next_anchor {nid} cannot directly target checkpoint/ending")
+        if nid in resolved:
+            raise ValueError(f"next_anchor {nid} already resolved")
+
+    ending_targets = {
+        str(n.get("id") or "")
+        for n in by_id.values()
+        if str(n.get("node_kind") or "").upper() == "ENDING" or "ending" in str(n.get("title") or "").lower()
+    }
+    if not ending_targets and by_id:
+        ending_targets = {next(reversed(by_id.keys()))}
+    for nid in next_ids:
+        if not _reachable_to_any(nid, ending_targets):
+            raise ValueError(f"next_anchor {nid} has no path to ending")
+
+
 def _merge_hitl_future_anchor(
     story_repository: StoryRepository,
     story_id: str,
@@ -145,35 +203,33 @@ def _merge_hitl_future_anchor(
     anchor_id = f"{story_id}_hitl_anchor_{uuid4().hex[:10]}"
     volume_id = _pick_volume_id_for_chapter(story_repository, story_id, chapter_id)
     rows = story_repository.list_anchors(story_id)
-    anchors: list[StateAnchor] = []
+    anchors: list[dict] = []
     for row in rows:
         ts = row.get("target_state_json")
         if not isinstance(ts, dict):
             ts = {}
         vid = str(row.get("volume_id") or volume_id).strip() or volume_id
         anchors.append(
-            StateAnchor(
-                anchor_id=str(row["anchor_id"]),
-                story_id=story_id,
-                volume_id=vid,
-                title=str(row.get("title") or ""),
-                description=str(row.get("description") or ""),
-                target_state=ts,
-                chapter_target=int(row["chapter_target"]),
-                priority=int(row.get("priority") or 1),
-            )
+            {
+                "anchor_id": str(row["anchor_id"]),
+                "volume_id": vid,
+                "title": str(row.get("title") or ""),
+                "description": str(row.get("description") or ""),
+                "target_state": ts,
+                "chapter_target": int(row["chapter_target"]),
+                "priority": int(row.get("priority") or 1),
+            }
         )
     anchors.append(
-        StateAnchor(
-            anchor_id=anchor_id,
-            story_id=story_id,
-            volume_id=volume_id,
-            title=t,
-            description=d,
-            target_state={"source": "hitl_future_anchor"},
-            chapter_target=target_chapter,
-            priority=1,
-        )
+        {
+            "anchor_id": anchor_id,
+            "volume_id": volume_id,
+            "title": t,
+            "description": d,
+            "target_state": {"source": "hitl_future_anchor"},
+            "chapter_target": target_chapter,
+            "priority": 1,
+        }
     )
     story_repository.store_anchors(story_id, anchors)
 
@@ -194,11 +250,8 @@ def _apply_abort_and_restart_chapter_state(story_repository: StoryRepository, st
     pov_raw = (story.get("protagonist_character_id") or "").strip()
     pov_character_id = pov_raw if pov_raw else "char_public_observer"
 
-    unachieved = [
-        a
-        for a in story_repository.list_anchors(story_id)
-        if int(a["chapter_target"]) >= chapter_id
-    ]
+    story_row = story_repository.get_story(story_id) or {}
+    unachieved = _unachieved_from_anchor_nodes(story_row, chapter_id)
     fresh = build_initial_state(
         story_id=story_id,
         chapter_id=chapter_id,
@@ -273,6 +326,118 @@ class ChapterSummaryRegenerateFailed(RuntimeError):
 logger = logging.getLogger(__name__)
 
 
+def _safe_int_chapter_target(raw: object) -> int | None:
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _topo_sort_unresolved_anchor_dicts(nodes: list[dict]) -> list[dict]:
+    """Order non-RESOLVED anchor dicts with Kahn topological sort over depends_on edges inside the set."""
+    pending = [n for n in nodes if isinstance(n, dict) and str(n.get("status") or "").upper() != "RESOLVED"]
+    if not pending:
+        return []
+    id_set = {str(n.get("id") or "").strip() for n in pending if str(n.get("id") or "").strip()}
+    if not id_set:
+        return []
+    by_id = {str(n.get("id") or "").strip(): n for n in pending if str(n.get("id") or "").strip()}
+    indeg: dict[str, int] = {nid: 0 for nid in id_set}
+    children: dict[str, list[str]] = {nid: [] for nid in id_set}
+    for n in pending:
+        nid = str(n.get("id") or "").strip()
+        if not nid:
+            continue
+        for dep in n.get("depends_on") or []:
+            ds = str(dep).strip()
+            if ds in id_set:
+                indeg[nid] += 1
+                children[ds].append(nid)
+    q = [nid for nid in id_set if indeg[nid] == 0]
+    order_ids: list[str] = []
+    while q:
+        q.sort(key=lambda i: (_safe_int_chapter_target(by_id[i].get("estimated_chapter")) or 10**9, i))
+        cur = q.pop(0)
+        order_ids.append(cur)
+        for nxt in children.get(cur, []):
+            indeg[nxt] -= 1
+            if indeg[nxt] == 0:
+                q.append(nxt)
+    if len(order_ids) != len(id_set):
+        return pending
+    return [by_id[i] for i in order_ids]
+
+
+def _unachieved_from_anchor_nodes(story_row: dict, chapter_id: int) -> list[dict]:
+    nodes = [n for n in (story_row.get("anchor_nodes_json") or []) if isinstance(n, dict)]
+    if not nodes:
+        bible = story_row.get("bible_json") if isinstance(story_row.get("bible_json"), dict) else {}
+        nodes = [n for n in (bible.get("anchor_nodes") or []) if isinstance(n, dict)]
+    ordered = _topo_sort_unresolved_anchor_dicts(nodes)
+    rows: list[dict] = []
+    for idx, n in enumerate(ordered, start=1):
+        ec = _safe_int_chapter_target(n.get("estimated_chapter"))
+        chapter_target = ec if ec is not None else max(chapter_id, idx)
+        rows.append(
+            {
+                "anchor_id": str(n.get("id") or ""),
+                "title": str(n.get("title") or ""),
+                "description": str(n.get("description") or ""),
+                "chapter_target": chapter_target,
+            }
+        )
+    return rows
+
+
+def _main_storyline_id(body: MacroPlanPut) -> str | None:
+    for s in body.storylines:
+        if s.type == StorylineTier.MAIN:
+            return s.id
+    for s in body.storylines:
+        if str(s.id).endswith("_main"):
+            return s.id
+    return None
+
+
+def _repair_macro_plan_mainline_cross_volume(body: MacroPlanPut) -> MacroPlanPut:
+    """
+    Ensure each volume's first MAIN-spine NORMAL node depends on the previous volume's last MAIN node.
+    Fixes manual imports / edited plans that left a new root at each volume boundary.
+    """
+    main_id = _main_storyline_id(body)
+    if not main_id:
+        return body
+    vol_order = sorted(body.volumes, key=lambda v: v.chapter_start)
+    prev_last_id: str | None = None
+    updates: dict[str, AnchorNode] = {}
+    for vol in vol_order:
+        mains_ordered: list[AnchorNode] = []
+        for n in body.anchor_nodes:
+            if n.volume_id != vol.volume_id:
+                continue
+            if str(n.node_kind).upper() != "NORMAL":
+                continue
+            if main_id not in (n.storyline_ids or []):
+                continue
+            mains_ordered.append(n)
+        if not mains_ordered:
+            continue
+        if prev_last_id is not None:
+            first = mains_ordered[0]
+            deps = list(first.depends_on or [])
+            if prev_last_id not in deps:
+                new_deps = [prev_last_id, *[d for d in deps if d != prev_last_id]]
+                new_status = AnchorStatus.LOCKED if new_deps else first.status
+                updates[first.id] = first.model_copy(update={"depends_on": new_deps, "status": new_status})
+        prev_last_id = mains_ordered[-1].id
+    if not updates:
+        return body
+    new_nodes = [updates.get(n.id, n) for n in body.anchor_nodes]
+    return body.model_copy(update={"anchor_nodes": new_nodes})
+
+
 def _validate_macro_plan_put(body: MacroPlanPut) -> None:
     vol_by_id = {v.volume_id: v for v in body.volumes}
     if len(vol_by_id) != len(body.volumes):
@@ -284,19 +449,24 @@ def _validate_macro_plan_put(body: MacroPlanPut) -> None:
             )
         if v.chapter_start < 1:
             raise MacroPlanValidationError(f"Volume {v.volume_id}: chapter_start must be >= 1")
-    seen_anchor: set[str] = set()
-    for a in body.anchors:
-        if a.anchor_id in seen_anchor:
-            raise MacroPlanValidationError(f"Duplicate anchor_id: {a.anchor_id}")
-        seen_anchor.add(a.anchor_id)
-        vol = vol_by_id.get(a.volume_id)
+    if not body.anchor_nodes:
+        raise MacroPlanValidationError("anchor_nodes must not be empty")
+    known_ids: set[str] = set()
+    for node in body.anchor_nodes:
+        nid = str(node.id or "").strip()
+        if not nid:
+            raise MacroPlanValidationError("anchor_nodes contains empty id")
+        if nid in known_ids:
+            raise MacroPlanValidationError(f"Duplicate anchor node id: {nid}")
+        known_ids.add(nid)
+        vol = vol_by_id.get(node.volume_id)
         if not vol:
-            raise MacroPlanValidationError(f"Anchor {a.anchor_id}: unknown volume_id {a.volume_id}")
-        if a.chapter_target < vol.chapter_start or a.chapter_target > vol.chapter_end:
-            raise MacroPlanValidationError(
-                f"Anchor {a.anchor_id}: chapter_target {a.chapter_target} "
-                f"outside volume range [{vol.chapter_start}, {vol.chapter_end}]"
-            )
+            raise MacroPlanValidationError(f"Anchor node {nid}: unknown volume_id {node.volume_id}")
+    for node in body.anchor_nodes:
+        nid = str(node.id or "").strip()
+        for dep in node.depends_on:
+            if dep not in known_ids:
+                raise MacroPlanValidationError(f"Anchor node {nid}: unknown depends_on id {dep}")
     prot = (body.protagonist_character_id or "").strip()
     if prot:
         cast_ids = {c.node_id for c in body.cast}
@@ -430,6 +600,29 @@ class WorkflowService:
         context = self._build_context(run_id)
         graph = build_chapter_graph(context)
         final_state = graph.invoke(state)
+        if final_state.get("volume_stretch_required"):
+            story_id = str(final_state.get("story_id") or "")
+            volumes = self.story_repository.list_volumes(story_id)
+            if volumes:
+                stretched: list[VolumePlan] = []
+                max_end = 0
+                for i, v in enumerate(volumes):
+                    end = int(v["chapter_end"])
+                    if i == len(volumes) - 1:
+                        end += 1
+                    max_end = max(max_end, end)
+                    stretched.append(
+                        VolumePlan(
+                            volume_id=str(v["volume_id"]),
+                            title=str(v["title"]),
+                            summary=str(v["summary"]),
+                            chapter_start=int(v["chapter_start"]),
+                            chapter_end=end,
+                            target_volume_words=int(v.get("target_volume_words") or 0),
+                        )
+                    )
+                self.story_repository.store_volumes(story_id, stretched)
+                final_state["volume_stretch_applied_to_chapter"] = max_end
         self.workflow_repository.update_run(run_id, final_state)
         return final_state
 
@@ -468,17 +661,37 @@ class WorkflowService:
             macro_author_notes=str(story.get("macro_author_notes") or ""),
             cast_seed=list(story.get("cast_seed") or []),
             target_total_words=story["target_total_words"],
+            branch_count_override=story.get("branch_count_override"),
             plan_retry_limit=int(story.get("plan_retry_limit", 3)),
             draft_loop_retry_limit=int(story.get("draft_loop_retry_limit", 3)),
             output_language=ol,
         )
-        volumes, anchors, cast, b_seed, bible_generated = self.anchor_service.compile_macro_plan(
-            story_id, story_input, self.llm_client
-        )
+        compile_out = self.anchor_service.compile_macro_plan(story_id, story_input, self.llm_client)
+        if len(compile_out) == 5:
+            volumes, anchors, cast, b_seed, bible_generated = compile_out
+        else:
+            volumes, cast, b_seed, bible_generated = compile_out
+            anchors = []
+        storylines = list((bible_generated or {}).get("storylines") or [])
+        anchor_nodes = list((bible_generated or {}).get("anchor_nodes") or [])
         self.story_repository.update_story_bible_json(story_id, bible_generated)
+        self.story_repository.update_story_macro_topology(
+            story_id,
+            storylines=[
+                s.model_dump(mode="json") if hasattr(s, "model_dump") else dict(s)
+                for s in storylines
+                if isinstance(s, dict) or hasattr(s, "model_dump")
+            ],
+            anchor_nodes=[
+                n.model_dump(mode="json") if hasattr(n, "model_dump") else dict(n)
+                for n in anchor_nodes
+                if isinstance(n, dict) or hasattr(n, "model_dump")
+            ],
+        )
         self.story_repository.merge_active_b_stories_seed(story_id, b_seed)
         self.story_repository.store_volumes(story_id, volumes)
-        self.story_repository.store_anchors(story_id, anchors)
+        if anchors:
+            self.story_repository.store_anchors(story_id, anchors)
         protagonist_id = next((c.node_id for c in cast if c.role == "protagonist"), "")
         self.story_repository.update_story_cast(story_id, cast, protagonist_id)
         self.graph_store.replace_cast_characters(
@@ -501,6 +714,8 @@ class WorkflowService:
         ]
         self.graph_store.apply_mutations(story_id, cast_mutations)
         story_after = self.story_repository.get_story(story_id) or {}
+        storylines = list(story_after.get("storylines_json") or [])
+        anchor_nodes = list(story_after.get("anchor_nodes_json") or [])
         return {
             "story_id": story_id,
             "bible": bible_generated,
@@ -509,9 +724,13 @@ class WorkflowService:
                 s.model_dump(mode="json") for s in (story_after.get("cast_seed") or [])
             ],
             "volumes": [volume.model_dump(mode="json") for volume in volumes],
-            "anchors": [anchor.model_dump(mode="json") for anchor in anchors],
+            "anchors": anchors,
             "cast": [member.model_dump(mode="json") for member in cast],
             "protagonist_character_id": protagonist_id,
+            "storylines": storylines,
+            "anchor_nodes": anchor_nodes,
+            "macro_topology_mode": "fixed_fishbone",
+            "topology_locked": True,
         }
 
     def get_macro_snapshot(self, story_id: str) -> dict:
@@ -532,23 +751,6 @@ class WorkflowService:
             ).model_dump(mode="json")
             for row in vol_rows
         ]
-        anchors: list[dict] = []
-        for row in anc_rows:
-            ts = row.get("target_state_json")
-            if not isinstance(ts, dict):
-                ts = {}
-            anchors.append(
-                StateAnchor(
-                    anchor_id=str(row["anchor_id"]),
-                    story_id=str(row["story_id"]),
-                    volume_id=str(row["volume_id"]),
-                    title=str(row["title"]),
-                    description=str(row["description"]),
-                    target_state=ts,
-                    chapter_target=int(row["chapter_target"]),
-                    priority=int(row.get("priority") or 1),
-                ).model_dump(mode="json")
-            )
         cast_out: list[dict] = []
         for raw in story.get("cast_json") or []:
             if not isinstance(raw, dict):
@@ -557,6 +759,20 @@ class WorkflowService:
                 cast_out.append(StoryCastMemberStored.model_validate(raw).model_dump(mode="json"))
             except Exception:
                 continue
+        anchors: list[dict] = []
+        for row in anc_rows:
+            anchors.append(
+                {
+                    "anchor_id": str(row.get("anchor_id") or ""),
+                    "story_id": str(row.get("story_id") or ""),
+                    "volume_id": str(row.get("volume_id") or ""),
+                    "title": str(row.get("title") or ""),
+                    "description": str(row.get("description") or ""),
+                    "target_state": row.get("target_state_json") if isinstance(row.get("target_state_json"), dict) else {},
+                    "chapter_target": int(row.get("chapter_target") or 1),
+                    "priority": int(row.get("priority") or 1),
+                }
+            )
         protagonist_id = str(story.get("protagonist_character_id") or "").strip()
         bible_out = story.get("bible_json") if isinstance(story.get("bible_json"), dict) else {}
         return {
@@ -568,10 +784,14 @@ class WorkflowService:
             "anchors": anchors,
             "cast": cast_out,
             "protagonist_character_id": protagonist_id,
+            "storylines": list(story.get("storylines_json") or []),
+            "anchor_nodes": list(story.get("anchor_nodes_json") or []),
             "compiled": len(vol_rows) > 0,
             "macro_compile_status": str(story.get("macro_compile_status") or "IDLE"),
             "macro_compile_updated_at": str(story.get("macro_compile_updated_at") or ""),
             "macro_compile_error": str(story.get("macro_compile_error") or ""),
+            "macro_topology_mode": "fixed_fishbone",
+            "topology_locked": True,
         }
 
     def put_macro_plan(self, story_id: str, body: MacroPlanPut) -> dict:
@@ -583,23 +803,16 @@ class WorkflowService:
                 "故事已有章節工作流程紀錄，無法再修改宏觀規劃；請在未執行 run_chapter 前調整。"
             )
         _validate_macro_plan_put(body)
+        body = _repair_macro_plan_mainline_cross_volume(body)
         try:
-            self.story_repository.update_story_bible_json(story_id, dict(body.bible or {}))
+            bible_out = dict(body.bible or {})
+            self.story_repository.update_story_bible_json(story_id, bible_out)
+            self.story_repository.update_story_macro_topology(
+                story_id,
+                storylines=[s.model_dump(mode="json") for s in body.storylines],
+                anchor_nodes=[n.model_dump(mode="json") for n in body.anchor_nodes],
+            )
             self.story_repository.store_volumes(story_id, list(body.volumes))
-            anchors = [
-                StateAnchor(
-                    anchor_id=a.anchor_id,
-                    story_id=story_id,
-                    volume_id=a.volume_id,
-                    title=a.title,
-                    description=a.description,
-                    target_state=dict(a.target_state or {}),
-                    chapter_target=a.chapter_target,
-                    priority=a.priority,
-                )
-                for a in body.anchors
-            ]
-            self.story_repository.store_anchors(story_id, anchors)
             protagonist_id = (body.protagonist_character_id or "").strip()
             if not protagonist_id:
                 protagonist_id = next((c.node_id for c in body.cast if c.role == "protagonist"), "")
@@ -662,6 +875,8 @@ class WorkflowService:
         ai_freedom_level: str = "balanced",
         extraction_surface_hints: list[AuthorExtractionSurfaceHintEntry] | None = None,
         waive_mandatory_node_ids: list[str] | None = None,
+        selected_anchor_ids: list[str] | None = None,
+        next_anchor_ids: list[str] | None = None,
     ) -> dict:
         """Blocking: create run and execute graph to completion (tests / scripts)."""
         wf = self.start_run_chapter(
@@ -673,6 +888,8 @@ class WorkflowService:
             ai_freedom_level=ai_freedom_level,
             extraction_surface_hints=extraction_surface_hints,
             waive_mandatory_node_ids=waive_mandatory_node_ids,
+            selected_anchor_ids=selected_anchor_ids,
+            next_anchor_ids=next_anchor_ids,
         )
         self.execute_stored_run(wf["run"]["run_id"])
         return self.get_workflow(wf["run"]["run_id"])
@@ -687,6 +904,8 @@ class WorkflowService:
         ai_freedom_level: str = "balanced",
         extraction_surface_hints: list[AuthorExtractionSurfaceHintEntry] | None = None,
         waive_mandatory_node_ids: list[str] | None = None,
+        selected_anchor_ids: list[str] | None = None,
+        next_anchor_ids: list[str] | None = None,
     ) -> dict:
         """Create workflow run and persist initial state only (graph not executed yet)."""
         story = self.story_repository.get_story(story_id)
@@ -698,11 +917,7 @@ class WorkflowService:
                 f"Chapter {chapter_id} is already generated and stored (status=completed); "
                 "full agent run is not allowed for this chapter."
             )
-        unachieved_anchors = [
-            anchor
-            for anchor in self.story_repository.list_anchors(story_id)
-            if anchor["chapter_target"] >= chapter_id
-        ]
+        unachieved_anchors = _unachieved_from_anchor_nodes(story, chapter_id)
         pov_raw = (story.get("protagonist_character_id") or "").strip()
         pov_character_id = pov_raw if pov_raw else "char_public_observer"
         # Backward compatible:
@@ -745,49 +960,7 @@ class WorkflowService:
                 previous_tail = _extract_tail_excerpt(str(prev.get("content") or ""))
         initial_state["previous_chapter_tail_excerpt"] = previous_tail
 
-        # B-Story Cooldown Pool: compute b-story types used in the previous 2 completed chapters.
-        recent_types: list[str] = []
-        try:
-            for prev_chapter_id in (chapter_id - 1, chapter_id - 2):
-                if prev_chapter_id < 1:
-                    continue
-                with self.workflow_repository.db.connection() as conn:
-                    row = conn.execute(
-                        """
-                        SELECT run_id, current_state_json
-                        FROM workflow_runs
-                        WHERE story_id = ? AND chapter_id = ?
-                          AND status = ?
-                        ORDER BY updated_at DESC
-                        LIMIT 1
-                        """,
-                        (story_id, prev_chapter_id, WorkflowStatus.COMPLETED.value),
-                    ).fetchone()
-                if not row:
-                    continue
-                prev_state = self.workflow_repository.db.loads(row["current_state_json"])
-                raw_type = prev_state.get("b_story_type_selected") or prev_state.get("b_story_type")
-                bdir = prev_state.get("b_story_directive") or ""
-                if not raw_type and bdir:
-                    # Fallback for older runs / mock path: try to match directive against active_b_story desc.
-                    for bs in prev_state.get("active_b_stories") or []:
-                        if not isinstance(bs, dict):
-                            continue
-                        desc = str(bs.get("desc") or "")
-                        if desc and (desc in bdir or bdir in desc):
-                            raw_type = bs.get("type")
-                            break
-                t = str(raw_type).strip() if raw_type is not None else ""
-                if not t or t.upper() == "UNKNOWN":
-                    continue
-                if t not in recent_types:
-                    recent_types.append(t)
-                if len(recent_types) >= 2:
-                    break
-        except Exception:
-            # Cooldown injection is best-effort; never break chapter start.
-            pass
-        initial_state["recent_b_story_types"] = recent_types
+        initial_state["recent_b_story_types"] = []
 
         # Director anti-repetition inputs:
         # - all milestones (macro pace memory)
@@ -818,7 +991,26 @@ class WorkflowService:
             initial_state["ending_vibe_cooldown_constraint"] = {"active": False}
 
         bible = story.get("bible_json") or {}
-        initial_state["active_b_stories"] = list(bible.get("active_b_stories") or [])
+        initial_state["active_b_stories"] = []
+        initial_state["storyline_metadata"] = list(story.get("storylines_json") or [])
+        initial_state["anchor_nodes"] = list(story.get("anchor_nodes_json") or [])
+        initial_state["resolved_anchors"] = list(bible.get("resolved_anchors") or [])
+        initial_state["anchor_candidates"] = list(bible.get("anchor_candidates") or [])
+        # Canonical runtime source is anchor_nodes. Normalize legacy fields for consistency.
+        node_ids = {str(n.get("id") or "").strip() for n in initial_state["anchor_nodes"] if str(n.get("id") or "").strip()}
+        initial_state["resolved_anchors"] = [x for x in initial_state["resolved_anchors"] if str(x).strip() in node_ids]
+        if not initial_state["anchor_candidates"] and initial_state["anchor_nodes"]:
+            initial_state["anchor_candidates"] = [
+                str(n.get("id"))
+                for n in initial_state["anchor_nodes"]
+                if str(n.get("status") or "").upper() == "UNLOCKED"
+            ]
+        else:
+            initial_state["anchor_candidates"] = [
+                x for x in initial_state["anchor_candidates"] if str(x).strip() in node_ids
+            ]
+        initial_state["active_anchors"] = []
+        initial_state["state_version"] = 2
         initial_state["lore_mysteries_progression"] = list(bible.get("lore_mysteries_progression") or [])
         initial_state["writing_note"] = normalize_writing_note(bible.get("writing_note"))
         initial_state["distance_to_anchor"] = chapter_distance_to_anchor(chapter_id, unachieved_anchors)
@@ -826,6 +1018,16 @@ class WorkflowService:
         apply_length_bounds_to_state(initial_state)
         if extraction_surface_hints:
             _merge_surface_hints(initial_state, extraction_surface_hints)
+        if selected_anchor_ids:
+            initial_state["selected_anchor_ids"] = [str(x).strip() for x in selected_anchor_ids if str(x).strip()][:2]
+        if next_anchor_ids:
+            initial_state["next_anchor_ids"] = [str(x).strip() for x in next_anchor_ids if str(x).strip()][:2]
+        _validate_anchor_selection_guardrails(
+            anchor_nodes=list(initial_state.get("anchor_nodes") or []),
+            resolved_anchors=list(initial_state.get("resolved_anchors") or []),
+            selected=list(initial_state.get("selected_anchor_ids") or []),
+            nxt=list(initial_state.get("next_anchor_ids") or []),
+        )
         if waive_mandatory_node_ids:
             cur = {str(x).strip() for x in (initial_state.get("mandatory_extraction_skips") or []) if str(x).strip()}
             cur.update(str(x).strip() for x in waive_mandatory_node_ids if str(x).strip())
@@ -836,6 +1038,12 @@ class WorkflowService:
     def execute_stored_run(self, run_id: str) -> None:
         """Resume graph from DB state (used after start_run_chapter or HITL)."""
         state = normalize_workflow_state(self.workflow_repository.get_run_state(run_id))
+        if int(state.get("state_version") or 1) < 2:
+            state["workflow_status"] = WorkflowStatus.FAILED.value
+            state["requires_hitl"] = False
+            state["hitl_reason"] = "Legacy run is readonly after Anchor DAG V2 migration."
+            self.workflow_repository.update_run(run_id, state)
+            return
         try:
             self._execute_workflow(run_id, state)
         except Exception as exc:
@@ -1144,8 +1352,6 @@ class WorkflowService:
         state["workflow_status"] = WorkflowStatus.RUNNING.value
         if prev_hitl_reason == HitlReason.DRAFT_LOOP_EXCEEDED:
             state["resume_from"] = "author"
-        elif prev_hitl_reason == HitlReason.B_STORY_COOLDOWN_VIOLATION:
-            state["resume_from"] = "graph_rag"
         else:
             state["resume_from"] = "planner"
         self.workflow_repository.append_hitl_action(run_id, "director_patch", request.model_dump(mode="json"))
@@ -1190,7 +1396,7 @@ class WorkflowService:
         state["pending_hitl_options"] = []
         state["workflow_status"] = WorkflowStatus.RUNNING.value
         state["resume_from"] = "extraction_gate"
-        state["post_polish_route"] = "resolve_subplots"
+        state["post_polish_route"] = "anchor_resolve"
         self.workflow_repository.append_hitl_action(run_id, "extraction_remap", request.model_dump(mode="json"))
         self.workflow_repository.update_run(run_id, state)
 
@@ -1200,51 +1406,59 @@ class WorkflowService:
         return self.get_workflow(run_id)
 
     def apply_hitl_b_story_judgement(self, run_id: str, request: HitlBStoryJudgementRequest) -> None:
+        mapped = HitlAnchorResolutionRequest(
+            action="force_resolve" if request.action == "force_resolve" else "rewrite",
+            resolved_anchor_ids=list(request.resolved_b_stories or []),
+            reject_resume_from=request.reject_resume_from or "planner",
+            reason=request.reason or request.resolution_analysis or "",
+        )
+        self.apply_hitl_anchor_resolution(run_id, mapped)
+
+    def handle_hitl_b_story_judgement(self, run_id: str, request: HitlBStoryJudgementRequest) -> dict:
+        self.apply_hitl_b_story_judgement(run_id, request)
+        self.execute_stored_run(run_id)
+        return self.get_workflow(run_id)
+
+    def apply_hitl_anchor_resolution(self, run_id: str, request: HitlAnchorResolutionRequest) -> None:
         state = normalize_workflow_state(self.workflow_repository.get_run_state(run_id))
         _ensure_hitl_waiting(state)
-        gt_ids = {str(e["event_id"]) for e in (state.get("ground_truth_events") or []) if e.get("event_id")}
-        pending = state.get("pending_chapter_extraction") or {}
-        valid_ids = extraction_substantiated_event_ids(pending, gt_ids)
-
+        resolved = set(str(x).strip() for x in (state.get("resolved_anchors") or []) if str(x).strip())
         if request.action == "force_resolve":
-            payload = {
-                "resolution_analysis": request.resolution_analysis or "HITL force_resolve",
-                "resolution_evidence_event_ids": list(request.resolution_evidence_event_ids),
-                "resolved_b_stories": list(request.resolved_b_stories),
-            }
-            ok, err = validate_b_story_resolution(payload, valid_ids)
-            if not ok:
-                raise ValueError(err)
-            state["b_story_resolution"] = BStoryResolutionOutput.model_validate(payload).model_dump(mode="json")
+            resolved.update(str(x).strip() for x in request.resolved_anchor_ids if str(x).strip())
+            state["resolved_anchors"] = sorted(resolved)
             state["resume_from"] = "state_updater"
+        elif request.action == "delay_anchor":
+            delayed = {str(x).strip() for x in request.delayed_anchor_ids if str(x).strip()}
+            state["anchor_candidates"] = [x for x in (state.get("anchor_candidates") or []) if str(x) not in delayed]
+            state["resume_from"] = "planner"
         else:
-            resume = (request.reject_resume_from or "extraction_gate").strip()
+            resume = (request.reject_resume_from or "planner").strip()
             if resume not in _ALLOWED_HITL_RESUME_NODES:
-                resume = "extraction_gate"
+                resume = "planner"
             state["resume_from"] = resume
             fb = list(state.get("draft_feedback") or [])
             fb.append(
                 {
                     "attempt": int(state.get("draft_retry_count", 0) or 0) + 1,
-                    "violation": "B_STORY_REJECTED",
+                    "violation": "ANCHOR_RESOLUTION_REJECTED",
                     "suggestion": "REWRITE",
-                    "message": request.reason or "副線核銷被人工打回，請依上下文調整正文或抽取結果。",
+                    "message": request.reason or "Anchor 目標未達成，請依選定錨點重規劃或重寫章節。",
                 }
             )
             state["draft_feedback"] = fb
 
-        state["b_story_hitl_required"] = False
-        state["b_story_resolution_hitl_candidate"] = {}
+        state["anchor_hitl_required"] = False
+        state["anchor_resolution_hitl_candidate"] = {}
         state["requires_hitl"] = False
         state["hitl_reason"] = ""
         state["hitl_decision_mode"] = "NONE"
         state["pending_hitl_options"] = []
         state["workflow_status"] = WorkflowStatus.RUNNING.value
-        self.workflow_repository.append_hitl_action(run_id, "b_story_judgement", request.model_dump(mode="json"))
+        self.workflow_repository.append_hitl_action(run_id, "anchor_resolution", request.model_dump(mode="json"))
         self.workflow_repository.update_run(run_id, state)
 
-    def handle_hitl_b_story_judgement(self, run_id: str, request: HitlBStoryJudgementRequest) -> dict:
-        self.apply_hitl_b_story_judgement(run_id, request)
+    def handle_hitl_anchor_resolution(self, run_id: str, request: HitlAnchorResolutionRequest) -> dict:
+        self.apply_hitl_anchor_resolution(run_id, request)
         self.execute_stored_run(run_id)
         return self.get_workflow(run_id)
 

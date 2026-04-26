@@ -57,7 +57,7 @@ def test_full_workflow_runs_end_to_end(tmp_path) -> None:
     )
 
     macro = service.macro_compile(story["story_id"])
-    assert len(macro["anchors"]) >= 1
+    assert len(macro["anchor_nodes"]) >= 1
     assert macro.get("protagonist_character_id")
     assert macro.get("cast")
     assert macro["protagonist_character_id"] in service.graph_store.story_nodes[story["story_id"]]

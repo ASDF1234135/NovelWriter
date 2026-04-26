@@ -16,6 +16,7 @@ export type StoryInput = {
   macro_author_notes?: string;
   cast_seed?: StoryCastSeedEntry[];
   target_total_words: number;
+  branch_count_override?: number | null;
   plan_retry_limit: number;
   draft_loop_retry_limit: number;
   output_language?: StoryOutputLanguage;
@@ -33,6 +34,7 @@ export type StoryPatch = {
   title?: string;
   premise?: string;
   target_total_words?: number;
+  branch_count_override?: number | null;
   plan_retry_limit?: number;
   draft_loop_retry_limit?: number;
   macro_author_notes?: string;
@@ -79,7 +81,8 @@ export type CastMember = {
 export type MacroPlanPutBody = {
   bible: Record<string, unknown>;
   volumes: VolumePlan[];
-  anchors: Array<{
+  /** @deprecated legacy flat anchors; backend canonical uses anchor_nodes */
+  anchors?: Array<{
     anchor_id: string;
     volume_id: string;
     title?: string;
@@ -87,6 +90,24 @@ export type MacroPlanPutBody = {
     target_state?: Record<string, unknown>;
     chapter_target: number;
     priority?: number;
+  }>;
+  storylines?: Array<{
+    id: string;
+    type: "MAIN" | "S_TIER" | "A_TIER" | "B_TIER";
+    title: string;
+    overall_goal: string;
+    involved_entities: string[];
+  }>;
+  anchor_nodes: Array<{
+    id: string;
+    storyline_ids: string[];
+    volume_id: string;
+    node_kind?: "NORMAL" | "FORK" | "MERGE" | "CHECKPOINT" | "ENDING";
+    title: string;
+    description: string;
+    depends_on: string[];
+    status: "LOCKED" | "UNLOCKED" | "RESOLVED";
+    estimated_chapter?: number | null;
   }>;
   cast: CastMember[];
   protagonist_character_id?: string | null;
@@ -112,9 +133,30 @@ export type MacroCompileData = {
   macro_author_notes?: string;
   cast_seed?: StoryCastSeedEntry[];
   volumes: VolumePlan[];
-  anchors: Anchor[];
+  /** @deprecated legacy macro anchors; DAG-first uses anchor_nodes */
+  anchors?: Anchor[];
   cast?: CastMember[];
   protagonist_character_id?: string;
+  storylines?: Array<{
+    id: string;
+    type: "MAIN" | "S_TIER" | "A_TIER" | "B_TIER";
+    title: string;
+    overall_goal: string;
+    involved_entities: string[];
+  }>;
+  anchor_nodes?: Array<{
+    id: string;
+    storyline_ids: string[];
+    volume_id: string;
+    node_kind?: "NORMAL" | "FORK" | "MERGE" | "CHECKPOINT" | "ENDING";
+    title: string;
+    description: string;
+    depends_on: string[];
+    status: "LOCKED" | "UNLOCKED" | "RESOLVED";
+    estimated_chapter?: number | null;
+  }>;
+  macro_topology_mode?: string;
+  topology_locked?: boolean;
 };
 
 /** Row from GET /api/stories (lightweight list). */
@@ -132,6 +174,8 @@ export type MacroSnapshotResponse = MacroCompileData & {
   macro_compile_status?: string;
   macro_compile_updated_at?: string;
   macro_compile_error?: string;
+  macro_topology_mode?: string;
+  topology_locked?: boolean;
 };
 
 /** GET /api/stories/:id — full story row fields for Configuration + lock flag. */
@@ -142,6 +186,8 @@ export type StoryDetailResponse = StoryInput & {
   macro_compile_status?: string;
   macro_compile_updated_at?: string;
   macro_compile_error?: string;
+  macro_topology_mode?: string;
+  topology_locked?: boolean;
 };
 
 /** GET /stories/:id/chapters/:n/writing-preamble */

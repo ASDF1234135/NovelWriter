@@ -4,10 +4,16 @@ import math
 import re
 import json
 import logging
-from typing import Any
+import random
+from typing import Any, Literal
+from pydantic import BaseModel, Field
 
 from app.domain.schema import (
+    AnchorNode,
+    AnchorStatus,
     MacroCastMember,
+    Storyline,
+    StorylineTier,
     MacroNestedAnchorDraft,
     MacroPlanOutput,
     MacroVolumePlanDraft,
@@ -30,6 +36,50 @@ from app.services.workflow.profiles import get_profile
 
 logger = logging.getLogger(__name__)
 _BIBLE_PRIMARY_OPTIONAL_KEYS = frozenset({"theme", "narrative_pov", "writing_style"})
+
+
+class _LLMStorylineDraft(BaseModel):
+    id: str
+    type: StorylineTier
+    title: str
+    overall_goal: str
+    involved_entities: list[str] = Field(default_factory=list)
+
+
+class _LLMAnchorNodeDraft(BaseModel):
+    id: str
+    storyline_ids: list[str] = Field(default_factory=list)
+    volume_id: str
+    node_kind: Literal["NORMAL", "FORK", "MERGE", "CHECKPOINT", "ENDING"] = "NORMAL"
+    title: str
+    description: str
+    depends_on: list[str] = Field(default_factory=list)
+
+
+class _LLMWeavePlanOutput(BaseModel):
+    storylines: list[_LLMStorylineDraft] = Field(default_factory=list)
+    anchor_nodes: list[_LLMAnchorNodeDraft] = Field(default_factory=list)
+
+
+class _LLMSlotFillItem(BaseModel):
+    node_id: str
+    title: str
+    description: str
+
+
+class _LLMSlotFillOutput(BaseModel):
+    items: list[_LLMSlotFillItem] = Field(default_factory=list)
+
+
+class _LLMStorylineSlotItem(BaseModel):
+    storyline_id: str
+    title: str
+    overall_goal: str
+    involved_entities: list[str] = Field(default_factory=list)
+
+
+class _LLMStorylineSlotOutput(BaseModel):
+    items: list[_LLMStorylineSlotItem] = Field(default_factory=list)
 
 # Heuristic: codepoints that usually indicate Traditional Chinese when Mainland Simplified is required.
 # (Distinct from common simplified forms; intentionally biased toward high-frequency editorial variants.)
@@ -166,6 +216,1367 @@ def _merge_cast_llm_with_seed(raw: list[MacroCastMember], seeds: list[StoryCastS
 
 class AnchorService:
     @staticmethod
+    def _tri_instruction(zh_hant: str, zh_hans: str, en: str) -> str:
+        """Force multilingual instruction parity for compile prompts."""
+        return f"[zh-Hant] {zh_hant}\n[zh-Hans] {zh_hans}\n[en] {en}"
+
+    def _branch_count_for_story(self, story_input: StoryInput) -> int:
+        if story_input.branch_count_override is not None:
+            return max(1, int(story_input.branch_count_override))
+        return max(1, round((int(story_input.target_total_words) / 100000) * 2))
+
+    def _build_storylines(
+        self,
+        story_id: str,
+        volumes: list[VolumePlan],
+        cast: list[StoryCastMemberStored],
+        branch_count: int,
+    ) -> list[Storyline]:
+        involved = [c.node_id for c in cast[:8]]
+        rows: list[Storyline] = [
+            Storyline(
+                id=f"{story_id}_main",
+                type=StorylineTier.MAIN,
+                title="Main storyline",
+                overall_goal="Drive the core conflict to final resolution.",
+                involved_entities=involved[:5],
+            )
+        ]
+        rows.append(
+            Storyline(
+                id=f"{story_id}_s_tier_01",
+                type=StorylineTier.S_TIER,
+                title="Series-spanning pressure line",
+                overall_goal="Continuously apply long-horizon pressure to main arc decisions.",
+                involved_entities=involved[:4],
+            )
+        )
+        # Ensure at least one A-tier per volume.
+        for i, v in enumerate(volumes, start=1):
+            rows.append(
+                Storyline(
+                    id=f"{story_id}_a_tier_v{i:02d}",
+                    type=StorylineTier.A_TIER,
+                    title=f"{v.title} supporting line",
+                    overall_goal=f"Serve and tighten {v.title} main volume objective.",
+                    involved_entities=involved[:4],
+                )
+            )
+        # Fill additional branch quota with B-tier micro lines.
+        existing_branches = max(0, len(rows) - 1)
+        extra = max(0, branch_count - existing_branches)
+        for i in range(extra):
+            rows.append(
+                Storyline(
+                    id=f"{story_id}_b_tier_{i+1:02d}",
+                    type=StorylineTier.B_TIER,
+                    title=f"Micro beat line {i+1}",
+                    overall_goal="Provide local texture and chapter-scale swing without derailing the spine.",
+                    involved_entities=involved[:3],
+                )
+            )
+        return rows
+
+    def _build_fishbone_storylines(
+        self,
+        story_id: str,
+        volumes: list[VolumePlan],
+        cast: list[StoryCastMemberStored],
+    ) -> tuple[list[Storyline], dict[str, Any]]:
+        involved = [c.node_id for c in cast[:8]]
+        rng = random.Random(f"fishbone:{story_id}:{len(volumes)}")
+        s_count = rng.randint(1, 2)
+        b_min = max(1, int(math.ceil(len(volumes) * 0.5)))
+        b_max = max(b_min, int(math.ceil(len(volumes) * 1.5)))
+        b_count = rng.randint(b_min, b_max)
+        rows: list[Storyline] = [
+            Storyline(
+                id=f"{story_id}_main",
+                type=StorylineTier.MAIN,
+                title="Main storyline",
+                overall_goal="Drive the core conflict to final resolution.",
+                involved_entities=involved[:5],
+            )
+        ]
+        for i in range(s_count):
+            rows.append(
+                Storyline(
+                    id=f"{story_id}_s_tier_{i+1:02d}",
+                    type=StorylineTier.S_TIER,
+                    title=f"Series arc {i+1}",
+                    overall_goal="Apply long-horizon pressure across volumes and converge at checkpoints.",
+                    involved_entities=involved[:4],
+                )
+            )
+        a_lines_per_volume: dict[str, list[str]] = {}
+        for i, v in enumerate(volumes, start=1):
+            count = rng.randint(1, 2)
+            ids: list[str] = []
+            for j in range(count):
+                sid = f"{story_id}_a_tier_v{i:02d}_{j+1:02d}"
+                ids.append(sid)
+                rows.append(
+                    Storyline(
+                        id=sid,
+                        type=StorylineTier.A_TIER,
+                        title=f"{v.title} supporting arc {j+1}",
+                        overall_goal=f"Serve and tighten {v.title} objective, then converge into volume end.",
+                        involved_entities=involved[:4],
+                    )
+                )
+            a_lines_per_volume[v.volume_id] = ids
+        for i in range(b_count):
+            rows.append(
+                Storyline(
+                    id=f"{story_id}_b_tier_{i+1:02d}",
+                    type=StorylineTier.B_TIER,
+                    title=f"Micro beat line {i+1}",
+                    overall_goal="Provide local texture and chapter-scale swing without derailing the spine.",
+                    involved_entities=involved[:3],
+                )
+            )
+        return rows, {"a_lines_per_volume": a_lines_per_volume}
+
+    def _build_fishbone_anchor_nodes(
+        self,
+        *,
+        story_id: str,
+        anchors: list[StateAnchor],
+        storylines: list[Storyline],
+        volumes: list[VolumePlan],
+        a_lines_per_volume: dict[str, list[str]],
+    ) -> list[AnchorNode]:
+        rng = random.Random(f"fishbone:nodes:{story_id}:{len(anchors)}")
+        by_volume: dict[str, list[StateAnchor]] = {}
+        for a in sorted(anchors, key=lambda x: (x.chapter_target, x.priority)):
+            by_volume.setdefault(a.volume_id, []).append(a)
+        main_id = next((s.id for s in storylines if s.type == StorylineTier.MAIN), "")
+        s_ids = [s.id for s in storylines if s.type == StorylineTier.S_TIER]
+        b_ids = [s.id for s in storylines if s.type == StorylineTier.B_TIER]
+        nodes: list[AnchorNode] = []
+        roots: set[str] = set()
+        prev_s_tail: dict[str, str] = {}
+        volume_last_main: dict[str, str] = {}
+        volume_start_main: dict[str, str] = {}
+        prev_volume_last_main: str | None = None
+
+        for vol in volumes:
+            main_rows = by_volume.get(vol.volume_id, [])
+            if not main_rows:
+                continue
+            for idx, a in enumerate(main_rows):
+                if idx > 0:
+                    deps = [main_rows[idx - 1].anchor_id]
+                elif prev_volume_last_main:
+                    deps = [prev_volume_last_main]
+                else:
+                    deps = []
+                if not deps:
+                    roots.add(a.anchor_id)
+                nodes.append(
+                    AnchorNode(
+                        id=a.anchor_id,
+                        storyline_ids=[main_id] if main_id else [],
+                        volume_id=vol.volume_id,
+                        node_kind="NORMAL",
+                        title=a.title,
+                        description=a.description,
+                        depends_on=deps,
+                        status=AnchorStatus.UNLOCKED if not deps else AnchorStatus.LOCKED,
+                    )
+                )
+            volume_start_main[vol.volume_id] = main_rows[0].anchor_id
+            volume_last_main[vol.volume_id] = main_rows[-1].anchor_id
+            prev_volume_last_main = main_rows[-1].anchor_id
+
+        for vol in volumes:
+            start_main = volume_start_main.get(vol.volume_id)
+            last_main = volume_last_main.get(vol.volume_id)
+            if not start_main or not last_main:
+                continue
+            s_tail_ids: list[str] = []
+            s_all_ids: list[str] = []
+            for s_idx, sid in enumerate(s_ids, start=1):
+                count = rng.randint(1, 3)
+                prev = prev_s_tail.get(sid, start_main)
+                for i in range(count):
+                    nid = f"{vol.volume_id}_s{s_idx:02d}_{i+1:02d}"
+                    deps = [prev] if prev else []
+                    if not deps:
+                        roots.add(nid)
+                    nodes.append(
+                        AnchorNode(
+                            id=nid,
+                            storyline_ids=[sid],
+                            volume_id=vol.volume_id,
+                            node_kind="NORMAL",
+                            title=f"S{s_idx} beat {i+1}",
+                            description="Series arc progression beat.",
+                            depends_on=deps,
+                            status=AnchorStatus.UNLOCKED if not deps else AnchorStatus.LOCKED,
+                        )
+                    )
+                    s_all_ids.append(nid)
+                    prev = nid
+                prev_s_tail[sid] = prev
+                s_tail_ids.append(prev)
+
+            a_tail_ids: list[str] = []
+            a_all_ids: list[str] = []
+            main_rows = by_volume.get(vol.volume_id, [])
+            for a_idx, sid in enumerate(a_lines_per_volume.get(vol.volume_id, []), start=1):
+                count = rng.randint(2, 4)
+                latest_start = max(0, len(main_rows) - count)
+                start_index = rng.randint(0, latest_start) if latest_start > 0 else 0
+                prev = main_rows[start_index].anchor_id if main_rows else start_main
+                for i in range(count):
+                    nid = f"{vol.volume_id}_a{a_idx:02d}_{i+1:02d}"
+                    deps = [prev] if prev else []
+                    if not deps:
+                        roots.add(nid)
+                    nodes.append(
+                        AnchorNode(
+                            id=nid,
+                            storyline_ids=[sid],
+                            volume_id=vol.volume_id,
+                            node_kind="NORMAL",
+                            title=f"A{a_idx} beat {i+1}",
+                            description="Volume-scoped support arc beat.",
+                            depends_on=deps,
+                            status=AnchorStatus.UNLOCKED if not deps else AnchorStatus.LOCKED,
+                        )
+                    )
+                    a_all_ids.append(nid)
+                    prev = nid
+                a_tail_ids.append(prev)
+
+            cp_deps = [last_main] + s_all_ids + a_all_ids
+            cp = f"{vol.volume_id}_checkpoint"
+            nodes.append(
+                AnchorNode(
+                    id=cp,
+                    storyline_ids=[main_id] if main_id else [],
+                    volume_id=vol.volume_id,
+                    node_kind="CHECKPOINT",
+                    title=f"{vol.volume_id} checkpoint",
+                    description="Volume convergence checkpoint.",
+                    depends_on=list(dict.fromkeys([d for d in cp_deps if d])),
+                    status=AnchorStatus.LOCKED,
+                )
+            )
+
+        if b_ids:
+            main_all = [a.anchor_id for a in sorted(anchors, key=lambda x: (x.chapter_target, x.priority))]
+            rng.shuffle(main_all)
+            used_mounts: set[str] = set()
+            for idx, sid in enumerate(b_ids, start=1):
+                length = rng.randint(1, 2)
+                mount = next((m for m in main_all if m not in used_mounts), main_all[0] if main_all else "")
+                if mount:
+                    used_mounts.add(mount)
+                prev = mount
+                target_vol = next((a.volume_id for a in anchors if a.anchor_id == mount), volumes[-1].volume_id if volumes else "vol_unknown")
+                for i in range(length):
+                    nid = f"{target_vol}_b{idx:02d}_{i+1:02d}"
+                    deps = [prev] if prev else []
+                    nodes.append(
+                        AnchorNode(
+                            id=nid,
+                            storyline_ids=[sid],
+                            volume_id=target_vol,
+                            node_kind="NORMAL",
+                            title=f"B{idx} beat {i+1}",
+                            description="Micro beat for local texture.",
+                            depends_on=deps,
+                            status=AnchorStatus.UNLOCKED if not deps else AnchorStatus.LOCKED,
+                        )
+                    )
+                    prev = nid
+
+        checkpoints = [n.id for n in nodes if n.node_kind == "CHECKPOINT"]
+        if checkpoints:
+            nodes.append(
+                AnchorNode(
+                    id=f"{story_id}_ending",
+                    storyline_ids=[main_id] if main_id else [],
+                    volume_id=volumes[-1].volume_id if volumes else "vol_unknown",
+                    node_kind="ENDING",
+                    title="Final ending",
+                    description="Series final convergence ending node.",
+                    depends_on=checkpoints,
+                    status=AnchorStatus.LOCKED,
+                )
+            )
+        self._validate_dag(nodes)
+        self._ensure_tier_convergence(nodes, storylines)
+        self._validate_strict_join(nodes, storylines)
+        return nodes
+
+    def _build_weave_prompt(
+        self,
+        *,
+        story_id: str,
+        story_input: StoryInput,
+        volumes: list[VolumePlan],
+        anchors: list[Any],
+        cast: list[StoryCastMemberStored],
+        branch_count: int,
+        target_tier: StorylineTier | None = None,
+        target_volume_id: str | None = None,
+    ) -> str:
+        tier_mode = target_tier.value if target_tier else "ALL"
+        b_tier_overgen_min = max(1, int(math.ceil(branch_count * 1.3)))
+        b_tier_overgen_max = max(b_tier_overgen_min, int(math.ceil(branch_count * 1.5)))
+        anchor_context: list[dict[str, Any]] = []
+        for a in anchors:
+            if isinstance(a, StateAnchor):
+                anchor_context.append(
+                    {
+                        "id": a.anchor_id,
+                        "volume_id": a.volume_id,
+                        "title": a.title,
+                        "description": a.description,
+                        "chapter_target": a.chapter_target,
+                        "priority": a.priority,
+                        "storyline_ids": [],
+                        "node_kind": "NORMAL",
+                        "depends_on": [],
+                        "source": "mainline_candidate",
+                    }
+                )
+            elif isinstance(a, AnchorNode):
+                anchor_context.append(
+                    {
+                        "id": a.id,
+                        "volume_id": a.volume_id,
+                        "title": a.title,
+                        "description": a.description,
+                        "chapter_target": None,
+                        "priority": None,
+                        "storyline_ids": list(a.storyline_ids or []),
+                        "node_kind": a.node_kind,
+                        "depends_on": list(a.depends_on or []),
+                        "source": "existing_side_or_merged",
+                    }
+                )
+            else:
+                continue
+
+        requirements: list[str] = [
+            f"CURRENT TASK: You are executing ONLY the {tier_mode} tier stage in a staged weave pipeline.",
+            f"Do NOT generate new normal storyline rows or normal nodes for tiers other than {tier_mode}.",
+            "You must keep provided existing anchor context coherent and connect your new nodes to that context via depends_on.",
+            "MAIN = core conflict spine; S_TIER = series-long pressure line; A_TIER = per-volume key side thread serving the volume mainline; B_TIER = short micro-beat texture.",
+            "NOTE THE DIFFERENCE: 'Storyline' is the overarching thread. 'Anchor Node' is a single chapter event within that thread. DO NOT confuse the counts for them.",
+            "Every side thread must materially support mainline progression and cannot exceed owning volume scope.",
+            "Allow free fork/merge topology while keeping graph acyclic.",
+            "Each anchor node must be a concrete, physically verifiable event achievable within one chapter.",
+            "No Orphans: every generated node must be depended on by at least one other node, except ENDING nodes.",
+            "storyline_ids in each node must reference existing storyline ids only.",
+            "depends_on must reference existing anchor node ids only.",
+            "Provide at least one UNLOCKED root-capable node (service will set statuses by dependency).",
+        ]
+
+        if target_tier == StorylineTier.S_TIER:
+            requirements.extend([
+                "Generate S_TIER (Series-spanning) storylines and anchor nodes.",
+                "CRITICAL QUOTA: For target volume, each S_TIER storyline must generate between 1 and 3 anchor nodes.",
+                "You must weave S_TIER smoothly across volumes using existing context, but this stage focuses on target_volume_id when provided.",
+                "If target volume contains 0 nodes or more than 3 nodes for an S_TIER storyline, validation will reject your output.",
+                "STRUCTURAL NODES: Emit DAG anchor_nodes with explicit FORK / MERGE / CHECKPOINT / ENDING where appropriate.",
+                "Each CHECKPOINT and ENDING must strictly converge critical mainline + key side-thread outcomes.",
+                "For each volume CHECKPOINT node, depends_on must include: [that volume's last MAIN node id] + [the last node id of every S_TIER and A_TIER line in that volume]."
+            ])
+
+        elif target_tier == StorylineTier.A_TIER and target_volume_id:
+            requirements.extend([
+                f"Generate A_TIER nodes only for target_volume_id={target_volume_id}.",
+                "CRITICAL QUOTA: You MUST generate exactly 2 to 4 anchor nodes for this A_TIER storyline.",
+                "If you generate fewer than 2 or more than 4 nodes, the JSON compiler will crash.",
+                "DO NOT continue A_TIER storylines from previous volumes. You MUST create a BRAND NEW A_TIER storyline ID specifically for this volume.",
+                "STRUCTURAL NODES: Emit DAG anchor_nodes with explicit FORK / MERGE / CHECKPOINT / ENDING where appropriate.",
+                "Each CHECKPOINT and ENDING must strictly converge critical mainline + key side-thread outcomes.",
+                "For each volume CHECKPOINT node, depends_on must include: [that volume's last MAIN node id] + [the last node id of every S_TIER and A_TIER line in that volume]."
+            ])
+
+        elif target_tier == StorylineTier.B_TIER:
+            requirements.extend([
+                f"Generate exactly {b_tier_overgen_max} independent B_TIER storylines.",
+                "CRITICAL QUOTA: Every single B_TIER storyline MUST have exactly 1 or 2 anchor nodes. NO MORE THAN 2.",
+                "Do NOT turn a B_TIER beat into a multi-chapter arc. If any B_TIER has 3 or more nodes, the system will crash.",
+                "B_TIER nodes are micro-beats. Do NOT generate CHECKPOINT, MERGE, or ENDING nodes. Just attach your B_TIER 'NORMAL' nodes to existing forks or mainline nodes."
+            ])
+        return json.dumps(
+            {
+                "task": "Generate side-thread storylines and weave them back into mainline DAG anchor nodes.",
+                "tier_mode": tier_mode,
+                "target_volume_id": target_volume_id or "",
+                "story_id": story_id,
+                "output_language": normalize_output_language(story_input.output_language),
+                "branch_count_target": branch_count,
+                "story": {"title": story_input.title, "premise": story_input.premise},
+                "volumes": [v.model_dump(mode="json") for v in volumes],
+                "existing_anchor_context": anchor_context,
+                "cast": [
+                    {"node_id": c.node_id, "canonical_name": c.canonical_name, "role": c.role}
+                    for c in cast
+                ],
+                "requirements": requirements,
+                "output_shape": {
+                    "_planning": "String. STEP 1: State how many storylines you are generating. STEP 2: State exactly how many anchor nodes you will generate for each volume/storyline, and explicitly confirm it obeys the CRITICAL QUOTA.",
+                    "storylines": [
+                        {
+                            "id": "string",
+                            "type": "MAIN|S_TIER|A_TIER|B_TIER",
+                            "title": "string",
+                            "overall_goal": "string",
+                            "involved_entities": ["string"],
+                        }
+                    ],
+                    "anchor_nodes": [
+                        {
+                            "id": "string",
+                            "storyline_ids": ["string"],
+                            "volume_id": "string",
+                            "node_kind": "NORMAL|FORK|MERGE|CHECKPOINT|ENDING",
+                            "title": "string",
+                            "description": "string",
+                            "depends_on": ["string"],
+                        }
+                    ],
+                },
+            },
+            ensure_ascii=False,
+        )
+
+    def _sanitize_weave_output(
+        self,
+        *,
+        storylines: list[Storyline],
+        nodes: list[AnchorNode],
+        volumes: list[VolumePlan],
+        required_b_min_keep: int,
+    ) -> tuple[list[Storyline], list[AnchorNode], dict[str, Any]]:
+        by_storyline: dict[str, Storyline] = {s.id: s for s in storylines}
+        vol_ids = {v.volume_id for v in volumes}
+        dropped: list[str] = []
+
+        def _nodes_for_storyline(sid: str) -> list[AnchorNode]:
+            return [n for n in nodes if sid in n.storyline_ids]
+
+        keep_storyline_ids: set[str] = set()
+        for s in storylines:
+            linked = _nodes_for_storyline(s.id)
+            if not linked:
+                dropped.append(f"{s.id}:no_anchor_nodes")
+                continue
+            if s.type == StorylineTier.S_TIER:
+                ok = True
+                for vid in vol_ids:
+                    c = sum(1 for n in linked if n.volume_id == vid)
+                    if c < 1 or c > 3:
+                        ok = False
+                        dropped.append(f"{s.id}:S_TIER volume {vid} count {c} not in [1,3]")
+                        break
+                if not ok:
+                    continue
+            elif s.type == StorylineTier.A_TIER:
+                c = len(linked)
+                if c < 2 or c > 4:
+                    dropped.append(f"{s.id}:A_TIER count {c} not in [1,3]")
+                    continue
+            elif s.type == StorylineTier.B_TIER:
+                c = len(linked)
+                if c < 1 or c > 2:
+                    dropped.append(f"{s.id}:B_TIER count {c} not in [1,2]")
+                    continue
+            keep_storyline_ids.add(s.id)
+
+        filtered_storylines = [s for s in storylines if s.id in keep_storyline_ids]
+        filtered_nodes: list[AnchorNode] = []
+        for n in nodes:
+            kept = [sid for sid in n.storyline_ids if sid in keep_storyline_ids]
+            if not kept:
+                continue
+            filtered_nodes.append(n.model_copy(update={"storyline_ids": kept}))
+        kept_b_count = sum(1 for s in filtered_storylines if s.type == StorylineTier.B_TIER)
+        b_tier_insufficient = kept_b_count < max(1, required_b_min_keep)
+        if b_tier_insufficient:
+            dropped.append(
+                f"B_TIER kept {kept_b_count} below required minimum {max(1, required_b_min_keep)}"
+            )
+        return filtered_storylines, filtered_nodes, {
+            "dropped_storylines": dropped,
+            "kept_b_count": kept_b_count,
+            "required_b_min_keep": max(1, required_b_min_keep),
+            "b_tier_insufficient": b_tier_insufficient,
+        }
+
+    @staticmethod
+    def _weave_minimum_tier_counts(storylines: list[Storyline]) -> bool:
+        tiers = {StorylineTier.MAIN: 0, StorylineTier.S_TIER: 0, StorylineTier.A_TIER: 0, StorylineTier.B_TIER: 0}
+        for s in storylines:
+            tiers[s.type] = tiers.get(s.type, 0) + 1
+        return (
+            tiers[StorylineTier.MAIN] >= 1
+            and tiers[StorylineTier.S_TIER] >= 1
+            and tiers[StorylineTier.A_TIER] >= 1
+            and tiers[StorylineTier.B_TIER] >= 1
+        )
+
+    @staticmethod
+    def _classify_weave_error(message: str) -> str:
+        msg = (message or "").lower()
+        if "empty anchor_nodes" in msg:
+            return "EMPTY_ANCHOR_NODES"
+        if "empty storylines" in msg:
+            return "EMPTY_STORYLINES"
+        if "cycle detected" in msg:
+            return "DAG_CYCLE"
+        if "strict join failed" in msg:
+            return "STRICT_JOIN"
+        if "fork validation failed" in msg:
+            return "FORK_MERGE"
+        if "anchor convergence validation failed" in msg:
+            return "CONVERGENCE"
+        if "storyline count after sanitize" in msg:
+            return "TIER_MINIMUM_NOT_MET"
+        return "UNKNOWN"
+
+    def _validate_single_tier_chunk(
+        self,
+        *,
+        tier: StorylineTier,
+        storylines: list[Storyline],
+        nodes: list[AnchorNode],
+        volumes: list[VolumePlan],
+        branch_count: int,
+        target_volume_id: str | None = None,
+        target_pass_count: int | None = None,
+    ) -> None:
+        tier_storylines = [s for s in storylines if s.type == tier]
+        if not tier_storylines:
+            raise ValueError(f"{tier.value} call returned no {tier.value} storylines")
+        tier_ids = {s.id for s in tier_storylines}
+        tier_nodes = [n for n in nodes if any(sid in tier_ids for sid in n.storyline_ids)]
+        if not tier_nodes:
+            raise ValueError(f"{tier.value} call returned no anchor nodes for {tier.value} storylines")
+        if tier == StorylineTier.S_TIER:
+            vol_ids = {v.volume_id for v in volumes}
+            for s in tier_storylines:
+                for vid in vol_ids:
+                    c = sum(1 for n in tier_nodes if n.volume_id == vid and s.id in n.storyline_ids)
+                    if c < 1 or c > 3:
+                        raise ValueError(f"{s.id}:S_TIER volume {vid} count {c} not in [1,3]")
+        elif tier == StorylineTier.A_TIER:
+            if target_volume_id:
+                scoped_nodes = [n for n in tier_nodes if n.volume_id == target_volume_id]
+                scoped_count = len(scoped_nodes)
+                if scoped_count < 2 or scoped_count > 4:
+                    raise ValueError(f"A_TIER volume {target_volume_id} count {scoped_count} not in [2,4]")
+                if target_pass_count is not None and scoped_count < target_pass_count:
+                    raise ValueError(
+                        f"A_TIER volume {target_volume_id} count {scoped_count} below pass target {target_pass_count}"
+                    )
+            else:
+                for s in tier_storylines:
+                    c = sum(1 for n in tier_nodes if s.id in n.storyline_ids)
+                    if c < 2 or c > 4:
+                        raise ValueError(f"{s.id}:A_TIER count {c} not in [2,4]")
+        elif tier == StorylineTier.B_TIER:
+            b_storyline_count = len(tier_storylines)
+            b_min = max(1, int(math.ceil(branch_count * 1.3)))
+            b_max = max(b_min, int(math.ceil(branch_count * 1.5)))
+            required_min = max(1, branch_count)
+            if b_storyline_count < required_min:
+                raise ValueError(
+                    f"B_TIER storyline count {b_storyline_count} below required minimum {required_min}"
+                )
+
+    def _llm_generate_storylines_and_anchor_nodes(
+        self,
+        *,
+        story_id: str,
+        story_input: StoryInput,
+        volumes: list[VolumePlan],
+        anchors: list[StateAnchor],
+        cast: list[StoryCastMemberStored],
+        branch_count: int,
+        llm_client: LLMClient | None,
+    ) -> tuple[list[Storyline], list[AnchorNode], dict[str, Any]]:
+        if llm_client is None or isinstance(llm_client, MockLLMClient):
+            return [], [], {
+                "attempts": 0,
+                "max_attempts": 0,
+                "fallback": True,
+                "fallback_reason": "LLM client unavailable or mock",
+                "failure_code": "LLM_UNAVAILABLE",
+                "attempt_errors": [],
+                "dropped_storylines": [],
+            }
+        profile = augment_profile_system_prompt(get_profile("macro_planner"), story_input.output_language)
+        max_attempts = 5
+        last_error = ""
+        last_dropped: list[str] = []
+        attempt_errors: list[dict[str, Any]] = []
+        retries_used = 0
+        completed_tiers: list[str] = []
+        tier_outputs: dict[StorylineTier, tuple[list[Storyline], list[AnchorNode]]] = {}
+        accumulated_nodes: list[Any] = list(anchors)
+
+        def _drafts_to_models(structured: _LLMWeavePlanOutput) -> tuple[list[Storyline], list[AnchorNode]]:
+            storylines: list[Storyline] = []
+            for s in structured.storylines:
+                sid = s.id.strip()
+                if not sid:
+                    continue
+                storylines.append(
+                    Storyline(
+                        id=sid,
+                        type=s.type,
+                        title=s.title.strip(),
+                        overall_goal=s.overall_goal.strip(),
+                        involved_entities=[str(x).strip() for x in s.involved_entities if str(x).strip()],
+                    )
+                )
+            valid_storyline_ids = {s.id for s in storylines}
+            nodes: list[AnchorNode] = []
+            seen_node_ids: set[str] = set()
+            for n in structured.anchor_nodes:
+                nid = n.id.strip()
+                if not nid or nid in seen_node_ids:
+                    continue
+                seen_node_ids.add(nid)
+                sid = [x for x in n.storyline_ids if x in valid_storyline_ids]
+                nodes.append(
+                    AnchorNode(
+                        id=nid,
+                        storyline_ids=sid,
+                        volume_id=n.volume_id.strip(),
+                        node_kind=n.node_kind,
+                        title=n.title.strip(),
+                        description=n.description.strip(),
+                        depends_on=[str(x).strip() for x in n.depends_on if str(x).strip()],
+                        status=AnchorStatus.LOCKED,
+                    )
+                )
+            return storylines, nodes
+
+        def _fallback_a_volume_chunk(volume: VolumePlan, volume_index: int) -> tuple[list[Storyline], list[AnchorNode]]:
+            storyline_id = f"{story_id}_a_tier_v{volume_index:02d}_fallback"
+            storyline = Storyline(
+                id=storyline_id,
+                type=StorylineTier.A_TIER,
+                title=f"{volume.title} fallback A-tier line",
+                overall_goal=f"Fallback A-tier support line for {volume.title}.",
+                involved_entities=[c.node_id for c in cast[:3]],
+            )
+            volume_main = sorted(
+                [a for a in anchors if a.volume_id == volume.volume_id],
+                key=lambda x: (x.chapter_target, x.priority),
+            )
+            first_main = volume_main[0].anchor_id if volume_main else ""
+            n1_id = f"{volume.volume_id}_a_fallback_01"
+            n2_id = f"{volume.volume_id}_a_fallback_02"
+            n3_id = f"{volume.volume_id}_a_fallback_03"
+            nodes = [
+                AnchorNode(
+                    id=n1_id,
+                    storyline_ids=[storyline_id],
+                    volume_id=volume.volume_id,
+                    node_kind="NORMAL",
+                    title=f"{volume.title} A fallback 1",
+                    description="Fallback A-tier setup beat.",
+                    depends_on=[first_main] if first_main else [],
+                    status=AnchorStatus.LOCKED if first_main else AnchorStatus.UNLOCKED,
+                ),
+                AnchorNode(
+                    id=n2_id,
+                    storyline_ids=[storyline_id],
+                    volume_id=volume.volume_id,
+                    node_kind="NORMAL",
+                    title=f"{volume.title} A fallback 2",
+                    description="Fallback A-tier escalation beat.",
+                    depends_on=[n1_id],
+                    status=AnchorStatus.LOCKED,
+                ),
+                AnchorNode(
+                    id=n3_id,
+                    storyline_ids=[storyline_id],
+                    volume_id=volume.volume_id,
+                    node_kind="NORMAL",
+                    title=f"{volume.title} A fallback 3",
+                    description="Fallback A-tier payoff beat.",
+                    depends_on=[n2_id],
+                    status=AnchorStatus.LOCKED,
+                ),
+            ]
+            return [storyline], nodes
+
+        def _fallback_s_volume_chunk(volume: VolumePlan, volume_index: int) -> tuple[list[Storyline], list[AnchorNode]]:
+            storyline_id = f"{story_id}_s_tier_v{volume_index:02d}_fallback"
+            storyline = Storyline(
+                id=storyline_id,
+                type=StorylineTier.S_TIER,
+                title=f"{volume.title} fallback S-tier line",
+                overall_goal=f"Fallback S-tier pressure line for {volume.title}.",
+                involved_entities=[c.node_id for c in cast[:3]],
+            )
+            volume_main = sorted(
+                [a for a in anchors if a.volume_id == volume.volume_id],
+                key=lambda x: (x.chapter_target, x.priority),
+            )
+            first_main = volume_main[0].anchor_id if volume_main else ""
+            s1 = f"{volume.volume_id}_s_fallback_01"
+            s2 = f"{volume.volume_id}_s_fallback_02"
+            nodes = [
+                AnchorNode(
+                    id=s1,
+                    storyline_ids=[storyline_id],
+                    volume_id=volume.volume_id,
+                    node_kind="NORMAL",
+                    title=f"{volume.title} S fallback 1",
+                    description="Fallback S-tier pressure setup.",
+                    depends_on=[first_main] if first_main else [],
+                    status=AnchorStatus.LOCKED if first_main else AnchorStatus.UNLOCKED,
+                ),
+                AnchorNode(
+                    id=s2,
+                    storyline_ids=[storyline_id],
+                    volume_id=volume.volume_id,
+                    node_kind="NORMAL",
+                    title=f"{volume.title} S fallback 2",
+                    description="Fallback S-tier pressure payoff.",
+                    depends_on=[s1],
+                    status=AnchorStatus.LOCKED,
+                ),
+            ]
+            return [storyline], nodes
+
+        for tier in (StorylineTier.S_TIER, StorylineTier.A_TIER, StorylineTier.B_TIER):
+            if tier == StorylineTier.S_TIER:
+                s_storylines: list[Storyline] = []
+                s_nodes: list[AnchorNode] = []
+                for volume_idx, volume in enumerate(volumes, start=1):
+                    tier_done = False
+                    while not tier_done and retries_used < max_attempts:
+                        try:
+                            base_prompt = self._build_weave_prompt(
+                                story_id=story_id,
+                                story_input=story_input,
+                                volumes=volumes,
+                                anchors=accumulated_nodes,
+                                cast=cast,
+                                branch_count=branch_count,
+                                target_tier=tier,
+                                target_volume_id=volume.volume_id,
+                            )
+                            tier_prompt = base_prompt
+                            if last_error:
+                                tier_prompt = (
+                                    f"{base_prompt}\n\n"
+                                    "Previous weave output failed validation. Regenerate a fully valid result.\n"
+                                    f"Issue: {last_error}\n"
+                                    f"Dropped storylines: {last_dropped}"
+                                )
+                            structured, _ = llm_client.invoke_json(tier_prompt, _LLMWeavePlanOutput, profile)
+                            t_storylines, t_nodes = _drafts_to_models(structured)
+                            # S-tier now retries per-volume; only validate the current volume's count window.
+                            s_only = [s for s in t_storylines if s.type == StorylineTier.S_TIER]
+                            s_ids = {s.id for s in s_only}
+                            s_nodes_vol = [
+                                n for n in t_nodes if n.volume_id == volume.volume_id and any(sid in s_ids for sid in n.storyline_ids)
+                            ]
+                            if not s_only or not s_nodes_vol:
+                                raise ValueError(f"S_TIER volume {volume.volume_id} returned no valid nodes")
+                            for s in s_only:
+                                c = sum(1 for n in s_nodes_vol if s.id in n.storyline_ids)
+                                if c < 1 or c > 3:
+                                    raise ValueError(f"{s.id}:S_TIER volume {volume.volume_id} count {c} not in [1,3]")
+                            s_storylines.extend(s_only)
+                            s_nodes.extend(s_nodes_vol)
+                            accumulated_nodes.extend([n for n in s_nodes_vol if n.node_kind == "NORMAL"])
+                            tier_done = True
+                        except Exception as exc:
+                            retries_used += 1
+                            last_error = str(exc)
+                            attempt_errors.append(
+                                {
+                                    "attempt": retries_used,
+                                    "tier": tier.value,
+                                    "volume_id": volume.volume_id,
+                                    "failure_code": self._classify_weave_error(last_error),
+                                    "message": last_error[:600],
+                                    "dropped_storylines": list(last_dropped),
+                                }
+                            )
+                    if not tier_done:
+                        fb_storylines, fb_nodes = _fallback_s_volume_chunk(volume, volume_idx)
+                        s_storylines.extend(fb_storylines)
+                        s_nodes.extend(fb_nodes)
+                        accumulated_nodes.extend(fb_nodes)
+                tier_outputs[tier] = (s_storylines, s_nodes)
+                completed_tiers.append(tier.value)
+                continue
+            if tier == StorylineTier.A_TIER:
+                a_storylines: list[Storyline] = []
+                a_nodes: list[AnchorNode] = []
+                for volume_idx, volume in enumerate(volumes, start=1):
+                    tier_done = False
+                    while not tier_done and retries_used < max_attempts:
+                        try:
+                            base_prompt = self._build_weave_prompt(
+                                story_id=story_id,
+                                story_input=story_input,
+                                volumes=volumes,
+                                anchors=accumulated_nodes,
+                                cast=cast,
+                                branch_count=branch_count,
+                                target_tier=tier,
+                                target_volume_id=volume.volume_id,
+                            )
+                            tier_prompt = base_prompt
+                            if last_error:
+                                tier_prompt = (
+                                    f"{base_prompt}\n\n"
+                                    "Previous weave output failed validation. Regenerate a fully valid result.\n"
+                                    f"Issue: {last_error}\n"
+                                    f"Dropped storylines: {last_dropped}"
+                                )
+                            structured, _ = llm_client.invoke_json(tier_prompt, _LLMWeavePlanOutput, profile)
+                            t_storylines, t_nodes = _drafts_to_models(structured)
+                            self._validate_single_tier_chunk(
+                                tier=tier,
+                                storylines=t_storylines,
+                                nodes=t_nodes,
+                                volumes=volumes,
+                                branch_count=branch_count,
+                                target_volume_id=volume.volume_id,
+                            )
+                            a_storylines.extend([s for s in t_storylines if s.type == StorylineTier.A_TIER])
+                            a_nodes.extend([n for n in t_nodes if n.volume_id == volume.volume_id])
+                            accumulated_nodes.extend([n for n in t_nodes if n.node_kind == "NORMAL"])
+                            tier_done = True
+                        except Exception as exc:
+                            retries_used += 1
+                            last_error = str(exc)
+                            attempt_errors.append(
+                                {
+                                    "attempt": retries_used,
+                                    "tier": tier.value,
+                                    "volume_id": volume.volume_id,
+                                    "failure_code": self._classify_weave_error(last_error),
+                                    "message": last_error[:600],
+                                    "dropped_storylines": list(last_dropped),
+                                }
+                            )
+                    if not tier_done:
+                        fb_storylines, fb_nodes = _fallback_a_volume_chunk(volume, volume_idx)
+                        a_storylines.extend(fb_storylines)
+                        a_nodes.extend(fb_nodes)
+                        accumulated_nodes.extend(fb_nodes)
+                tier_outputs[tier] = (a_storylines, a_nodes)
+                completed_tiers.append(tier.value)
+                continue
+            tier_done = False
+            while not tier_done and retries_used < max_attempts:
+                try:
+                    base_prompt = self._build_weave_prompt(
+                        story_id=story_id,
+                        story_input=story_input,
+                        volumes=volumes,
+                        anchors=accumulated_nodes,
+                        cast=cast,
+                        branch_count=branch_count,
+                        target_tier=tier,
+                    )
+                    tier_prompt = base_prompt
+                    if last_error:
+                        tier_prompt = (
+                            f"{base_prompt}\n\n"
+                            "Previous weave output failed validation. Regenerate a fully valid result.\n"
+                            f"Issue: {last_error}\n"
+                            f"Dropped storylines: {last_dropped}"
+                        )
+                    structured, _ = llm_client.invoke_json(tier_prompt, _LLMWeavePlanOutput, profile)
+                    t_storylines, t_nodes = _drafts_to_models(structured)
+                    self._validate_single_tier_chunk(
+                        tier=tier,
+                        storylines=t_storylines,
+                        nodes=t_nodes,
+                        volumes=volumes,
+                        branch_count=branch_count,
+                    )
+                    tier_outputs[tier] = (t_storylines, t_nodes)
+                    completed_tiers.append(tier.value)
+                    accumulated_nodes.extend([n for n in t_nodes if n.node_kind == "NORMAL"])
+                    tier_done = True
+                except Exception as exc:
+                    retries_used += 1
+                    last_error = str(exc)
+                    attempt_errors.append(
+                        {
+                            "attempt": retries_used,
+                            "tier": tier.value,
+                            "failure_code": self._classify_weave_error(last_error),
+                            "message": last_error[:600],
+                            "dropped_storylines": list(last_dropped),
+                        }
+                    )
+            if not tier_done:
+                break
+
+        # Merge completed tier outputs
+        merged_storylines: list[Storyline] = []
+        merged_nodes: list[AnchorNode] = []
+        seen_storyline_ids: set[str] = set()
+        merged_nodes_dict: dict[str, AnchorNode] = {}
+        for tier in (StorylineTier.S_TIER, StorylineTier.A_TIER, StorylineTier.B_TIER):
+            if tier not in tier_outputs:
+                continue
+            t_storylines, t_nodes = tier_outputs[tier]
+            for s in t_storylines:
+                if s.id in seen_storyline_ids:
+                    continue
+                seen_storyline_ids.add(s.id)
+                merged_storylines.append(s)
+            for n in t_nodes:
+                if n.id in merged_nodes_dict:
+                    existing = merged_nodes_dict[n.id]
+                    existing.depends_on = list(dict.fromkeys([*(existing.depends_on or []), *(n.depends_on or [])]))
+                    existing.storyline_ids = list(dict.fromkeys([*(existing.storyline_ids or []), *(n.storyline_ids or [])]))
+                    if n.node_kind in ("CHECKPOINT", "ENDING", "MERGE") and existing.node_kind == "NORMAL":
+                        existing.node_kind = n.node_kind
+                else:
+                    merged_nodes_dict[n.id] = n
+        merged_nodes = list(merged_nodes_dict.values())
+
+        if len(tier_outputs) == 3:
+            storylines, nodes, sanitize_meta = self._sanitize_weave_output(
+                storylines=merged_storylines,
+                nodes=merged_nodes,
+                volumes=volumes,
+                required_b_min_keep=max(1, branch_count),
+            )
+            last_dropped = list(sanitize_meta.get("dropped_storylines") or [])
+            # If B-tier is still insufficient after single-item pruning, call B weaver again to top up.
+            while bool(sanitize_meta.get("b_tier_insufficient")) and retries_used < max_attempts:
+                try:
+                    retries_used += 1
+                    base_prompt = self._build_weave_prompt(
+                        story_id=story_id,
+                        story_input=story_input,
+                        volumes=volumes,
+                        anchors=accumulated_nodes + nodes,
+                        cast=cast,
+                        branch_count=branch_count,
+                        target_tier=StorylineTier.B_TIER,
+                    )
+                    tier_prompt = (
+                        f"{base_prompt}\n\n"
+                        "B_TIER top-up mode: generate additional valid B_TIER storylines/nodes only."
+                    )
+                    structured, _ = llm_client.invoke_json(tier_prompt, _LLMWeavePlanOutput, profile)
+                    add_storylines, add_nodes = _drafts_to_models(structured)
+                    add_storylines = [s for s in add_storylines if s.type == StorylineTier.B_TIER]
+                    add_ids = {s.id for s in add_storylines}
+                    add_nodes = [n for n in add_nodes if any(sid in add_ids for sid in n.storyline_ids)]
+                    # Merge add-ons with de-dup and union deps/labels on same id.
+                    by_s: dict[str, Storyline] = {s.id: s for s in storylines}
+                    for s in add_storylines:
+                        by_s[s.id] = s
+                    by_n: dict[str, AnchorNode] = {n.id: n for n in nodes}
+                    for n in add_nodes:
+                        if n.id in by_n:
+                            ex = by_n[n.id]
+                            ex.depends_on = list(dict.fromkeys([*(ex.depends_on or []), *(n.depends_on or [])]))
+                            ex.storyline_ids = list(dict.fromkeys([*(ex.storyline_ids or []), *(n.storyline_ids or [])]))
+                        else:
+                            by_n[n.id] = n
+                    storylines = list(by_s.values())
+                    nodes = list(by_n.values())
+                    accumulated_nodes.extend([n for n in add_nodes if n.node_kind == "NORMAL"])
+                    storylines, nodes, sanitize_meta = self._sanitize_weave_output(
+                        storylines=storylines,
+                        nodes=nodes,
+                        volumes=volumes,
+                        required_b_min_keep=max(1, branch_count),
+                    )
+                    last_dropped = list(sanitize_meta.get("dropped_storylines") or [])
+                except Exception as exc:
+                    last_error = str(exc)
+                    attempt_errors.append(
+                        {
+                            "attempt": retries_used,
+                            "tier": StorylineTier.B_TIER.value,
+                            "mode": "top_up",
+                            "failure_code": self._classify_weave_error(last_error),
+                            "message": last_error[:600],
+                            "dropped_storylines": list(last_dropped),
+                        }
+                    )
+                    break
+            if not self._weave_minimum_tier_counts(storylines):
+                last_error = "storyline count after sanitize does not satisfy MAIN/S/A/B minimum tiers"
+            elif not nodes:
+                last_error = "anchor_nodes empty after sanitize"
+            else:
+                node_ids = {n.id for n in nodes}
+                for n in nodes:
+                    n.depends_on = [dep for dep in n.depends_on if dep in node_ids and dep != n.id]
+                    if len(n.depends_on) == 0:
+                        n.status = AnchorStatus.UNLOCKED
+                v_checkpoints = {n.volume_id: n for n in nodes if n.node_kind == "CHECKPOINT"}
+                a_or_s_storylines = {s.id for s in storylines if s.type in (StorylineTier.S_TIER, StorylineTier.A_TIER)}
+                
+                for n in nodes:
+                    if n.node_kind == "NORMAL" and any(sid in a_or_s_storylines for sid in n.storyline_ids):
+                        is_depended_on = any(n.id in other.depends_on for other in nodes if other.volume_id == n.volume_id)
+                        
+                        if not is_depended_on and n.volume_id in v_checkpoints:
+                            cp = v_checkpoints[n.volume_id]
+                            if n.id not in cp.depends_on:
+                                cp.depends_on.append(n.id)
+                self._validate_dag(nodes)
+                self._ensure_tier_convergence(nodes, storylines)
+                self._validate_fork_merge(nodes)
+                self._validate_strict_join(nodes, storylines)
+                return storylines, nodes, {
+                    "attempts": retries_used,
+                    "max_attempts": max_attempts,
+                    "dropped_storylines": last_dropped,
+                    "fallback": False,
+                    "completed_tiers": completed_tiers,
+                }
+        logger.warning(
+            "llm weave generation failed, fallback to deterministic weave",
+            extra={
+                "error": last_error,
+                "dropped_storylines": last_dropped,
+                "max_attempts": max_attempts,
+                "completed_tiers": completed_tiers,
+            },
+        )
+        return merged_storylines, merged_nodes, {
+            "attempts": retries_used,
+            "max_attempts": max_attempts,
+            "fallback": True,
+            "fallback_reason": last_error or "LLM weave exhausted retry budget",
+            "failure_code": self._classify_weave_error(last_error),
+            "attempt_errors": attempt_errors,
+            "dropped_storylines": last_dropped,
+            "completed_tiers": completed_tiers,
+            "incomplete_tiers": [
+                t.value
+                for t in (StorylineTier.S_TIER, StorylineTier.A_TIER, StorylineTier.B_TIER)
+                if t.value not in completed_tiers
+            ],
+        }
+
+    def _validate_dag(self, nodes: list[AnchorNode]) -> None:
+        graph: dict[str, list[str]] = {n.id: [] for n in nodes}
+        indeg: dict[str, int] = {n.id: 0 for n in nodes}
+        for n in nodes:
+            for dep in n.depends_on:
+                if dep in graph:
+                    graph[dep].append(n.id)
+                    indeg[n.id] += 1
+        q = [nid for nid, d in indeg.items() if d == 0]
+        seen = 0
+        while q:
+            cur = q.pop()
+            seen += 1
+            for nxt in graph.get(cur, []):
+                indeg[nxt] -= 1
+                if indeg[nxt] == 0:
+                    q.append(nxt)
+        if seen != len(nodes):
+            raise ValueError("anchor DAG validation failed: cycle detected")
+
+    def _ensure_tier_convergence(self, nodes: list[AnchorNode], storylines: list[Storyline]) -> None:
+        storyline_by_id = {s.id: s for s in storylines}
+        by_id = {n.id: n for n in nodes}
+        reverse: dict[str, list[str]] = {n.id: [] for n in nodes}
+        for n in nodes:
+            for dep in n.depends_on:
+                if dep in reverse:
+                    reverse[dep].append(n.id)
+        ending_ids = [n.id for n in nodes if "ending" in n.title.casefold() or "checkpoint" in n.title.casefold()]
+        if not ending_ids and nodes:
+            ending_ids = [nodes[-1].id]
+        def _can_reach_end(start: str) -> bool:
+            stack = [start]
+            visited: set[str] = set()
+            while stack:
+                cur = stack.pop()
+                if cur in ending_ids:
+                    return True
+                if cur in visited:
+                    continue
+                visited.add(cur)
+                stack.extend(reverse.get(cur, []))
+            return False
+        for n in nodes:
+            tiers = [storyline_by_id[sid].type for sid in n.storyline_ids if sid in storyline_by_id]
+            if any(t in (StorylineTier.S_TIER, StorylineTier.A_TIER) for t in tiers):
+                if not _can_reach_end(n.id):
+                    raise ValueError(f"anchor convergence validation failed: {n.id} cannot reach ending/checkpoint")
+
+    def _validate_strict_join(self, nodes: list[AnchorNode], storylines: list[Storyline]) -> None:
+        by_id = {n.id: n for n in nodes}
+        a_or_s_storylines = {s.id for s in storylines if s.type in (StorylineTier.S_TIER, StorylineTier.A_TIER)}
+        checkpoints = [n for n in nodes if n.node_kind in ("CHECKPOINT", "ENDING")]
+        for cp in checkpoints:
+            if cp.node_kind == "ENDING":
+                continue
+            if len(cp.depends_on) < 2:
+                raise ValueError(f"strict join failed: checkpoint {cp.id} must depend on >=2 upstream nodes")
+            required_side_nodes = [
+                n.id
+                for n in nodes
+                if n.id != cp.id and n.volume_id == cp.volume_id and any(sid in a_or_s_storylines for sid in n.storyline_ids)
+            ]
+            missing = [nid for nid in required_side_nodes if nid not in cp.depends_on]
+            if missing:
+                raise ValueError(f"strict join failed: {cp.id} missing side-thread deps {missing[:5]}")
+
+    def _validate_fork_merge(self, nodes: list[AnchorNode]) -> None:
+        children: dict[str, list[str]] = {n.id: [] for n in nodes}
+        by_id = {n.id: n for n in nodes}
+        for n in nodes:
+            for dep in n.depends_on:
+                if dep in children:
+                    children[dep].append(n.id)
+        merges = {n.id for n in nodes if n.node_kind in ("MERGE", "CHECKPOINT", "ENDING")}
+        for n in nodes:
+            if n.node_kind == "FORK":
+                outs = children.get(n.id, [])
+                if len(outs) < 2:
+                    raise ValueError(f"fork validation failed: {n.id} needs >=2 downstream paths")
+                # each fork branch must eventually converge.
+                for start in outs:
+                    stack = [start]
+                    seen: set[str] = set()
+                    converged = False
+                    while stack:
+                        cur = stack.pop()
+                        if cur in merges:
+                            converged = True
+                            break
+                        if cur in seen:
+                            continue
+                        seen.add(cur)
+                        stack.extend(children.get(cur, []))
+                    if not converged:
+                        raise ValueError(f"fork validation failed: branch from {n.id} does not converge")
+        for n in nodes:
+            if n.node_kind == "MERGE" and len(n.depends_on) < 2:
+                raise ValueError(f"merge validation failed: {n.id} must have >=2 parents")
+
+    def _validate_fishbone_dependencies(self, nodes: list[AnchorNode], storylines: list[Storyline]) -> None:
+        by_storyline = {s.id: s.type for s in storylines}
+        by_id = {n.id: n for n in nodes}
+        for n in nodes:
+            own_types = {by_storyline.get(sid) for sid in n.storyline_ids if sid in by_storyline}
+            for dep in n.depends_on:
+                dep_node = by_id.get(dep)
+                if not dep_node:
+                    continue
+                dep_types = {by_storyline.get(sid) for sid in dep_node.storyline_ids if sid in by_storyline}
+                own_side = any(t in {StorylineTier.S_TIER, StorylineTier.A_TIER, StorylineTier.B_TIER} for t in own_types)
+                dep_side = any(t in {StorylineTier.S_TIER, StorylineTier.A_TIER, StorylineTier.B_TIER} for t in dep_types)
+                # side arc can only depend on mainline or same storyline
+                if own_side and dep_side:
+                    if set(n.storyline_ids).isdisjoint(set(dep_node.storyline_ids)):
+                        raise ValueError(f"fishbone dependency violation: {n.id} depends on cross-side node {dep}")
+
+    def _derive_thread_descriptions(
+        self,
+        volume: VolumePlan,
+        volume_draft: MacroVolumePlanDraft | None,
+        *,
+        series_pressure_hint: str,
+    ) -> dict[str, str]:
+        draft = volume_draft
+        summary = (draft.summary if draft else volume.summary) or ""
+        nested = list(draft.anchors or []) if draft else []
+        anchor_lines = [a.description.strip() for a in nested if (a.description or "").strip()]
+        top_line = anchor_lines[0] if anchor_lines else summary
+        second_line = anchor_lines[1] if len(anchor_lines) > 1 else top_line
+        summary_trim = summary.strip()[:220]
+        return {
+            "a_thread_desc": (
+                f"{volume.title}: {top_line[:260]} "
+                f"Side thread must materially impact this volume's mainline choices."
+            ).strip(),
+            "s_thread_desc": (
+                f"{volume.title}: Carry forward long-horizon pressure - {series_pressure_hint[:220] or summary_trim or top_line[:180]}."
+            ).strip(),
+            "b_thread_desc": (
+                f"{volume.title}: Short local beat around '{second_line[:120]}' that adds texture without derailing the arc."
+            ).strip(),
+        }
+
+    def _build_anchor_nodes(
+        self,
+        anchors: list[StateAnchor],
+        storylines: list[Storyline],
+        volume_thread_desc: dict[str, dict[str, str]] | None = None,
+    ) -> list[AnchorNode]:
+        main_id = next((s.id for s in storylines if s.type == StorylineTier.MAIN), "")
+        ordered = sorted(anchors, key=lambda a: (a.chapter_target, a.priority))
+        nodes: list[AnchorNode] = []
+        s_tier_id = next((s.id for s in storylines if s.type == StorylineTier.S_TIER), "")
+        a_tier_ids = [s.id for s in storylines if s.type == StorylineTier.A_TIER]
+        b_tier_ids = [s.id for s in storylines if s.type == StorylineTier.B_TIER]
+        by_volume: dict[str, list[StateAnchor]] = {}
+        for a in ordered:
+            by_volume.setdefault(a.volume_id, []).append(a)
+        prev_checkpoint: str | None = None
+        prev_s_node: str | None = None
+        for v_idx, (volume_id, volume_anchors) in enumerate(by_volume.items(), start=1):
+            thread_desc = (volume_thread_desc or {}).get(volume_id) or {}
+            for idx, a in enumerate(volume_anchors):
+                depends: list[str] = []
+                if idx == 0 and prev_checkpoint:
+                    depends.append(prev_checkpoint)
+                elif idx > 0:
+                    depends.append(volume_anchors[idx - 1].anchor_id)
+                nodes.append(
+                    AnchorNode(
+                        id=a.anchor_id,
+                        storyline_ids=[x for x in [main_id] if x],
+                        volume_id=volume_id,
+                        node_kind="NORMAL",
+                        title=a.title,
+                        description=a.description,
+                        depends_on=depends,
+                        status=AnchorStatus.UNLOCKED if not depends else AnchorStatus.LOCKED,
+                    )
+                )
+            first_main = volume_anchors[0].anchor_id
+            last_main = volume_anchors[-1].anchor_id
+            fork_id = f"{volume_id}_fork"
+            nodes.append(
+                AnchorNode(
+                    id=fork_id,
+                    storyline_ids=[x for x in [main_id] if x],
+                    volume_id=volume_id,
+                    node_kind="FORK",
+                    title=f"{volume_id} fork",
+                    description="Branching point for side threads.",
+                    depends_on=[first_main],
+                    status=AnchorStatus.LOCKED,
+                )
+            )
+            a_line = a_tier_ids[(v_idx - 1) % len(a_tier_ids)] if a_tier_ids else ""
+            a_node_id = f"{volume_id}_a_thread"
+            if a_line:
+                nodes.append(
+                    AnchorNode(
+                        id=a_node_id,
+                        storyline_ids=[a_line],
+                        volume_id=volume_id,
+                        node_kind="NORMAL",
+                        title=f"{volume_id} A-tier thread",
+                        description=str(
+                            thread_desc.get("a_thread_desc")
+                            or f"Resolve one concrete side-thread payoff tied to {volume_id}."
+                        ),
+                        depends_on=[fork_id],
+                        status=AnchorStatus.LOCKED,
+                    )
+                )
+            s_node_id = f"{volume_id}_s_thread"
+            s_deps = [fork_id]
+            if prev_s_node:
+                s_deps.append(prev_s_node)
+            if s_tier_id:
+                nodes.append(
+                    AnchorNode(
+                        id=s_node_id,
+                        storyline_ids=[s_tier_id],
+                        volume_id=volume_id,
+                        node_kind="NORMAL",
+                        title=f"{volume_id} S-tier thread",
+                        description=str(
+                            thread_desc.get("s_thread_desc")
+                            or f"Advance a long-horizon S-tier thread through {volume_id}."
+                        ),
+                        depends_on=s_deps,
+                        status=AnchorStatus.LOCKED,
+                    )
+                )
+                prev_s_node = s_node_id
+            if b_tier_ids:
+                b_node_id = f"{volume_id}_b_scatter"
+                nodes.append(
+                    AnchorNode(
+                        id=b_node_id,
+                        storyline_ids=[b_tier_ids[(v_idx - 1) % len(b_tier_ids)]],
+                        volume_id=volume_id,
+                        node_kind="NORMAL",
+                        title=f"{volume_id} B-tier scatter",
+                        description=str(
+                            thread_desc.get("b_thread_desc")
+                            or f"Inject a short local beat that still supports {volume_id} trajectory."
+                        ),
+                        depends_on=[fork_id],
+                        status=AnchorStatus.LOCKED,
+                    )
+                )
+            merge_deps = [last_main]
+            if a_line:
+                merge_deps.append(a_node_id)
+            if s_tier_id:
+                merge_deps.append(s_node_id)
+            merge_id = f"{volume_id}_merge"
+            nodes.append(
+                AnchorNode(
+                    id=merge_id,
+                    storyline_ids=[x for x in [main_id] if x],
+                    volume_id=volume_id,
+                    node_kind="MERGE",
+                    title=f"{volume_id} merge",
+                    description="Volume branch convergence merge point.",
+                    depends_on=merge_deps,
+                    status=AnchorStatus.LOCKED,
+                )
+            )
+            chk_id = f"{volume_id}_checkpoint"
+            nodes.append(
+                AnchorNode(
+                    id=chk_id,
+                    storyline_ids=[x for x in [main_id] if x],
+                    volume_id=volume_id,
+                    node_kind="CHECKPOINT",
+                    title=f"{volume_id} checkpoint",
+                    description="Volume convergence checkpoint.",
+                    depends_on=[merge_id] + ([a_node_id] if a_line else []) + ([s_node_id] if s_tier_id else []),
+                    status=AnchorStatus.LOCKED,
+                )
+            )
+            prev_checkpoint = chk_id
+        if nodes:
+            nodes.append(
+                AnchorNode(
+                    id=f"{ordered[-1].story_id}_ending",
+                    storyline_ids=[main_id] if main_id else [],
+                    volume_id=ordered[-1].volume_id,
+                    node_kind="ENDING",
+                    title="Final ending",
+                    description="Series final convergence ending node.",
+                    depends_on=[n.id for n in nodes if n.node_kind == "CHECKPOINT"],
+                    status=AnchorStatus.LOCKED,
+                )
+            )
+        self._validate_dag(nodes)
+        self._ensure_tier_convergence(nodes, storylines)
+        self._validate_fork_merge(nodes)
+        self._validate_strict_join(nodes, storylines)
+        return nodes
+
+    @staticmethod
     def _macro_chapter_unit_and_words_per_volume(story_input: StoryInput) -> tuple[int, int]:
         settings = get_settings()
         ol = normalize_output_language(story_input.output_language)
@@ -175,6 +1586,333 @@ class AnchorService:
             chapter_unit = max(1, default_chapter_target_words(ol))
         words_per_volume = max(1, int(settings.macro_chapters_per_volume) * chapter_unit)
         return chapter_unit, words_per_volume
+
+    @staticmethod
+    def _truncate_text_for_prompt(text: str, max_len: int) -> str:
+        s = (text or "").strip()
+        if len(s) <= max_len:
+            return s
+        return s[: max_len - 1] + "…"
+
+    def _build_macro_narrative_context(
+        self,
+        *,
+        storylines: list[Storyline],
+        bible: dict[str, Any],
+        volumes: list[VolumePlan],
+        cast_stored: list[StoryCastMemberStored],
+    ) -> dict[str, Any]:
+        return {
+            "storylines": [
+                {
+                    "id": s.id,
+                    "type": s.type.value if hasattr(s.type, "value") else str(s.type),
+                    "title": s.title,
+                    "overall_goal": s.overall_goal,
+                    "involved_entities": list(s.involved_entities or []),
+                }
+                for s in storylines
+            ],
+            "bible_excerpt": self._truncate_text_for_prompt(
+                json.dumps(bible, ensure_ascii=False, default=str), 4500
+            ),
+            "volumes": [
+                {
+                    "volume_id": v.volume_id,
+                    "title": v.title,
+                    "summary": v.summary,
+                    "chapter_start": v.chapter_start,
+                    "chapter_end": v.chapter_end,
+                }
+                for v in volumes
+            ],
+            "cast": [
+                {
+                    "node_id": c.node_id,
+                    "canonical_name": c.canonical_name,
+                    "role": c.role,
+                    "short_bio": self._truncate_text_for_prompt(c.short_bio or "", 200),
+                }
+                for c in cast_stored
+            ],
+        }
+
+    def _storyline_slot_fill_prompt(
+        self,
+        *,
+        story_input: StoryInput,
+        storylines: list[Storyline],
+        allowed_cast_node_ids: list[str],
+        bible: dict[str, Any],
+        volumes: list[VolumePlan],
+        cast_stored: list[StoryCastMemberStored],
+    ) -> str:
+        rows: list[dict[str, Any]] = []
+        for s in storylines:
+            rows.append(
+                {
+                    "storyline_id": s.id,
+                    "type": s.type.value if hasattr(s.type, "value") else str(s.type),
+                    "seed_title": s.title,
+                    "seed_overall_goal": s.overall_goal,
+                    "seed_involved_entities": list(s.involved_entities or []),
+                }
+            )
+        return json.dumps(
+            {
+                "task": "Fill storyline content slots only; do not change storyline ids or tier types.",
+                "output_language": normalize_output_language(story_input.output_language),
+                "rules": [
+                    "You can only fill title, overall_goal, and involved_entities for each storyline_id.",
+                    "Do not add, remove, or rename storyline rows; keep storyline_id values exactly as given.",
+                    "involved_entities MUST be a subset of allowed_cast_node_ids (use those exact strings).",
+                    "S_TIER: book-spanning important side service to the main spine; A_TIER: volume-scoped support; B_TIER: short texture beats.",
+                    "Write in the configured output_language. No plot spoilers of the final ending.",
+                ],
+                "allowed_cast_node_ids": allowed_cast_node_ids,
+                "bible_excerpt": self._truncate_text_for_prompt(
+                    json.dumps(bible, ensure_ascii=False, default=str), 4500
+                ),
+                "volumes": [
+                    {
+                        "volume_id": v.volume_id,
+                        "title": v.title,
+                        "summary": v.summary,
+                        "chapter_start": v.chapter_start,
+                        "chapter_end": v.chapter_end,
+                    }
+                    for v in volumes
+                ],
+                "cast": [
+                    {
+                        "node_id": c.node_id,
+                        "canonical_name": c.canonical_name,
+                        "role": c.role,
+                        "short_bio": self._truncate_text_for_prompt(c.short_bio or "", 200),
+                    }
+                    for c in cast_stored
+                ],
+                "storylines": rows,
+                "output_shape": {
+                    "items": [
+                        {
+                            "storyline_id": "string",
+                            "title": "string",
+                            "overall_goal": "string",
+                            "involved_entities": ["cast node_id"],
+                        }
+                    ]
+                },
+            },
+            ensure_ascii=False,
+        )
+
+    def _fill_storyline_slots(
+        self,
+        *,
+        story_input: StoryInput,
+        llm_client: LLMClient | None,
+        storylines: list[Storyline],
+        cast_stored: list[StoryCastMemberStored],
+        volumes: list[VolumePlan],
+        bible: dict[str, Any],
+    ) -> tuple[list[Storyline], dict[str, Any]]:
+        if llm_client is None or isinstance(llm_client, MockLLMClient):
+            return storylines, {"storyline_slot_fill_skipped": True, "storyline_slot_fill_retries": 0}
+        allowed = {c.node_id for c in cast_stored}
+        if not storylines or not allowed:
+            return storylines, {"storyline_slot_fill_skipped": True, "storyline_slot_fill_retries": 0}
+        profile = augment_profile_system_prompt(get_profile("macro_planner"), story_input.output_language)
+        by_id = {s.id: s for s in storylines}
+        pending_ids = set(by_id.keys())
+        retries = 0
+        violations = 0
+
+        for _ in range(2):
+            if not pending_ids:
+                break
+            pending_ordered = [by_id[sid] for sid in (s.id for s in storylines) if sid in pending_ids]
+            prompt = self._storyline_slot_fill_prompt(
+                story_input=story_input,
+                storylines=pending_ordered,
+                allowed_cast_node_ids=sorted(allowed),
+                bible=bible,
+                volumes=volumes,
+                cast_stored=cast_stored,
+            )
+            try:
+                structured, _ = llm_client.invoke_json(prompt, _LLMStorylineSlotOutput, profile)
+            except Exception:
+                break
+            for item in structured.items:
+                sid = (item.storyline_id or "").strip()
+                if sid not in pending_ids or sid not in by_id:
+                    continue
+                title = (item.title or "").strip()
+                goal = (item.overall_goal or "").strip()
+                ents = [e for e in (item.involved_entities or []) if e in allowed]
+                if not title or not goal:
+                    violations += 1
+                    continue
+                if not ents and (by_id[sid].involved_entities or []):
+                    ents = [e for e in (by_id[sid].involved_entities or []) if e in allowed][:5]
+                if not ents and allowed:
+                    ents = [sorted(allowed)[0]]
+                by_id[sid] = by_id[sid].model_copy(
+                    update={"title": title, "overall_goal": goal, "involved_entities": ents[:8]}
+                )
+                pending_ids.discard(sid)
+            if not pending_ids:
+                break
+            retries += 1
+        return [by_id[s.id] for s in storylines], {
+            "storyline_slot_fill_skipped": False,
+            "storyline_slot_fill_retries": retries,
+            "storyline_slot_policy_violations": violations,
+            "storyline_slot_pending_ids": sorted(pending_ids),
+        }
+
+    def _slot_fill_prompt(
+        self,
+        *,
+        story_input: StoryInput,
+        stage_label: str,
+        node_rows: list[dict[str, Any]],
+        context_summary: str = "",
+        narrative_context: dict[str, Any] | None = None,
+    ) -> str:
+        payload: dict[str, Any] = {
+            "task": "Fill content slots only; never modify topology fields.",
+            "stage": stage_label,
+            "output_language": normalize_output_language(story_input.output_language),
+            "rules": [
+                "You can only fill title and description.",
+                "Do not invent or modify node_id, depends_on, node_kind, storyline_ids, volume_id.",
+                "Return one item for each input node_id.",
+                "Use narrative_context (storylines, bible_excerpt, volumes, cast) to keep anchors aligned with the macro plan and each storyline's overall_goal.",
+                "S_TIER is a book-spanning important side arc (identity mystery, long-term growth) and must serve the mainline.",
+                "A_TIER is a volume-scoped side arc (e.g., key item/ability acquisition) and must serve this volume mainline.",
+                "B_TIER is a short side beat for texture and character charm, never a decisive plotline.",
+                "No spoilers and no repetition: side-arc content must not duplicate mainline events.",
+                "Each node description must strictly match the spatiotemporal context implied by its depends_on predecessors.",
+                "No deterministic breakthrough ahead of mainline schedule.",
+                "If any rule is violated, rewrite the offending item and keep topology unchanged.",
+            ],
+            "context_summary": context_summary,
+            "narrative_context": narrative_context or {},
+            "nodes": node_rows,
+            "output_shape": {
+                "items": [{"node_id": "string", "title": "string", "description": "string"}]
+            },
+        }
+        return json.dumps(payload, ensure_ascii=False)
+
+    def _slot_fill_policy_violations(self, text: str) -> int:
+        t = (text or "").strip().lower()
+        if not t:
+            return 1
+        violations = 0
+        spoiler_hints = ("ending", "true mastermind", "all mysteries solved", "最終真相", "終局", "真兇揭露")
+        if any(k in t for k in spoiler_hints):
+            violations += 1
+        # coarse anti-jump check for deterministic breakthroughs.
+        premature_hints = ("definitively resolved", "completely solved", "徹底解決", "最終擊敗")
+        if any(k in t for k in premature_hints):
+            violations += 1
+        return violations
+
+    def _fill_anchor_slots(
+        self,
+        *,
+        story_input: StoryInput,
+        llm_client: LLMClient | None,
+        anchor_nodes: list[AnchorNode],
+        storylines: list[Storyline] | None = None,
+        bible: dict[str, Any] | None = None,
+        volumes: list[VolumePlan] | None = None,
+        cast_stored: list[StoryCastMemberStored] | None = None,
+    ) -> tuple[list[AnchorNode], dict[str, Any]]:
+        if llm_client is None or isinstance(llm_client, MockLLMClient):
+            return anchor_nodes, {"slot_fill_skipped": True, "slot_fill_retries": 0}
+        profile = augment_profile_system_prompt(get_profile("macro_planner"), story_input.output_language)
+        by_id = {n.id: n for n in anchor_nodes}
+        main_nodes = [n for n in anchor_nodes if n.node_kind == "NORMAL" and any(sid.endswith("_main") for sid in n.storyline_ids)]
+        side_nodes = [n for n in anchor_nodes if n.node_kind == "NORMAL" and n.id not in {m.id for m in main_nodes}]
+        narrative_block: dict[str, Any] | None = None
+        if storylines is not None and bible is not None and volumes is not None and cast_stored is not None:
+            narrative_block = self._build_macro_narrative_context(
+                storylines=storylines, bible=bible, volumes=volumes, cast_stored=cast_stored
+            )
+
+        def _fill_batch(stage: str, batch: list[AnchorNode], context_summary: str = "") -> tuple[int, int]:
+            if not batch:
+                return 0, 0
+            retries = 0
+            violations = 0
+            pending_ids = {n.id for n in batch}
+            for _ in range(2):
+                payload = [
+                    {
+                        "node_id": n.id,
+                        "title": n.title,
+                        "description": n.description,
+                        "volume_id": n.volume_id,
+                        "depends_on": list(n.depends_on or []),
+                        "depends_on_context": [
+                            {
+                                "node_id": dep,
+                                "title": str((by_id.get(dep) or n).title or ""),
+                                "description": str((by_id.get(dep) or n).description or ""),
+                            }
+                            for dep in (n.depends_on or [])
+                            if dep in by_id
+                        ],
+                    }
+                    for n in batch
+                    if n.id in pending_ids
+                ]
+                if not payload:
+                    break
+                prompt = self._slot_fill_prompt(
+                    story_input=story_input,
+                    stage_label=stage,
+                    node_rows=payload,
+                    context_summary=context_summary,
+                    narrative_context=narrative_block,
+                )
+                try:
+                    structured, _ = llm_client.invoke_json(prompt, _LLMSlotFillOutput, profile)
+                except Exception:
+                    # Keep deterministic skeleton content if slot-filling model/path is unavailable.
+                    break
+                for item in structured.items:
+                    node_id = (item.node_id or "").strip()
+                    if node_id not in pending_ids or node_id not in by_id:
+                        continue
+                    title = (item.title or "").strip()
+                    desc = (item.description or "").strip()
+                    policy_hits = self._slot_fill_policy_violations(f"{title}\n{desc}")
+                    if policy_hits > 0:
+                        violations += policy_hits
+                        continue
+                    if title and desc:
+                        by_id[node_id] = by_id[node_id].model_copy(update={"title": title, "description": desc})
+                        pending_ids.remove(node_id)
+                if not pending_ids:
+                    break
+                retries += 1
+            return retries, violations
+
+        retries_main, violations_main = _fill_batch("stage3.1_mainline", main_nodes)
+        side_context = " ".join([n.description for n in main_nodes[:8]])
+        retries_side, violations_side = _fill_batch("stage3.3_side_arcs", side_nodes, context_summary=side_context[:2000])
+        return [by_id[n.id] for n in anchor_nodes], {
+            "slot_fill_skipped": False,
+            "slot_fill_retries": retries_main + retries_side,
+            "slot_fill_policy_violations": violations_main + violations_side,
+            "slot_fill_mainline_count": len(main_nodes),
+            "slot_fill_side_count": len(side_nodes),
+        }
 
     def compile_macro_plan(
         self, story_id: str, story_input: StoryInput, llm_client: LLMClient | None = None
@@ -257,7 +1995,7 @@ class AnchorService:
                 raise ValueError(f"macro compile output language mismatch: {final_language_mismatch}")
 
             return self._normalize_macro_plan(
-                story_id, structured_output, fixed_total_chapters, story_input.target_total_words, story_input
+                story_id, structured_output, fixed_total_chapters, story_input.target_total_words, story_input, llm_client
             )
         return self._build_mock_macro_plan(story_id, story_input)
 
@@ -383,7 +2121,14 @@ class AnchorService:
             cast=[],
             volumes=volume_drafts,
         )
-        return self._normalize_macro_plan(story_id, plan, total_chapters, story_input.target_total_words, story_input)
+        return self._normalize_macro_plan(
+            story_id,
+            plan,
+            total_chapters,
+            story_input.target_total_words,
+            story_input,
+            None,
+        )
 
     def _fallback_bible_from_premise(self, story_input: StoryInput) -> dict[str, Any]:
         return {
@@ -482,6 +2227,33 @@ class AnchorService:
                 "Author text may be Simplified Chinese, mixed, or Latin; unify every JSON string to standard Traditional Chinese (繁體中文) for this story. "
                 "Avoid simplified-only character forms where Traditional orthography differs from Simplified."
             )
+        tri_language_rules: list[str] = [
+            self._tri_instruction(
+                "所有自然語言欄位（bible、cast、volumes、anchors 的 title/summary/description/notes）必須完全使用故事設定語言，不可混用其他語言；JSON key 與 enum 值維持英文。",
+                "所有自然语言字段（bible、cast、volumes、anchors 的 title/summary/description/notes）必须完全使用故事设定语言，不可混用其他语言；JSON key 与 enum 值保持英文。",
+                "All natural-language fields (bible, cast, volumes, anchors title/summary/description/notes) must be entirely in the story output language; keep JSON keys and enum values in English.",
+            ),
+            self._tri_instruction(
+                "不要把指令語言視為輸出語言；即使看到三語說明，你仍只可用 output_language 產出內容。",
+                "不要把指令语言当作输出语言；即使看到三语说明，你仍只可用 output_language 产出内容。",
+                "Do not treat instruction language as output language; even with trilingual instructions, produce content only in output_language.",
+            ),
+            self._tri_instruction(
+                "主線與副線定義：MAIN 是主衝突骨幹；S_TIER 是全書長弧壓力線；A_TIER 是每卷服務主線的關鍵支線；B_TIER 是短支線/微事件，只能加質感不可偏離主線。",
+                "主线与副线定义：MAIN 是主冲突骨干；S_TIER 是全书长弧压力线；A_TIER 是每卷服务主线的关键支线；B_TIER 是短支线/微事件，只能加质感不可偏离主线。",
+                "Main/side definitions: MAIN is the core conflict spine; S_TIER is series-long pressure arc; A_TIER is per-volume key side thread serving the volume mainline; B_TIER is short micro-beat adding texture without derailing the mainline.",
+            ),
+            self._tri_instruction(
+                "支線規則：所有副線（S/A/B）都必須服務主線推進，且事件範圍不得超出所屬卷的劇情邊界。",
+                "支线规则：所有副线（S/A/B）都必须服务主线推进，且事件范围不得超出所属卷的剧情边界。",
+                "Side-thread rule: every S/A/B thread must advance the mainline and stay within its volume narrative scope.",
+            ),
+            self._tri_instruction(
+                "Anchor 事件規則：每個 anchor 必須是可在單章內完成的具體物理事件，描述可驗證且可結算。",
+                "Anchor 事件规则：每个 anchor 必须是可在单章内完成的具体物理事件，描述可验证且可结算。",
+                "Anchor event rule: each anchor must be a concrete, physically verifiable event achievable within one chapter.",
+            ),
+        ]
         return json.dumps(
             {
                 "title": story_input.title,
@@ -567,6 +2339,7 @@ class AnchorService:
                     *cast_req,
                     "initial_b_stories (optional): only series-long obsessions or terminal-goal decompositions - no short tactical errands (single-chapter fetch, lockpick, etc.). Each row needs resolution_condition.",
                     "speech_style / quirks_and_habits are occasional flavor - do not design them as every-line catchphrases.",
+                    *tri_language_rules,
                 ],
             },
             ensure_ascii=False,
@@ -685,6 +2458,7 @@ class AnchorService:
         fixed_total_chapters: int,
         target_total_words: int,
         story_input: StoryInput,
+        llm_client: LLMClient | None = None,
     ) -> tuple[list[VolumePlan], list[StateAnchor], list[StoryCastMemberStored], list[dict[str, Any]], dict[str, Any]]:
         bible_out = self._normalize_generated_bible(story_input, output)
         total_chapters = max(6, fixed_total_chapters)
@@ -736,12 +2510,59 @@ class AnchorService:
                     volume_id=volume.volume_id,
                     title=draft.title,
                     description=draft.description,
-                    target_state=draft.target_state,
+                    target_state=dict(draft.target_state or {}),
                     chapter_target=chapter_target,
                     priority=draft.priority,
                 )
             )
         cast_stored = self._normalize_cast_output(story_id, output.cast, story_input)
+        compile_warnings: list[str] = []
+        storylines, fishbone_meta = self._build_fishbone_storylines(story_id, volumes, cast_stored)
+        storylines, storyline_slot_meta = self._fill_storyline_slots(
+            story_input=story_input,
+            llm_client=llm_client,
+            storylines=storylines,
+            cast_stored=cast_stored,
+            volumes=volumes,
+            bible=bible_out,
+        )
+        anchor_nodes = self._build_fishbone_anchor_nodes(
+            story_id=story_id,
+            anchors=anchors,
+            storylines=storylines,
+            volumes=volumes,
+            a_lines_per_volume=dict(fishbone_meta.get("a_lines_per_volume") or {}),
+        )
+        self._validate_dag(anchor_nodes)
+        self._ensure_tier_convergence(anchor_nodes, storylines)
+        self._validate_fork_merge(anchor_nodes)
+        self._validate_strict_join(anchor_nodes, storylines)
+        self._validate_fishbone_dependencies(anchor_nodes, storylines)
+        anchor_nodes, slot_meta = self._fill_anchor_slots(
+            story_input=story_input,
+            llm_client=llm_client,
+            anchor_nodes=anchor_nodes,
+            storylines=storylines,
+            bible=bible_out,
+            volumes=volumes,
+            cast_stored=cast_stored,
+        )
+        weave_meta = {
+            "topology_mode": "fixed_fishbone",
+            "llm_topology_generation": False,
+            "fishbone_meta": fishbone_meta,
+            **storyline_slot_meta,
+            **slot_meta,
+        }
+        branch_count = self._branch_count_for_story(story_input)
+        # Keep topology in compile output payload for service-layer persistence;
+        # StoryRepository strips these out of bible_json and stores them in dedicated columns.
+        bible_out["storylines"] = [s.model_dump(mode="json") for s in storylines]
+        bible_out["anchor_nodes"] = [n.model_dump(mode="json") for n in anchor_nodes]
+        bible_out["branch_count_final"] = branch_count
+        bible_out["llm_weave_debug"] = weave_meta
+        if compile_warnings:
+            bible_out["compile_warnings"] = compile_warnings
         b_seed: list[dict[str, Any]] = []
         for item in output.initial_b_stories or []:
             bid = str(getattr(item, "id", None) or (item.get("id") if isinstance(item, dict) else "") or "").strip()

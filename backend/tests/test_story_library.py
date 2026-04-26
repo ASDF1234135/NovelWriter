@@ -59,7 +59,7 @@ def test_macro_snapshot_not_compiled(tmp_path) -> None:
     assert snap["story_id"] == story["story_id"]
     assert snap["compiled"] is False
     assert snap["volumes"] == []
-    assert snap["anchors"] == []
+    assert snap["anchor_nodes"] == []
     assert snap["cast"] == []
     assert snap["protagonist_character_id"] == ""
     assert snap["bible"] == {}
@@ -90,14 +90,17 @@ def test_macro_snapshot_matches_after_compile(tmp_path) -> None:
     snap = service.get_macro_snapshot(sid)
     assert snap["compiled"] is True
     assert len(snap["volumes"]) == len(macro["volumes"])
-    assert len(snap["anchors"]) == len(macro["anchors"])
+    assert len(snap["anchor_nodes"]) == len(macro["anchor_nodes"])
     assert snap["protagonist_character_id"] == macro["protagonist_character_id"]
     assert snap["cast"] == macro["cast"]
-    assert snap["bible"] == macro["bible"]
+    expected_bible = dict(macro["bible"])
+    expected_bible.pop("storylines", None)
+    expected_bible.pop("anchor_nodes", None)
+    assert snap["bible"] == expected_bible
     assert snap["macro_author_notes"] == macro["macro_author_notes"]
-    for a in snap["anchors"]:
-        assert "target_state" in a
-        assert "target_state_json" not in a
+    for a in snap["anchor_nodes"]:
+        assert "depends_on" in a
+        assert "storyline_ids" in a
 
 
 def test_get_macro_snapshot_missing_story(tmp_path) -> None:
@@ -137,6 +140,8 @@ def test_api_get_story_detail_and_configuration_locked(tmp_path) -> None:
         assert data["title"] == "Detail"
         assert data["premise"] == "p"
         assert data["bible"] == {"k": "v"}
+        assert data["storylines"] == []
+        assert data["anchor_nodes"] == []
         assert data["target_total_words"] == 5000
         assert data["plan_retry_limit"] == 2
         assert data["draft_loop_retry_limit"] == 1

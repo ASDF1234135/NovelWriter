@@ -14,6 +14,7 @@ type Props = {
   /** Prefer this node as radial center when present in the graph. */
   protagonistCharacterId?: string;
   viewMode?: "all" | "ego" | "location-item" | "epoch";
+  layoutMode?: "fixed" | "dagre-ltr";
   /** When false, keep orphan nodes visible. */
   pruneIsolatedNodes?: boolean;
   /** Switch parent to Ego mode and center on this node. */
@@ -39,19 +40,6 @@ function nodeLabel(n: RawNode): string {
   return String(n.canonical_name ?? n.title ?? n.node_id ?? "?").slice(0, 28);
 }
 
-function pickRadialFocusNode(
-  nodes: MappedNode[],
-  protagonistCharacterId: string | undefined,
-): string | undefined {
-  if (!nodes.length) return undefined;
-  const ids = new Set(nodes.map((n) => String(n.id)));
-  const pid = protagonistCharacterId?.trim();
-  if (pid && ids.has(pid)) return pid;
-  const firstChar = nodes.find((n) => String(n.node_type).toUpperCase() === "CHARACTER");
-  if (firstChar) return String(firstChar.id);
-  return String(nodes[0].id);
-}
-
 function distributedCurveOffset(index: number): number {
   if (index === 0) return 0;
   const mag = Math.ceil(index / 2) * 18;
@@ -62,9 +50,11 @@ export function UniverseGraphAntv({
   graph,
   protagonistCharacterId,
   viewMode = "all",
+  layoutMode = "dagre-ltr",
   pruneIsolatedNodes = true,
   onSetEgoCenter,
 }: Props) {
+  void protagonistCharacterId;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const graphRef = useRef<any>(null);
   const [selectedNodeModel, setSelectedNodeModel] = useState<Record<string, unknown> | null>(null);
@@ -117,6 +107,8 @@ export function UniverseGraphAntv({
             lineWidth: 1,
             opacity: isDead || ruleInactive ? 0.55 : 1,
           },
+          x: Number(n.x ?? 0),
+          y: Number(n.y ?? 0),
         } as MappedNode;
       })
       .filter(Boolean) as MappedNode[];
@@ -196,52 +188,28 @@ export function UniverseGraphAntv({
       (e) => safeNodeIdSet.has(String(e.source)) && safeNodeIdSet.has(String(e.target)),
     );
 
-    const hasCharacterNode = safeNodes.some((n) => String(n.node_type).toUpperCase() === "CHARACTER");
-    const focusId = pickRadialFocusNode(safeNodes, protagonistCharacterId);
-
     let layoutCfg: Record<string, unknown>;
-    if (viewMode === "ego" && focusId) {
-      layoutCfg = {
-        type: "radial",
-        focusNode: focusId,
-        unitRadius: 88,
-        linkDistance: 120,
-        preventOverlap: true,
-        nodeSpacing: 36,
-        nodeSize: 24,
-        maxPreventOverlap: 150,
-      };
-    } else if (viewMode === "location-item") {
-      layoutCfg = {
-        type: "force",
-        preventOverlap: true,
-        nodeStrength: 1.1,
-        edgeStrength: 0.5,
-        linkDistance: 90,
-      };
-    } else if (hasCharacterNode && focusId) {
-      layoutCfg = {
-        type: "radial",
-        focusNode: focusId,
-        unitRadius: 72,
-        linkDistance: 120,
-        preventOverlap: true,
-        nodeSpacing: 28,
-        nodeSize: 22,
-        maxPreventOverlap: 120,
-      };
+    if (layoutMode === "fixed") {
+      // Keep persisted coordinates when available; fallback to deterministic grid.
+      safeNodes.forEach((n, idx) => {
+        if (!Number.isFinite(Number(n.x)) || !Number.isFinite(Number(n.y))) {
+          n.x = (idx % 12) * 120 + 60;
+          n.y = Math.floor(idx / 12) * 90 + 60;
+        }
+      });
+      layoutCfg = { type: "preset" };
     } else {
       layoutCfg = {
-        type: "force",
+        type: "dagre",
+        rankdir: "LR",
+        nodesep: 42,
+        ranksep: 88,
         preventOverlap: true,
-        linkDistance: 80,
-        nodeStrength: 0.8,
-        edgeStrength: 0.6,
       };
     }
 
     return { safeNodes, safeEdges, layoutCfg };
-  }, [graph, protagonistCharacterId, viewMode, pruneIsolatedNodes]);
+  }, [graph, protagonistCharacterId, viewMode, pruneIsolatedNodes, layoutMode]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -257,9 +225,9 @@ export function UniverseGraphAntv({
         width,
         height,
         layout: {
-          type: "force",
+          type: "dagre",
+          rankdir: "LR",
           preventOverlap: true,
-          linkDistance: 80,
         },
         modes: {
           default: ["drag-canvas", "zoom-canvas", "drag-node"],

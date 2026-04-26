@@ -212,6 +212,16 @@ def get_profile(agent_name: str) -> AgentPromptProfile:
             model=settings.supervisor_llm_model or settings.llm_model,
             temperature=0.0,
         ),
+        "anchor_resolver": AgentPromptProfile(
+            agent_name="anchor_resolver",
+            system_prompt=(
+                "You resolve chapter anchors from draft evidence. "
+                "Mark requires_human_review=true ONLY when evidence is genuinely ambiguous. "
+                "If evidence is clear (resolved or unresolved), requires_human_review must be false."
+            ),
+            model=settings.supervisor_llm_model or settings.llm_model,
+            temperature=0.0,
+        ),
         "chapter_summarizer": AgentPromptProfile(
             agent_name="chapter_summarizer",
             system_prompt=(

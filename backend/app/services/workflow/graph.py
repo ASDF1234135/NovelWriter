@@ -20,7 +20,7 @@ from app.domain.state import AgentWorkflowState, apply_length_bounds_to_state
 from app.repositories.sqlite.workflow_repository import WorkflowRepository
 from app.services.workflow.context import WorkflowContext
 from app.services.workflow.nodes.author import run_author
-from app.services.workflow.nodes.b_story_resolve import run_b_story_resolve
+from app.services.workflow.nodes.anchor_resolve import run_anchor_resolve
 from app.services.workflow.nodes.director import run_director
 from app.services.workflow.nodes.draft_supervisor import run_draft_supervisor
 from app.services.workflow.nodes.extraction_gate import run_extraction_gate
@@ -36,7 +36,6 @@ from app.services.workflow.nodes.planner import run_planner
 from app.services.workflow.nodes.profile_expander import run_profile_expander
 from app.services.workflow.nodes.reader import run_reader
 from app.services.workflow.nodes.state_updater import run_state_updater
-from app.services.workflow.chapter_pipeline import extraction_substantiated_event_ids, validate_b_story_resolution
 from app.services.workflow.recorder import WorkflowRecorder, elapsed_ms, timed
 
 
@@ -697,7 +696,7 @@ def build_chapter_graph(context: WorkflowContext):
     def extraction_gate_node(state: AgentWorkflowState) -> dict:
         start = timed()
         gate_out = run_extraction_gate(state, context)
-        route = gate_out.get("post_polish_route") or "resolve_subplots"
+        route = gate_out.get("post_polish_route") or "anchor_resolve"
         if route == "author":
             entry = gate_out.get("extraction_gate_feedback_entry") or {}
             draft_feedback = list(state["draft_feedback"])
@@ -792,8 +791,8 @@ def build_chapter_graph(context: WorkflowContext):
         run_chapter_summarizer(state, context)
         merged = {
             "last_agent": "chapter_summarizer",
-            # Deterministic flow continues to b_story_resolve.
-            "resume_from": "b_story_resolve",
+            # Deterministic flow continues to anchor_resolve.
+            "resume_from": "anchor_resolve",
         }
         recorder.record_and_update_run(
             "chapter_summarizer",
@@ -804,29 +803,29 @@ def build_chapter_graph(context: WorkflowContext):
         )
         return merged
 
-    def b_story_resolve_node(state: AgentWorkflowState) -> dict:
+    def anchor_resolve_node(state: AgentWorkflowState) -> dict:
         start = timed()
-        out = run_b_story_resolve(state, context)
+        out = run_anchor_resolve(state, context)
         route = "profile_expander"
-        base = {**out, "last_agent": "b_story_resolve"}
-        if out.get("b_story_hitl_required"):
+        base = {**out, "last_agent": "anchor_resolve"}
+        if out.get("anchor_hitl_required"):
             route = "hitl"
             merged = {
                 **base,
                 "requires_hitl": True,
-                "hitl_reason": HitlReason.B_STORY_RESOLUTION_FAILED,
+                "hitl_reason": HitlReason.ANCHOR_RESOLUTION_FAILED,
                 "hitl_decision_mode": "MANUAL_EDIT",
                 "workflow_status": WorkflowStatus.WAITING_HITL.value,
                 "pending_hitl_options": [
-                    {"id": "b_story_wait_judgement", "label": "請使用副線裁判表單提交"},
+                    {"id": "anchor_wait_judgement", "label": "請使用 Anchor 裁判表單提交"},
                 ],
-                "resume_from": "b_story_resolve",
-                "b_story_route": "hitl",
+                "resume_from": "anchor_resolve",
+                "anchor_route": "hitl",
             }
         else:
-            merged = {**base, "resume_from": "profile_expander", "b_story_route": "profile_expander"}
+            merged = {**base, "resume_from": "profile_expander", "anchor_route": "profile_expander"}
         recorder.record_and_update_run(
-            "b_story_resolve",
+            "anchor_resolve",
             dict(state),
             merged,
             {**state, **merged},
@@ -904,28 +903,17 @@ def build_chapter_graph(context: WorkflowContext):
                 status="completed",
             )
             pending_ext = state.get("pending_chapter_extraction") or {}
-            gt_ids = {str(e.get("event_id")) for e in (state.get("ground_truth_events") or []) if e.get("event_id")}
-            substantiated = extraction_substantiated_event_ids(pending_ext, gt_ids)
-            br = state.get("b_story_resolution") or {}
-            resolved = [str(x).strip() for x in (br.get("resolved_b_stories") or []) if str(x).strip()]
-            ok_resolve, _ = validate_b_story_resolution(br, substantiated)
-            if not ok_resolve:
-                resolved = []
-            if resolved:
-                context.story_repository.remove_resolved_b_stories_from_bible(state["story_id"], resolved)
-            additions = state.get("pending_b_story_additions") or []
-            seed = [
-                {
-                    "id": str(a.get("id")),
-                    "desc": str(a.get("desc") or "")[:800],
-                    "type": str(a.get("type") or "UNKNOWN"),
-                    "resolution_condition": str(a.get("resolution_condition") or "")[:800],
-                }
-                for a in additions
-                if str(a.get("id") or "").strip()
-            ]
-            if seed:
-                context.story_repository.merge_active_b_stories_seed(state["story_id"], seed)
+            # Persist anchor DAG state inside bible_json (runtime progression state).
+            story = context.story_repository.get_story(state["story_id"]) or {}
+            bible = dict(story.get("bible_json") or {})
+            bible["resolved_anchors"] = list(state.get("resolved_anchors") or [])
+            bible["anchor_candidates"] = list(state.get("anchor_candidates") or [])
+            context.story_repository.update_story_bible_json(state["story_id"], bible)
+            context.story_repository.update_story_macro_topology(
+                state["story_id"],
+                storylines=list(story.get("storylines_json") or []),
+                anchor_nodes=list(state.get("anchor_nodes") or story.get("anchor_nodes_json") or []),
+            )
             lore = list(state.get("lore_mysteries_progression") or [])
             if lore:
                 narrative = str(state.get("narrative_script") or "")
@@ -1014,7 +1002,7 @@ def build_chapter_graph(context: WorkflowContext):
         return state["reader_route"]
 
     def route_post_polish(state: AgentWorkflowState) -> str:
-        r = state.get("post_polish_route") or "resolve_subplots"
+        r = state.get("post_polish_route") or "anchor_resolve"
         if r == "hitl":
             return "hitl"
         if r == "author":
@@ -1032,8 +1020,8 @@ def build_chapter_graph(context: WorkflowContext):
     def route_director(state: AgentWorkflowState) -> str:
         return "hitl" if state.get("requires_hitl") else "graph_rag"
 
-    def route_b_story(state: AgentWorkflowState) -> str:
-        return state.get("b_story_route", "profile_expander")
+    def route_anchor(state: AgentWorkflowState) -> str:
+        return state.get("anchor_route", "profile_expander")
 
     def route_profile_expander(state: AgentWorkflowState) -> str:
         return "state_updater"
@@ -1042,7 +1030,12 @@ def build_chapter_graph(context: WorkflowContext):
         return "hitl" if state.get("requires_hitl") else "author"
 
     def route_start(state: AgentWorkflowState) -> str:
-        return state.get("resume_from", "director")
+        resume = str(state.get("resume_from") or "director")
+        if resume == "director":
+            selected = [str(x).strip() for x in (state.get("selected_anchor_ids") or []) if str(x).strip()]
+            if selected:
+                return "graph_rag"
+        return resume
 
     def _timeout_node(name: str, fn: Any):
         return lambda s: _run_with_timeout(name, fn, s)
@@ -1060,7 +1053,7 @@ def build_chapter_graph(context: WorkflowContext):
     graph.add_node("copyeditor", _timeout_node("copyeditor", copyeditor_node))
     graph.add_node("output_language_gate", _timeout_node("output_language_gate", output_language_gate_node))
     graph.add_node("chapter_summarizer", _timeout_node("chapter_summarizer", chapter_summarizer_node))
-    graph.add_node("b_story_resolve", _timeout_node("b_story_resolve", b_story_resolve_node))
+    graph.add_node("anchor_resolve", _timeout_node("anchor_resolve", anchor_resolve_node))
     graph.add_node("profile_expander", _timeout_node("profile_expander", profile_expander_node))
     graph.add_node("state_updater", _timeout_node("state_updater", state_updater_node))
     graph.add_node("commit_to_databases", _timeout_node("commit_to_databases", commit_to_databases_node))
@@ -1084,7 +1077,7 @@ def build_chapter_graph(context: WorkflowContext):
             "copyeditor": "copyeditor",
             "output_language_gate": "output_language_gate",
             "chapter_summarizer": "chapter_summarizer",
-            "b_story_resolve": "b_story_resolve",
+            "anchor_resolve": "anchor_resolve",
         },
     )
     graph.add_conditional_edges("director", route_director, {"graph_rag": "graph_rag", "hitl": "hitl"})
@@ -1131,10 +1124,10 @@ def build_chapter_graph(context: WorkflowContext):
         route_output_language_gate,
         {"chapter_summarizer": "chapter_summarizer", "hitl": "hitl"},
     )
-    graph.add_edge("chapter_summarizer", "b_story_resolve")
+    graph.add_edge("chapter_summarizer", "anchor_resolve")
     graph.add_conditional_edges(
-        "b_story_resolve",
-        route_b_story,
+        "anchor_resolve",
+        route_anchor,
         {"profile_expander": "profile_expander", "hitl": "hitl"},
     )
     graph.add_conditional_edges(

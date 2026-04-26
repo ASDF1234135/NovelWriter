@@ -80,6 +80,8 @@ class AgentWorkflowState(TypedDict):
     state_transaction_id: NotRequired[str]
     author_extraction_surface_hints: NotRequired[list[dict[str, Any]]]
     chapter_type: NotRequired[str]
+    selected_anchor_ids: NotRequired[list[str]]
+    next_anchor_ids: NotRequired[list[str]]
     b_story_directive: NotRequired[str | None]
     b_story_type: NotRequired[str | None]
     new_elements_to_introduce: NotRequired[list[dict[str, Any]]]
@@ -106,6 +108,14 @@ class AgentWorkflowState(TypedDict):
     hitl_extraction_remap_hints: NotRequired[list[dict[str, Any]]]
     b_story_resolution_hitl_candidate: NotRequired[dict[str, Any]]
     b_story_route: NotRequired[str]
+    anchor_resolution: NotRequired[dict[str, Any]]
+    anchor_resolution_hitl_candidate: NotRequired[dict[str, Any]]
+    anchor_route: NotRequired[str]
+    resolved_anchors: NotRequired[list[str]]
+    active_anchors: NotRequired[list[str]]
+    anchor_candidates: NotRequired[list[str]]
+    storyline_metadata: NotRequired[list[dict[str, Any]]]
+    anchor_nodes: NotRequired[list[dict[str, Any]]]
     context_overflow_char_estimate: NotRequired[int]
     cast_slim_view: NotRequired[list[dict[str, Any]]]
     cast_full_view: NotRequired[list[dict[str, Any]]]
@@ -143,6 +153,7 @@ class AgentWorkflowState(TypedDict):
     timeout_bucket: NotRequired[str]
     workflow_thread_id: NotRequired[str]
     thread_reset_done: NotRequired[bool]
+    state_version: NotRequired[int]
 
 
 class SafeAuthorPayload(BaseModel):
@@ -211,6 +222,8 @@ class SafePlannerPayload(BaseModel):
     chapter_word_min: int = 800
     chapter_word_max: int = 12000
     chapter_type: str = "PLOT_DRIVEN"
+    selected_anchor_ids: list[str] = Field(default_factory=list)
+    next_anchor_ids: list[str] = Field(default_factory=list)
     b_story_directive: str | None = None
     new_elements_to_introduce: list[dict[str, Any]] = Field(default_factory=list)
     request_new_b_story: dict[str, Any] | None = None
@@ -356,6 +369,8 @@ def build_initial_state(
         reader_route="author",
         resume_from="director",
         chapter_type="PLOT_DRIVEN",
+        selected_anchor_ids=[],
+        next_anchor_ids=[],
         b_story_directive=None,
         b_story_type=None,
         new_elements_to_introduce=[],
@@ -367,7 +382,7 @@ def build_initial_state(
         normalized_length_min=0,
         normalized_length_max=0,
         plan_warnings=[],
-        post_polish_route="resolve_subplots",
+        post_polish_route="anchor_resolve",
         author_extraction_surface_hints=[],
         extraction_gate_failure_streak=0,
         extraction_hitl_limit=4,
@@ -377,6 +392,14 @@ def build_initial_state(
         graph_rag_context_tier=2,
         hitl_extraction_remap_hints=[],
         b_story_route="profile_expander",
+        anchor_route="profile_expander",
+        anchor_resolution={},
+        anchor_resolution_hitl_candidate={},
+        resolved_anchors=[],
+        active_anchors=[],
+        anchor_candidates=[],
+        storyline_metadata=[],
+        anchor_nodes=[],
         pending_cast_updates=[],
         pending_cast_evolutions=[],
         context_overflow_char_estimate=0,
@@ -409,6 +432,7 @@ def build_initial_state(
         timeout_bucket="",
         workflow_thread_id=trace_id,
         thread_reset_done=False,
+        state_version=2,
     )
 
 
@@ -416,6 +440,8 @@ def normalize_workflow_state(state: dict[str, Any]) -> dict[str, Any]:
     """Fill defaults for workflow state (migration / resume compatibility)."""
     defaults: dict[str, Any] = {
         "chapter_type": "WORLD_BUILDING",
+        "selected_anchor_ids": [],
+        "next_anchor_ids": [],
         "b_story_directive": None,
         "b_story_type": None,
         "new_elements_to_introduce": [],
@@ -427,7 +453,7 @@ def normalize_workflow_state(state: dict[str, Any]) -> dict[str, Any]:
         "normalized_length_min": 0,
         "normalized_length_max": 0,
         "plan_warnings": [],
-        "post_polish_route": "resolve_subplots",
+        "post_polish_route": "anchor_resolve",
         "pending_b_story_additions": [],
         "pending_cast_updates": [],
         "pending_cast_evolutions": [],
@@ -441,6 +467,14 @@ def normalize_workflow_state(state: dict[str, Any]) -> dict[str, Any]:
         "graph_rag_context_tier": 2,
         "hitl_extraction_remap_hints": [],
         "b_story_route": "profile_expander",
+        "anchor_route": "profile_expander",
+        "anchor_resolution": {},
+        "anchor_resolution_hitl_candidate": {},
+        "resolved_anchors": [],
+        "active_anchors": [],
+        "anchor_candidates": [],
+        "storyline_metadata": [],
+        "anchor_nodes": [],
         "context_overflow_char_estimate": 0,
         "all_milestone_summaries": [],
         "recent_chapter_summaries": [],
@@ -474,6 +508,7 @@ def normalize_workflow_state(state: dict[str, Any]) -> dict[str, Any]:
         "timeout_bucket": "",
         "workflow_thread_id": "",
         "thread_reset_done": False,
+        "state_version": 2,
     }
     for key, val in defaults.items():
         if key not in state:

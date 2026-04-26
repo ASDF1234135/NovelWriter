@@ -5,7 +5,6 @@ export type AppView = "library" | "setup" | "write" | "review" | "graph" | "expo
 export type TaskFlowStageId = "projectSetup" | "planStructure" | "writeChapter" | "reviewFix" | "export";
 
 type NavItem = { id: AppView; label: string; icon: string };
-type TaskFlowStage = { id: TaskFlowStageId; label: string; done: boolean };
 
 type Props = {
   activeView: AppView;
@@ -17,8 +16,6 @@ type Props = {
   showStorySection: boolean;
   /** Short label for the story group heading (e.g. story title or id prefix). */
   storySectionLabel?: string;
-  taskFlow: TaskFlowStage[];
-  activeStage: TaskFlowStageId;
   workflowMiniStatus: string;
 };
 
@@ -49,8 +46,6 @@ export function AppShell({
   hasSelectedStory,
   showStorySection,
   storySectionLabel = "",
-  taskFlow,
-  activeStage,
   workflowMiniStatus,
 }: Props) {
   const { locale, setLocale, t } = useI18n();
@@ -126,27 +121,7 @@ export function AppShell({
         </div>
       </header>
       <div className="border-b border-outline-variant/10 bg-surface-container-low/70 px-4 py-3 md:px-8">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <ol className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-3 lg:flex lg:flex-wrap">
-            {taskFlow.map((stage) => {
-              const active = activeStage === stage.id;
-              return (
-                <li
-                  key={stage.id}
-                  className={`rounded-full border px-3 py-1.5 font-label tracking-wide ${
-                    active
-                      ? "border-primary bg-primary/15 text-primary"
-                      : stage.done
-                        ? "border-secondary/40 bg-secondary/10 text-secondary"
-                        : "border-outline-variant/20 text-on-surface-variant"
-                  }`}
-                >
-                  {stage.done ? "✓ " : ""}
-                  {stage.label}
-                </li>
-              );
-            })}
-          </ol>
+        <div className="flex justify-end">
           <div className="rounded-lg border border-outline-variant/20 bg-surface-container-highest/50 px-3 py-1.5 font-body text-xs text-on-surface-variant">
             {t("common.workflowStatus")}：<span className="font-semibold text-on-surface">{workflowMiniStatus}</span>
           </div>

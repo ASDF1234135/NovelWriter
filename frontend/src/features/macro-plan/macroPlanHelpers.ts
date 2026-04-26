@@ -20,6 +20,8 @@ export const BIBLE_RESERVED_TOP_KEYS = new Set<string>([
   "story_tone",
   "extra",
   "active_b_stories",
+  "storylines",
+  "anchor_nodes",
 ]);
 
 export type ExtraRow = { key: string; value: string; isList: boolean };

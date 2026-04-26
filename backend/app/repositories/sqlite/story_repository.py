@@ -10,7 +10,6 @@ from app.domain.schema import (
     EndingVibe,
     PlotSummarySource,
     ResolutionMethod,
-    StateAnchor,
     StoryCastMemberStored,
     StoryCastSeedEntry,
     StoryInput,
@@ -21,6 +20,19 @@ from app.repositories.sqlite.database import SQLiteDatabase
 
 
 class StoryRepository:
+    @staticmethod
+    def _strip_macro_topology_from_bible(bible: dict[str, Any]) -> dict[str, Any]:
+        out = dict(bible or {})
+        out.pop("storylines", None)
+        out.pop("anchor_nodes", None)
+        return out
+
+    @staticmethod
+    def _coerce_json_list(payload: Any) -> list[dict[str, Any]]:
+        if isinstance(payload, list):
+            return [row for row in payload if isinstance(row, dict)]
+        return []
+
     @staticmethod
     def _sanitize_cast_row(raw: dict[str, Any]) -> dict[str, Any]:
         row = dict(raw)
@@ -41,26 +53,37 @@ class StoryRepository:
 
     def create_story(self, story_id: str, story_input: StoryInput) -> dict:
         created_at = datetime.now(UTC).isoformat()
+        bible_raw = dict(story_input.bible or {})
+        storylines = self._coerce_json_list(bible_raw.get("storylines"))
+        anchor_nodes = self._coerce_json_list(bible_raw.get("anchor_nodes"))
+        bible = self._strip_macro_topology_from_bible(bible_raw)
+        compile_cfg = dict(bible.get("compile_config") or {})
+        if story_input.branch_count_override is not None:
+            compile_cfg["branch_count_override"] = int(story_input.branch_count_override)
+        if compile_cfg:
+            bible["compile_config"] = compile_cfg
         with self.db.connection() as conn:
             conn.execute(
                 """
                 INSERT INTO stories (
                     story_id, title, premise, bible_json, target_total_words,
                     plan_retry_limit, draft_loop_retry_limit, macro_author_notes, cast_seed_json,
-                    output_language, created_at
+                    storylines_json, anchor_nodes_json, output_language, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     story_id,
                     story_input.title,
                     story_input.premise,
-                    self.db.dumps(story_input.bible),
+                    self.db.dumps(bible),
                     story_input.target_total_words,
                     story_input.plan_retry_limit,
                     story_input.draft_loop_retry_limit,
                     story_input.macro_author_notes,
                     self.db.dumps([s.model_dump(mode="json") for s in story_input.cast_seed]),
+                    self.db.dumps(storylines),
+                    self.db.dumps(anchor_nodes),
                     story_input.output_language,
                     created_at,
                 ),
@@ -84,6 +107,15 @@ class StoryRepository:
             if not row:
                 return None
             row["bible_json"] = self.db.loads(row["bible_json"])
+            row["bible_json"] = self._strip_macro_topology_from_bible(
+                row["bible_json"] if isinstance(row["bible_json"], dict) else {}
+            )
+            compile_cfg = row["bible_json"].get("compile_config") if isinstance(row["bible_json"], dict) else {}
+            row["branch_count_override"] = (
+                int(compile_cfg.get("branch_count_override"))
+                if isinstance(compile_cfg, dict) and compile_cfg.get("branch_count_override") is not None
+                else None
+            )
             raw_cast = row.get("cast_json")
             if isinstance(raw_cast, str) and raw_cast.strip():
                 try:
@@ -100,6 +132,8 @@ class StoryRepository:
             row.setdefault("macro_compile_updated_at", "")
             row.setdefault("macro_compile_error", "")
             row.setdefault("cast_seed_json", "[]")
+            row.setdefault("storylines_json", "[]")
+            row.setdefault("anchor_nodes_json", "[]")
             raw_seed = row.get("cast_seed_json")
             if isinstance(raw_seed, str) and raw_seed.strip():
                 try:
@@ -113,6 +147,27 @@ class StoryRepository:
                 row["cast_seed"] = [StoryCastSeedEntry.model_validate(x) for x in raw_seed]
             else:
                 row["cast_seed"] = []
+            raw_storylines = row.get("storylines_json")
+            if isinstance(raw_storylines, str) and raw_storylines.strip():
+                try:
+                    row["storylines_json"] = self._coerce_json_list(self.db.loads(raw_storylines))
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    row["storylines_json"] = []
+            else:
+                row["storylines_json"] = self._coerce_json_list(raw_storylines)
+            raw_anchor_nodes = row.get("anchor_nodes_json")
+            if isinstance(raw_anchor_nodes, str) and raw_anchor_nodes.strip():
+                try:
+                    row["anchor_nodes_json"] = self._coerce_json_list(self.db.loads(raw_anchor_nodes))
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    row["anchor_nodes_json"] = []
+            else:
+                row["anchor_nodes_json"] = self._coerce_json_list(raw_anchor_nodes)
+            # Backward compatibility for old rows where macro topology was embedded in bible_json.
+            if not row["storylines_json"]:
+                row["storylines_json"] = self._coerce_json_list(row["bible_json"].get("storylines"))
+            if not row["anchor_nodes_json"]:
+                row["anchor_nodes_json"] = self._coerce_json_list(row["bible_json"].get("anchor_nodes"))
             row.setdefault("output_language", "zh-Hant")
             return row
 
@@ -150,10 +205,30 @@ class StoryRepository:
             )
 
     def update_story_bible_json(self, story_id: str, bible: dict) -> None:
+        clean_bible = self._strip_macro_topology_from_bible(dict(bible or {}))
         with self.db.connection() as conn:
             conn.execute(
                 "UPDATE stories SET bible_json = ? WHERE story_id = ?",
-                (self.db.dumps(bible), story_id),
+                (self.db.dumps(clean_bible), story_id),
+            )
+
+    def update_story_macro_topology(
+        self,
+        story_id: str,
+        *,
+        storylines: list[dict[str, Any]],
+        anchor_nodes: list[dict[str, Any]],
+    ) -> None:
+        clean_storylines = self._coerce_json_list(storylines)
+        clean_anchor_nodes = self._coerce_json_list(anchor_nodes)
+        with self.db.connection() as conn:
+            conn.execute(
+                """
+                UPDATE stories
+                SET storylines_json = ?, anchor_nodes_json = ?
+                WHERE story_id = ?
+                """,
+                (self.db.dumps(clean_storylines), self.db.dumps(clean_anchor_nodes), story_id),
             )
 
     def patch_story(self, story_id: str, patch: StoryPatch) -> dict:
@@ -174,6 +249,19 @@ class StoryRepository:
         if "target_total_words" in data:
             fields.append("target_total_words = ?")
             values.append(int(data["target_total_words"]))
+        if "branch_count_override" in data:
+            bible = dict(story.get("bible_json") or {})
+            cfg = dict(bible.get("compile_config") or {})
+            if data["branch_count_override"] is None:
+                cfg.pop("branch_count_override", None)
+            else:
+                cfg["branch_count_override"] = int(data["branch_count_override"])
+            if cfg:
+                bible["compile_config"] = cfg
+            elif "compile_config" in bible:
+                bible.pop("compile_config", None)
+            fields.append("bible_json = ?")
+            values.append(self.db.dumps(bible))
         if "plan_retry_limit" in data:
             fields.append("plan_retry_limit = ?")
             values.append(int(data["plan_retry_limit"]))
@@ -347,24 +435,41 @@ class StoryRepository:
             ).fetchall()
             return list(rows)
 
-    def store_anchors(self, story_id: str, anchors: list[StateAnchor]) -> None:
+    def store_anchors(self, story_id: str, anchors: list[Any]) -> None:
         with self.db.connection() as conn:
             conn.execute("DELETE FROM anchors WHERE story_id = ?", (story_id,))
             for anchor in anchors:
+                if isinstance(anchor, dict):
+                    anchor_id = str(anchor.get("anchor_id") or "").strip()
+                    volume_id = str(anchor.get("volume_id") or "").strip()
+                    title = str(anchor.get("title") or "")
+                    description = str(anchor.get("description") or "")
+                    target_state = anchor.get("target_state") if isinstance(anchor.get("target_state"), dict) else {}
+                    chapter_target = int(anchor.get("chapter_target") or 1)
+                    priority = int(anchor.get("priority") or 1)
+                else:
+                    anchor_id = str(getattr(anchor, "anchor_id", "")).strip()
+                    volume_id = str(getattr(anchor, "volume_id", "")).strip()
+                    title = str(getattr(anchor, "title", ""))
+                    description = str(getattr(anchor, "description", ""))
+                    raw_ts = getattr(anchor, "target_state", {})
+                    target_state = raw_ts if isinstance(raw_ts, dict) else {}
+                    chapter_target = int(getattr(anchor, "chapter_target", 1) or 1)
+                    priority = int(getattr(anchor, "priority", 1) or 1)
                 conn.execute(
                     """
                     INSERT INTO anchors (anchor_id, story_id, volume_id, title, description, target_state_json, chapter_target, priority)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        anchor.anchor_id,
+                        anchor_id,
                         story_id,
-                        anchor.volume_id,
-                        anchor.title,
-                        anchor.description,
-                        self.db.dumps(anchor.target_state),
-                        anchor.chapter_target,
-                        anchor.priority,
+                        volume_id,
+                        title,
+                        description,
+                        self.db.dumps(target_state),
+                        chapter_target,
+                        priority,
                     ),
                 )
 

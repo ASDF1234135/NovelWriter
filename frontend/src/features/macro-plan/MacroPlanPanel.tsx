@@ -31,8 +31,8 @@ type Props = {
   onError: (msg: string) => void;
 };
 
-type MacroTab = "bible" | "volumes" | "cast" | "anchors";
-type EditSurface = "off" | "bible" | "volume" | "cast" | "anchor";
+type MacroTab = "bible" | "volumes" | "cast" | "storylines";
+type EditSurface = "off" | "bible" | "volume" | "cast";
 
 const FIELD_LABELS: Record<(typeof BIBLE_LINE_KEYS)[number], { "zh-Hant": string; "zh-Hans": string; en: string }> = {
   genre: { "zh-Hant": "故事類型", "zh-Hans": "故事类型", en: "Genre" },
@@ -283,13 +283,6 @@ export function MacroPlanPanel({
     setSelectedEntityId(nodeId);
   }
 
-  function startEditAnchor(anchorId: string) {
-    if (!canEdit || !macroData) return;
-    ensureDraft();
-    setEditSurface("anchor");
-    setSelectedEntityId(anchorId);
-  }
-
   function validateAndBuildPutBody(d: MacroCompileData, biblePayload: Record<string, unknown>): MacroPlanPutBody {
     const genre = String(biblePayload.genre ?? "").trim();
     const tone = String(biblePayload.tone ?? "").trim();
@@ -413,10 +406,27 @@ export function MacroPlanPanel({
       }
     }
 
+    const anchorNodesPayload = (d.anchor_nodes ?? []).map((n) => ({
+      id: String(n.id),
+      storyline_ids: [...(n.storyline_ids ?? [])],
+      volume_id: String(n.volume_id ?? ""),
+      node_kind: n.node_kind ?? "NORMAL",
+      title: String(n.title ?? ""),
+      description: String(n.description ?? ""),
+      depends_on: [...(n.depends_on ?? [])],
+      status: n.status,
+      estimated_chapter: n.estimated_chapter ?? null,
+    }));
+    if (anchorNodesPayload.length === 0) {
+      throw new Error(tr(locale, "至少需要一個 anchor node。", "至少需要一个 anchor node。", "At least one anchor node is required."));
+    }
+
     return {
       bible: mergedBible as Record<string, unknown>,
       volumes,
       anchors: anchorsPayload,
+      storylines: [...(d.storylines ?? [])],
+      anchor_nodes: anchorNodesPayload,
       cast,
       protagonist_character_id: d.protagonist_character_id?.trim() || null,
     };
@@ -447,6 +457,8 @@ export function MacroPlanPanel({
         cast_seed: updated.cast_seed,
         volumes: updated.volumes ?? [],
         anchors: updated.anchors ?? [],
+        storylines: updated.storylines ?? [],
+        anchor_nodes: updated.anchor_nodes ?? [],
         cast: updated.cast ?? [],
         protagonist_character_id: updated.protagonist_character_id,
       });
@@ -516,18 +528,6 @@ export function MacroPlanPanel({
     if (selectedEntityId === nodeId) setSelectedEntityId(next[0]?.node_id ?? null);
   }
 
-  function deleteAnchor(anchorId: string) {
-    const dm = ensureDraft();
-    if (!dm) return;
-    if (!window.confirm(tr(locale, "確定要刪除此情節節點嗎？", "确定删除此情节节点吗？", "Delete this anchor?"))) return;
-    const nextAnchors = (dm.anchors ?? []).filter((a) => a.anchor_id !== anchorId);
-    const nextEdits = { ...anchorEdits };
-    delete nextEdits[anchorId];
-    setAnchorEdits(nextEdits);
-    setDraftMacro({ ...dm, anchors: normalizeAnchors(nextAnchors.map((a) => ({ ...a }))) });
-    if (selectedEntityId === anchorId) setSelectedEntityId(nextAnchors[0]?.anchor_id ?? null);
-  }
-
   function addVolume() {
     const dm = ensureDraft();
     if (!dm) return;
@@ -568,38 +568,6 @@ export function MacroPlanPanel({
     setSelectedEntityId(id);
   }
 
-  function addAnchor() {
-    const dm = ensureDraft();
-    if (!dm) return;
-    const vols = dm.volumes ?? [];
-    const defaultVol = vols[0]?.volume_id ?? "";
-    const id = newLocalId("anc");
-    const vs = vols[0];
-    const ct = vs ? Math.min(Math.max(1, vs.chapter_start), vs.chapter_end) : 1;
-    const row: Anchor = {
-      anchor_id: id,
-      volume_id: defaultVol,
-      title: tr(locale, "新節點", "新节点", "New Anchor"),
-      description: "",
-      chapter_target: ct,
-      target_state: {},
-      priority: 1,
-    };
-    const merged = normalizeAnchors([...(dm.anchors ?? []), row].map((a) => ({ ...a })));
-    setDraftMacro({ ...dm, anchors: merged });
-    setAnchorEdits({
-      ...anchorEditsFromMacro(merged),
-      [id]: {
-        title: tr(locale, "新節點", "新节点", "New Anchor"),
-        description: "",
-        chapter_target: String(ct),
-        chapter_goal: "",
-      },
-    });
-    setEditSurface("anchor");
-    setSelectedEntityId(id);
-  }
-
   function addBStory() {
     const dm = ensureDraft();
     if (!dm) return;
@@ -616,11 +584,19 @@ export function MacroPlanPanel({
   }
 
   const sortedVolumes = useMemo(() => [...(displayMacro?.volumes ?? [])], [displayMacro?.volumes]);
-  const sortedAnchors = useMemo(
-    () => sortAnchorsForUi([...(displayMacro?.anchors ?? [])]),
-    [displayMacro?.anchors],
-  );
   const castList = displayMacro?.cast ?? [];
+  const castByNodeId = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const c of displayMacro?.cast ?? []) {
+      m.set(String(c.node_id), c.canonical_name);
+    }
+    return m;
+  }, [displayMacro?.cast]);
+  const storylinesRows = useMemo(() => {
+    const raw = displayMacro?.storylines ?? [];
+    const order: Record<string, number> = { MAIN: 0, S_TIER: 1, A_TIER: 2, B_TIER: 3 };
+    return [...raw].sort((a, b) => (order[a.type] ?? 9) - (order[b.type] ?? 9));
+  }, [displayMacro?.storylines]);
 
   if (!macroData) {
     return (
@@ -653,7 +629,10 @@ export function MacroPlanPanel({
               ["bible", locale === "en" ? "World Bible" : locale === "zh-Hans" ? "世界观总表" : "世界觀總表"],
               ["volumes", locale === "en" ? "Volumes" : locale === "zh-Hans" ? "分卷" : "分卷"],
               ["cast", locale === "en" ? "Cast" : locale === "zh-Hans" ? "人物" : "人物"],
-              ["anchors", locale === "en" ? "Anchors" : locale === "zh-Hans" ? "情节节点" : "情節節點"],
+              [
+                "storylines",
+                locale === "en" ? "Storylines" : locale === "zh-Hans" ? "剧情线" : "劇情線",
+              ],
             ] as const
           ).map(([id, label]) => (
             <button
@@ -1263,114 +1242,94 @@ export function MacroPlanPanel({
         </div>
       ) : null}
 
-      {tab === "anchors" ? (
-        <div className="space-y-4">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <h3 className="font-body font-semibold text-on-surface">{tr(locale, "情節節點", "情节节点", "Anchors")}</h3>
-            {canEdit ? (
-              <button
-                type="button"
-                onClick={() => addAnchor()}
-                className="rounded-lg border border-secondary/40 px-3 py-2 text-sm font-semibold text-secondary"
-              >
-                {tr(locale, "新增情節節點", "新增情节节点", "Add Anchor")}
-              </button>
-            ) : null}
+      {tab === "storylines" ? (
+        <div className="space-y-5">
+          <div className="rounded-xl border border-secondary/20 bg-secondary/5 px-4 py-3">
+            <p className="font-label text-[10px] font-bold uppercase tracking-wider text-secondary">
+              {tr(locale, "劇情線", "剧情线", "Storylines")}
+            </p>
+            <p className="mt-1 text-xs text-on-surface-variant">
+              {tr(
+                locale,
+                "此處顯示主線與各線的目標與參與者摘要。情節節點、依賴與狀態請在故事設定的劇情樹（DAG）檢視。",
+                "此处显示主线与各线的目标与参与者摘要。情节节点、依赖与状态请在故事设定的剧情树（DAG）检视。",
+                "Storyline goals and involved characters are summarized here. Edit plot nodes, edges, and status in Story Setup → plot tree (DAG).",
+              )}
+            </p>
           </div>
-          <div className="space-y-3">
-            {sortedAnchors.map((a) => {
-              const editing = editSurface === "anchor" && selectedEntityId === a.anchor_id;
-              const show = draftMacro ? editing : false;
-              const e = anchorEdits[a.anchor_id] ?? {
-                title: a.title ?? "",
-                description: a.description ?? "",
-                chapter_target: String(a.chapter_target ?? ""),
-                chapter_goal: extractAnchorGoal(isObjectRecord(a.target_state) ? (a.target_state as Record<string, unknown>) : {}),
-              };
-              const resolvedVolumeId = findVolumeIdByChapter(displayMacro?.volumes ?? [], e.chapter_target);
-              const resolvedVolumeName =
-                (displayMacro?.volumes ?? []).find((v) => v.volume_id === resolvedVolumeId)?.title || resolvedVolumeId || tr(locale, "未匹配到分卷", "未匹配到分卷", "No matched volume");
-              return (
-                <div key={a.anchor_id} className="rounded-xl border border-outline-variant/15 bg-surface-container-highest/40 p-4">
-                  <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-start">
-                    <div className="min-w-0 flex-1 space-y-1">
-                      <p className="font-medium">
-                        {locale === "en" ? `Chapter ${a.chapter_target}` : `第 ${a.chapter_target} 章`} · {a.title}
+          {storylinesRows.length === 0 ? (
+            <div className="rounded-xl border border-outline-variant/20 bg-surface-container-low p-4 text-sm text-on-surface-variant">
+              {tr(locale, "尚無劇情線資料。請先執行宏觀編譯。", "尚无剧情线资料。请先执行宏观编译。", "No storylines yet. Run macro compile first.")}
+            </div>
+          ) : (
+            <>
+              {storylinesRows
+                .filter((s) => s.type === "MAIN")
+                .map((s) => (
+                  <article
+                    key={s.id}
+                    className="rounded-2xl border border-primary/35 bg-gradient-to-br from-primary/12 via-surface-container-highest/80 to-surface-container-high/70 p-5 shadow-[0_8px_28px_rgba(0,0,0,0.2)]"
+                  >
+                    <div className="mb-3 flex flex-wrap items-center gap-2">
+                      <span className="rounded-full border border-primary/40 bg-primary/15 px-2.5 py-0.5 font-mono text-[10px] font-bold uppercase tracking-widest text-primary">
+                        {tr(locale, "主線", "主线", "MAIN")}
+                      </span>
+                    </div>
+                    <h3 className="font-title text-base text-on-surface">{s.title || "—"}</h3>
+                    <p className="mt-2 text-sm leading-relaxed text-on-surface">
+                      {s.overall_goal || "—"}
+                    </p>
+                    <div className="mt-3 border-t border-outline-variant/15 pt-3">
+                      <p className="font-label text-[10px] uppercase tracking-wider text-on-surface-variant">
+                        {tr(locale, "參與者", "参与者", "Involved")}
                       </p>
-                      <p className="text-sm text-on-surface-variant">{a.description || "—"}</p>
+                      <p className="mt-1 text-sm text-on-surface">
+                        {s.involved_entities?.length
+                          ? s.involved_entities.map((id) => castByNodeId.get(id) ?? id).join(locale === "en" ? ", " : "、")
+                          : "—"}
+                      </p>
                     </div>
-                    {canEdit ? (
-                      <div className="flex min-w-[5.5rem] shrink-0 flex-col gap-2 self-start">
-                        <button type="button" onClick={() => startEditAnchor(a.anchor_id)} className="rounded-lg border border-outline-variant/30 px-3 py-1.5 text-sm">
-                          {tr(locale, "編輯", "编辑", "Edit")}
-                        </button>
-                        {show ? (
-                          <button type="button" onClick={() => deleteAnchor(a.anchor_id)} className="rounded-lg border border-red-500/30 px-3 py-1.5 text-sm text-red-300">
-                            {tr(locale, "刪除", "删除", "Delete")}
-                          </button>
-                        ) : null}
-                      </div>
-                    ) : null}
+                  </article>
+                ))}
+              {storylinesRows.some((s) => s.type !== "MAIN") ? (
+                <div>
+                  <h3 className="mb-2 font-body text-sm font-semibold text-on-surface">
+                    {tr(locale, "支線與副線", "支线与副线", "Branches (S / A / B)")}
+                  </h3>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    {storylinesRows
+                      .filter((s) => s.type !== "MAIN")
+                      .map((s) => (
+                        <div
+                          key={s.id}
+                          className="rounded-xl border border-outline-variant/25 bg-surface-container-high/50 p-4"
+                        >
+                          <span
+                            className={`inline-block rounded-full border px-2 py-0.5 font-mono text-[9px] font-semibold uppercase tracking-wider ${
+                              s.type === "S_TIER"
+                                ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
+                                : s.type === "A_TIER"
+                                  ? "border-sky-500/35 bg-sky-500/10 text-sky-200"
+                                  : "border-outline-variant/35 bg-surface-container-low text-on-surface-variant"
+                            }`}
+                          >
+                            {s.type === "S_TIER"
+                              ? tr(locale, "S 級支線", "S 级支线", "S-tier")
+                              : s.type === "A_TIER"
+                                ? tr(locale, "A 級支線", "A 级支线", "A-tier")
+                                : tr(locale, "B 級副線", "B 级副线", "B-tier")}
+                          </span>
+                          <p className="mt-2 font-body text-sm font-semibold text-on-surface">{s.title || "—"}</p>
+                          <p className="mt-1 line-clamp-3 text-xs leading-relaxed text-on-surface-variant">
+                            {s.overall_goal || "—"}
+                          </p>
+                        </div>
+                      ))}
                   </div>
-                  {show && draftMacro ? (
-                    <div className="grid grid-cols-12 gap-3 border-t border-outline-variant/10 pt-3">
-                      <div className="col-span-12 sm:col-span-3">
-                        <ReadonlyId label={tr(locale, "內部編號", "内部编号", "Internal ID")} value={a.anchor_id} />
-                      </div>
-                      <label className="col-span-12 sm:col-span-5">
-                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">{tr(locale, "節點標題", "节点标题", "Anchor Title")}</span>
-                        <input
-                          value={e.title}
-                          onChange={(ev) =>
-                            setAnchorEdits((prev) => ({
-                              ...prev,
-                              [a.anchor_id]: { ...e, title: ev.target.value },
-                            }))
-                          }
-                          className="w-full rounded-lg border border-outline-variant/25 bg-surface-container-highest px-3 py-2 text-sm"
-                        />
-                      </label>
-                      <label className="col-span-12 sm:col-span-4">
-                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">{tr(locale, "發生章節", "发生章节", "Chapter Target")}</span>
-                        <input
-                          type="number"
-                          value={e.chapter_target}
-                          onChange={(ev) =>
-                            setAnchorEdits((prev) => ({
-                              ...prev,
-                              [a.anchor_id]: { ...e, chapter_target: ev.target.value },
-                            }))
-                          }
-                          className="w-full rounded-lg border border-outline-variant/25 bg-surface-container-highest px-3 py-2 text-sm"
-                        />
-                      </label>
-                      <div className="col-span-12 sm:col-span-3">
-                        <ReadonlyId label={tr(locale, "自動匹配分卷", "自动匹配分卷", "Matched Volume")} value={resolvedVolumeName} />
-                      </div>
-                      <label className="col-span-12">
-                        <span className="mb-1 block font-label text-[10px] text-on-surface-variant">{tr(locale, "本章敘事目標", "本章叙事目标", "Narrative Goal")}</span>
-                        <textarea
-                          aria-label={tr(locale, "本章敘事目標（可留空；細節可交給後續流程補全）", "本章叙事目标（可留空；细节可交给后续流程补全）", "Narrative goal (optional)") }
-                          value={e.chapter_goal}
-                          onChange={(ev) =>
-                            setAnchorEdits((prev) => ({
-                              ...prev,
-                              [a.anchor_id]: { ...e, chapter_goal: ev.target.value },
-                            }))
-                          }
-                          rows={3}
-                          className="w-full resize-y rounded-lg border border-outline-variant/25 bg-surface-container-highest px-3 py-2 text-sm"
-                        />
-                        <p className="mt-1 text-xs text-on-surface-variant">
-                          {tr(locale, "僅需描述此章要達成的敘事目標；細節可由後續步驟協助補齊。", "仅需描述本章叙事目标；细节可由后续步骤补齐。", "Describe this chapter's narrative goal; details can be filled by later steps.")}
-                        </p>
-                      </label>
-                    </div>
-                  ) : null}
                 </div>
-              );
-            })}
-          </div>
+              ) : null}
+            </>
+          )}
         </div>
       ) : null}
     </section>

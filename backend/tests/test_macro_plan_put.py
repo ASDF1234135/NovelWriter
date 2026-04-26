@@ -3,14 +3,17 @@
 import pytest
 
 from app.domain.schema import (
+    AnchorStatus,
     EdgeMutation,
     EdgeType,
-    MacroPlanAnchorBody,
     MacroPlanPut,
     NodeMutation,
     NodeType,
+    AnchorNode,
+    Storyline,
     StoryCastMemberStored,
     StoryInput,
+    StorylineTier,
     VolumePlan,
 )
 from app.repositories.sqlite.database import SQLiteDatabase
@@ -25,6 +28,7 @@ from app.services.workflow.service import (
     MacroPlanValidationError,
     StoryConfigurationLockedError,
     WorkflowService,
+    _unachieved_from_anchor_nodes,
 )
 
 
@@ -45,7 +49,8 @@ def _macro_to_put(macro: dict) -> MacroPlanPut:
     return MacroPlanPut(
         bible=dict(macro.get("bible") or {}),
         volumes=[VolumePlan.model_validate(v) for v in macro["volumes"]],
-        anchors=[MacroPlanAnchorBody.model_validate(a) for a in macro["anchors"]],
+        storylines=[Storyline.model_validate(s) for s in macro.get("storylines") or []],
+        anchor_nodes=[AnchorNode.model_validate(a) for a in macro["anchor_nodes"]],
         cast=[StoryCastMemberStored.model_validate(c) for c in macro["cast"]],
         protagonist_character_id=(macro.get("protagonist_character_id") or "").strip() or None,
     )
@@ -83,8 +88,8 @@ def test_put_macro_plan_validates_anchor_volume(tmp_path) -> None:
     )["story_id"]
     macro = svc.macro_compile(sid)
     body = _macro_to_put(macro)
-    bad_anchor = body.anchors[0].model_copy(update={"volume_id": "no_such_vol"})
-    bad_body = body.model_copy(update={"anchors": [bad_anchor, *body.anchors[1:]]})
+    bad_anchor = body.anchor_nodes[0].model_copy(update={"volume_id": "no_such_vol"})
+    bad_body = body.model_copy(update={"anchor_nodes": [bad_anchor, *body.anchor_nodes[1:]]})
     with pytest.raises(MacroPlanValidationError):
         svc.put_macro_plan(sid, bad_body)
 
@@ -209,3 +214,81 @@ def test_start_run_chapter_ai_freedom_and_outline_binding(tmp_path) -> None:
 
     wf3 = svc.start_run_chapter(sid, 1, ai_freedom_level="not_a_level")
     assert wf3["state"]["ai_freedom_level"] == "balanced"
+
+
+def test_put_macro_plan_repairs_cross_volume_main_spine(tmp_path) -> None:
+    svc = _service(str(tmp_path / "cross_vol_repair.sqlite3"))
+    sid = svc.create_story(
+        StoryInput(title="T", premise="p", bible={}, target_total_words=30_000),
+    )["story_id"]
+    v1 = f"{sid}_vol1"
+    v2 = f"{sid}_vol2"
+    main_sid = f"{sid}_main"
+    put = MacroPlanPut(
+        bible={},
+        volumes=[
+            VolumePlan(volume_id=v1, title="V1", summary="s", chapter_start=1, chapter_end=3),
+            VolumePlan(volume_id=v2, title="V2", summary="s", chapter_start=4, chapter_end=8),
+        ],
+        storylines=[
+            Storyline(id=main_sid, type=StorylineTier.MAIN, title="Main", overall_goal="goal", involved_entities=[]),
+        ],
+        anchor_nodes=[
+            AnchorNode(
+                id=f"{sid}_a1",
+                volume_id=v1,
+                storyline_ids=[main_sid],
+                title="t1",
+                description="d1",
+                depends_on=[],
+                status=AnchorStatus.UNLOCKED,
+            ),
+            AnchorNode(
+                id=f"{sid}_a2",
+                volume_id=v2,
+                storyline_ids=[main_sid],
+                title="t2",
+                description="d2",
+                depends_on=[],
+                status=AnchorStatus.UNLOCKED,
+            ),
+        ],
+        cast=[
+            StoryCastMemberStored(
+                node_id=f"{sid}_mc",
+                canonical_name="Hero",
+                role="protagonist",
+            ),
+        ],
+        protagonist_character_id=f"{sid}_mc",
+    )
+    out = svc.put_macro_plan(sid, put)
+    nodes = {n["id"]: n for n in out["anchor_nodes"]}
+    assert f"{sid}_a1" in nodes[f"{sid}_a2"]["depends_on"]
+
+
+def test_unachieved_anchor_nodes_respects_dependency_order() -> None:
+    story_row = {
+        "bible_json": {
+            "anchor_nodes": [
+                {
+                    "id": "child",
+                    "title": "B",
+                    "description": "",
+                    "status": "UNLOCKED",
+                    "depends_on": ["parent"],
+                    "estimated_chapter": 5,
+                },
+                {
+                    "id": "parent",
+                    "title": "A",
+                    "description": "",
+                    "status": "UNLOCKED",
+                    "depends_on": [],
+                    "estimated_chapter": 2,
+                },
+            ]
+        }
+    }
+    rows = _unachieved_from_anchor_nodes(story_row, chapter_id=1)
+    assert [r["anchor_id"] for r in rows] == ["parent", "child"]

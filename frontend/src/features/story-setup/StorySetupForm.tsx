@@ -28,6 +28,7 @@ function hydrateFromStoryInput(input: StoryInput): {
   title: string;
   premise: string;
   targetTotalWords: number;
+  branchCountOverride: number | null;
   planRetryLimit: number;
   draftLoopRetryLimit: number;
   macroAuthorNotes: string;
@@ -38,6 +39,7 @@ function hydrateFromStoryInput(input: StoryInput): {
     title: input.title,
     premise: input.premise,
     targetTotalWords: input.target_total_words,
+    branchCountOverride: input.branch_count_override ?? null,
     planRetryLimit: input.plan_retry_limit,
     draftLoopRetryLimit: input.draft_loop_retry_limit,
     macroAuthorNotes: input.macro_author_notes ?? "",
@@ -49,6 +51,7 @@ function buildStoryPayload(
   title: string,
   premise: string,
   targetTotalWords: number,
+  branchCountOverride: number | null,
   planRetryLimit: number,
   draftLoopRetryLimit: number,
   macroAuthorNotes: string,
@@ -58,6 +61,7 @@ function buildStoryPayload(
     title,
     premise,
     target_total_words: targetTotalWords,
+    branch_count_override: branchCountOverride,
     plan_retry_limit: planRetryLimit,
     draft_loop_retry_limit: draftLoopRetryLimit,
     bible: {},
@@ -91,6 +95,7 @@ export function StorySetupForm({
   const [title, setTitle] = useState(seedTitle);
   const [premise, setPremise] = useState(seedPremise);
   const [targetTotalWords, setTargetTotalWords] = useState(100000);
+  const [branchCountOverride, setBranchCountOverride] = useState<number | null>(null);
   const [planRetryLimit, setPlanRetryLimit] = useState(3);
   const [draftLoopRetryLimit, setDraftLoopRetryLimit] = useState(3);
   const [macroAuthorNotes, setMacroAuthorNotes] = useState("");
@@ -104,6 +109,7 @@ export function StorySetupForm({
       setTitle(h.title);
       setPremise(h.premise);
       setTargetTotalWords(h.targetTotalWords);
+      setBranchCountOverride(h.branchCountOverride);
       setPlanRetryLimit(h.planRetryLimit);
       setDraftLoopRetryLimit(h.draftLoopRetryLimit);
       setMacroAuthorNotes(h.macroAuthorNotes);
@@ -112,6 +118,7 @@ export function StorySetupForm({
       setTitle(seedTitle);
       setPremise(seedPremise);
       setTargetTotalWords(100000);
+      setBranchCountOverride(null);
       setPlanRetryLimit(3);
       setDraftLoopRetryLimit(3);
       setMacroAuthorNotes("");
@@ -127,6 +134,7 @@ export function StorySetupForm({
         title,
         premise,
         targetTotalWords,
+        branchCountOverride,
         planRetryLimit,
         draftLoopRetryLimit,
         macroAuthorNotes,
@@ -139,6 +147,7 @@ export function StorySetupForm({
     title,
     premise,
     targetTotalWords,
+    branchCountOverride,
     planRetryLimit,
     draftLoopRetryLimit,
     macroAuthorNotes,
@@ -161,6 +170,7 @@ export function StorySetupForm({
         title,
         premise,
         targetTotalWords,
+        branchCountOverride,
         planRetryLimit,
         draftLoopRetryLimit,
         macroAuthorNotes,
@@ -178,6 +188,7 @@ export function StorySetupForm({
           title,
           premise,
           targetTotalWords,
+          branchCountOverride,
           planRetryLimit,
           draftLoopRetryLimit,
           macroAuthorNotes,
@@ -253,6 +264,24 @@ export function StorySetupForm({
               className="auteur-input text-center font-label"
               value={planRetryLimit}
               onChange={(e) => setPlanRetryLimit(Number(e.target.value))}
+              disabled={fieldDisabled}
+              readOnly={locked}
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="auteur-label">
+              {locale === "en" ? "Branch Override (optional)" : locale === "zh-Hans" ? "支线数量覆写（可选）" : "支線數量覆寫（可選）"}
+            </label>
+            <input
+              type="number"
+              min={0}
+              className="auteur-input text-center font-label"
+              value={branchCountOverride ?? ""}
+              placeholder={locale === "en" ? "auto by word count" : "依字數自動"}
+              onChange={(e) => {
+                const raw = e.target.value.trim();
+                setBranchCountOverride(raw === "" ? null : Number(raw));
+              }}
               disabled={fieldDisabled}
               readOnly={locked}
             />

@@ -161,6 +161,8 @@ class SQLiteDatabase:
             self._ensure_column(conn, "stories", "macro_compile_updated_at", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "stories", "macro_compile_error", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "stories", "cast_seed_json", "TEXT NOT NULL DEFAULT '[]'")
+            self._ensure_column(conn, "stories", "storylines_json", "TEXT NOT NULL DEFAULT '[]'")
+            self._ensure_column(conn, "stories", "anchor_nodes_json", "TEXT NOT NULL DEFAULT '[]'")
             self._ensure_column(
                 conn,
                 "stories",

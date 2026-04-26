@@ -13,6 +13,47 @@ from app.services.anchor_service import AnchorService, MACRO_AUTHOR_NOTES_MAX, c
 from app.services.workflow.profiles import AgentPromptProfile
 
 
+def _load_json_prompt_first(prompt: str) -> dict:
+    """Macro retry appends non-JSON text after the JSON blob; slot prompts are a single JSON object."""
+    s = (prompt or "").strip()
+    dec = json.JSONDecoder()
+    obj, _ = dec.raw_decode(s)
+    if not isinstance(obj, dict):
+        msg = "expected JSON object at start of LLM prompt"
+        raise TypeError(msg)
+    return obj
+
+
+def _stub_slot_fill_json_responses(data: dict, response_model):
+    """Handle fishbone storyline + anchor slot-fill prompts (not macro planner)."""
+    task = str(data.get("task", ""))
+    if "storyline content slots" in task:
+        items = []
+        for row in data.get("storylines", []):
+            sid = row.get("storyline_id", "x")
+            items.append(
+                {
+                    "storyline_id": sid,
+                    "title": f"測試副線 {sid[-6:]}",
+                    "overall_goal": "在結構上服務主線並依卷收斂。",
+                    "involved_entities": list((data.get("allowed_cast_node_ids") or []))[:2],
+                }
+            )
+        return response_model.model_validate({"items": items})
+    if task.startswith("Fill content slots only"):
+        items = []
+        for row in data.get("nodes", []):
+            items.append(
+                {
+                    "node_id": row["node_id"],
+                    "title": f"填槽 {str(row['node_id'])[-10:]}",
+                    "description": "測試填寫的節點描述，符合前置依賴與故事線目標。",
+                }
+            )
+        return response_model.model_validate({"items": items})
+    return None
+
+
 class FakeStructuredLLMClient:
     def invoke(self, prompt: str):
         raise NotImplementedError()
@@ -21,7 +62,14 @@ class FakeStructuredLLMClient:
         raise NotImplementedError()
 
     def invoke_json(self, prompt: str, response_model, profile: AgentPromptProfile):
-        data = json.loads(prompt)
+        data = _load_json_prompt_first(prompt)
+        stub = _stub_slot_fill_json_responses(data, response_model)
+        if stub is not None:
+            return stub, type(
+                "LLMResultStub",
+                (),
+                {"content": "", "token_usage": 42, "latency_ms": 15},
+            )()
         total = int(data["fixed_total_chapters"])
         third = max(1, total // 3)
         split_one = max(1, third)
@@ -112,7 +160,14 @@ class FakeStructuredLLMClient:
 
 class FakeStructuredLLMClientWithNotesLinks(FakeStructuredLLMClient):
     def invoke_json(self, prompt: str, response_model, profile: AgentPromptProfile):
-        data = json.loads(prompt)
+        data = _load_json_prompt_first(prompt)
+        stub = _stub_slot_fill_json_responses(data, response_model)
+        if stub is not None:
+            return stub, type(
+                "LLMResultStub",
+                (),
+                {"content": "", "token_usage": 42, "latency_ms": 15},
+            )()
         total = int(data["fixed_total_chapters"])
         third = max(1, total // 3)
         split_one = max(1, third)
@@ -227,6 +282,14 @@ class FakeStructuredLLMClientRetryLanguage:
         raise NotImplementedError()
 
     def invoke_json(self, prompt: str, response_model, profile: AgentPromptProfile):
+        data = _load_json_prompt_first(prompt)
+        stub = _stub_slot_fill_json_responses(data, response_model)
+        if stub is not None:
+            return stub, type(
+                "LLMResultStub",
+                (),
+                {"content": "", "token_usage": 42, "latency_ms": 15},
+            )()
         self.calls += 1
         if self.calls == 1:
             output = MacroPlanOutput(
@@ -343,6 +406,14 @@ class FakeStructuredLLMClientRetryLanguage:
 
 class FakeStructuredLLMClientWrongLanguageOnly(FakeStructuredLLMClientRetryLanguage):
     def invoke_json(self, prompt: str, response_model, profile: AgentPromptProfile):
+        data = _load_json_prompt_first(prompt)
+        stub = _stub_slot_fill_json_responses(data, response_model)
+        if stub is not None:
+            return stub, type(
+                "LLMResultStub",
+                (),
+                {"content": "", "token_usage": 42, "latency_ms": 15},
+            )()
         self.calls += 1
         output = MacroPlanOutput(
             bible={"story_genre": "fantasy", "writing_style": "clean"},
@@ -395,6 +466,14 @@ class FakeStructuredLLMClientRetryTradToSimp:
         raise NotImplementedError()
 
     def invoke_json(self, prompt: str, response_model, profile: AgentPromptProfile):
+        data = _load_json_prompt_first(prompt)
+        stub = _stub_slot_fill_json_responses(data, response_model)
+        if stub is not None:
+            return stub, type(
+                "LLMResultStub",
+                (),
+                {"content": "", "token_usage": 42, "latency_ms": 15},
+            )()
         self.calls += 1
         if self.calls == 1:
             return self._trad.invoke_json(prompt, response_model, profile)
@@ -702,7 +781,8 @@ def test_macro_compile_retries_when_output_language_mismatch() -> None:
         ),
         fake_llm,
     )
-    assert fake_llm.calls == 2
+    # 2 calls for macro-plan language retry + 1 weave call (when weave succeeds).
+    assert fake_llm.calls >= 2
     assert len(volumes) == 3
     assert len(anchors) >= 3
     assert len(cast) >= 1
@@ -764,7 +844,8 @@ def test_macro_compile_retries_when_zh_hans_macro_output_is_traditional() -> Non
         ),
         fake_llm,
     )
-    assert fake_llm.calls == 2
+    # 2 calls for macro-plan language retry + optional weave call.
+    assert fake_llm.calls >= 2
     assert len(volumes) == 3
     assert bible.get("story_genre") == "奇幻"
 
@@ -784,3 +865,155 @@ def test_macro_compile_raises_when_zh_hans_macro_stays_traditional() -> None:
             fake_llm,
         )
     assert fake_llm.calls == 2
+
+
+def test_fishbone_topology_is_deterministic_and_acyclic() -> None:
+    service = AnchorService()
+    _, _, _, _, bible_a = service.compile_macro_plan(
+        "story_fishbone_det",
+        StoryInput(
+            title="Deterministic Test",
+            premise="Test deterministic fishbone topology.",
+            target_total_words=60000,
+        ),
+        FakeStructuredLLMClient(),
+    )
+    _, _, _, _, bible_b = service.compile_macro_plan(
+        "story_fishbone_det",
+        StoryInput(
+            title="Deterministic Test",
+            premise="Test deterministic fishbone topology.",
+            target_total_words=60000,
+        ),
+        FakeStructuredLLMClient(),
+    )
+    assert bible_a.get("anchor_nodes") == bible_b.get("anchor_nodes")
+
+
+def test_fishbone_mainline_links_first_node_to_previous_volume_last_main() -> None:
+    """Each volume's first MAIN spine node must depend on the previous volume's last MAIN node."""
+    service = AnchorService()
+    volumes, _, _, _, bible = service.compile_macro_plan(
+        "story_cross_vol_spine",
+        StoryInput(
+            title="Cross-volume spine",
+            premise="Ensure fishbone main spine is continuous across volumes.",
+            target_total_words=60000,
+        ),
+        FakeStructuredLLMClient(),
+    )
+    storylines = bible.get("storylines") or []
+    main_sid = next((str(s["id"]) for s in storylines if str(s.get("type")) == "MAIN"), "")
+    assert main_sid
+    vol_ids = [v.volume_id for v in volumes]
+    assert len(vol_ids) >= 2
+
+    anchor_nodes = bible.get("anchor_nodes") or []
+    by_volume: dict[str, list[dict]] = {vid: [] for vid in vol_ids}
+    for n in anchor_nodes:
+        if str(n.get("node_kind")) != "NORMAL":
+            continue
+        sids = [str(x) for x in (n.get("storyline_ids") or [])]
+        if main_sid not in sids:
+            continue
+        vid = str(n.get("volume_id") or "")
+        if vid in by_volume:
+            by_volume[vid].append(n)
+
+    for i in range(1, len(vol_ids)):
+        prev_vid, cur_vid = vol_ids[i - 1], vol_ids[i]
+        prev_mains = by_volume.get(prev_vid, [])
+        cur_mains = by_volume.get(cur_vid, [])
+        if not prev_mains or not cur_mains:
+            continue
+        last_prev_id = str(prev_mains[-1].get("id"))
+        first_cur = cur_mains[0]
+        deps = [str(x) for x in (first_cur.get("depends_on") or [])]
+        assert last_prev_id in deps, f"{cur_vid} first main should depend on {last_prev_id}, got {deps}"
+
+
+def test_fishbone_no_cross_subline_dependencies() -> None:
+    service = AnchorService()
+    _, _, _, _, bible = service.compile_macro_plan(
+        "story_fishbone_guard",
+        StoryInput(
+            title="Fishbone Guard",
+            premise="Sub-lines should not cross depend each other.",
+            target_total_words=50000,
+        ),
+        FakeStructuredLLMClient(),
+    )
+    storylines = bible.get("storylines") or []
+    anchor_nodes = bible.get("anchor_nodes") or []
+    type_by_sid = {str(s.get("id")): str(s.get("type")) for s in storylines}
+    by_id = {str(n.get("id")): n for n in anchor_nodes}
+    side_types = {"S_TIER", "A_TIER", "B_TIER"}
+    for node in anchor_nodes:
+        own_ids = [str(x) for x in (node.get("storyline_ids") or [])]
+        own_side = any(type_by_sid.get(sid) in side_types for sid in own_ids)
+        if not own_side:
+            continue
+        for dep in node.get("depends_on") or []:
+            dep_node = by_id.get(str(dep))
+            if not dep_node:
+                continue
+            dep_ids = [str(x) for x in (dep_node.get("storyline_ids") or [])]
+            dep_side = any(type_by_sid.get(sid) in side_types for sid in dep_ids)
+            if dep_side:
+                assert set(own_ids).intersection(set(dep_ids))
+
+
+def test_stage3_slot_fill_retry_metric_present() -> None:
+    service = AnchorService()
+    _, _, _, _, bible = service.compile_macro_plan(
+        "story_slot_metric",
+        StoryInput(
+            title="Slot Metrics",
+            premise="Ensure slot fill metrics are visible for observability.",
+            target_total_words=30000,
+        ),
+        FakeStructuredLLMClient(),
+    )
+    debug = bible.get("llm_weave_debug") or {}
+    assert debug.get("topology_mode") == "fixed_fishbone"
+    assert "slot_fill_retries" in debug
+
+
+def test_storyline_slot_fill_runs_before_anchor_slot_fill() -> None:
+    service = AnchorService()
+    _, _, _, _, bible = service.compile_macro_plan(
+        "storyline_first",
+        StoryInput(
+            title="Order",
+            premise="副線先、節點後。",
+            target_total_words=30000,
+        ),
+        FakeStructuredLLMClient(),
+    )
+    debug = bible.get("llm_weave_debug") or {}
+    assert debug.get("storyline_slot_fill_skipped") is False
+    storylines = bible.get("storylines") or []
+    assert any("測試副線" in str(s.get("title", "")) for s in storylines)
+    assert "narrative_context" in service._slot_fill_prompt(
+        story_input=StoryInput(title="t", premise="p", target_total_words=12000),
+        stage_label="stage3.1_mainline",
+        node_rows=[{"node_id": "n1", "title": "a", "description": "b"}],
+        narrative_context={"storylines": [], "bible_excerpt": "{}", "volumes": [], "cast": []},
+    )
+
+
+def test_stage3_slot_fill_prompt_contains_fishbone_hard_rules() -> None:
+    service = AnchorService()
+    prompt = service._slot_fill_prompt(
+        story_input=StoryInput(
+            title="Rule Prompt",
+            premise="check rules",
+            target_total_words=30000,
+        ),
+        stage_label="stage3.3_side_arcs",
+        node_rows=[{"node_id": "n1", "title": "", "description": ""}],
+        context_summary="ctx",
+    )
+    assert "No spoilers and no repetition" in prompt
+    assert "must strictly match the spatiotemporal context" in prompt
+    assert "No deterministic breakthrough ahead of mainline schedule" in prompt

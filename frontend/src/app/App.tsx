@@ -18,7 +18,7 @@ import {
   runChapter,
   subscribeWorkflowEvents,
   sendAnchorDelay,
-  sendBStoryJudgement,
+  sendAnchorResolution,
   sendContextPrune,
   sendDirectorPatch,
   sendDraftEdit,
@@ -26,11 +26,13 @@ import {
   sendHitlDecision,
   sendOutlineEdit,
   sendStateInjection,
+  type MacroCompileProgress,
 } from "../api";
 import { AgentOutputView } from "../features/agent-output/AgentOutputView";
 import { ChapterReader } from "../features/chapter-reader/ChapterReader";
 import { GraphView } from "../features/graph-view/GraphView";
 import { HitlPanel } from "../features/hitl-panel/HitlPanel";
+import { AnchorNodesGraphView } from "../features/macro-plan/AnchorNodesGraphView";
 import { MacroPlanPanel } from "../features/macro-plan/MacroPlanPanel";
 import { StoryLibrary } from "../features/story-library/StoryLibrary";
 import { StorySetupForm } from "../features/story-setup/StorySetupForm";
@@ -54,7 +56,7 @@ import type {
   WritingPreambleResponse,
 } from "../types";
 import { AppShell, type AppView, type TaskFlowStageId } from "./AppShell";
-import { mergeMacroBibles } from "../features/macro-plan/macroPlanHelpers";
+import { buildMacroPutBody, mergeMacroPlan, namespaceMacroPlanIdsForStory, parseMacroImportJson } from "./macroPlanBundle";
 import { useI18n } from "../i18n/useI18n";
 
 /** Same heuristic as backend OUTLINE_MIN_CHARS_FOR_FULL_BINDING — UX hint only. */
@@ -154,24 +156,6 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function buildMacroPutBody(data: MacroCompileData): MacroPlanPutBody {
-  return {
-    bible: isObjectRecord(data.bible) ? { ...data.bible } : {},
-    volumes: [...(data.volumes ?? [])],
-    anchors: (data.anchors ?? []).map((a) => ({
-      anchor_id: a.anchor_id,
-      volume_id: a.volume_id ?? "",
-      title: a.title ?? "",
-      description: a.description ?? "",
-      target_state: isObjectRecord(a.target_state) ? { ...a.target_state } : {},
-      chapter_target: a.chapter_target,
-      priority: a.priority ?? 1,
-    })),
-    cast: [...(data.cast ?? [])],
-    protagonist_character_id: data.protagonist_character_id?.trim() || null,
-  };
-}
-
 function parseStorySettingsImportJson(raw: string): StoryInput {
   let parsed: unknown;
   try {
@@ -219,49 +203,6 @@ function parseStorySettingsImportJson(raw: string): StoryInput {
     plan_retry_limit,
     draft_loop_retry_limit,
     output_language: normalizeOutputLanguage(candidate.output_language),
-  };
-}
-
-function parseMacroImportJson(raw: string): MacroPlanPutBody {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new Error("compile JSON 格式不正確");
-  }
-  const candidate = isObjectRecord(parsed) && parsed.kind === "macro_compile" ? parsed.macro_plan : parsed;
-  if (!isObjectRecord(candidate)) throw new Error("compile JSON 結構錯誤");
-  const volumes = Array.isArray(candidate.volumes) ? candidate.volumes : [];
-  const anchors = Array.isArray(candidate.anchors) ? candidate.anchors : [];
-  if (volumes.length === 0 || anchors.length === 0) throw new Error("volumes 與 anchors 不可為空");
-  const volumeIds = new Set<string>();
-  for (const row of volumes) {
-    const item = row as { volume_id?: unknown };
-    const volumeId = String(item.volume_id ?? "").trim();
-    if (!volumeId) throw new Error("volumes 內含空白 volume_id");
-    if (volumeIds.has(volumeId)) throw new Error(`volumes 出現重複 volume_id：${volumeId}`);
-    volumeIds.add(volumeId);
-  }
-  const anchorIds = new Set<string>();
-  for (const row of anchors) {
-    const item = row as { anchor_id?: unknown; volume_id?: unknown };
-    const anchorId = String(item.anchor_id ?? "").trim();
-    if (!anchorId) throw new Error("anchors 內含空白 anchor_id");
-    if (anchorIds.has(anchorId)) throw new Error(`anchors 出現重複 anchor_id：${anchorId}`);
-    anchorIds.add(anchorId);
-    const linkedVolumeId = String(item.volume_id ?? "").trim();
-    if (!linkedVolumeId) throw new Error(`anchor ${anchorId} 缺少 volume_id`);
-    if (!volumeIds.has(linkedVolumeId)) throw new Error(`anchor ${anchorId} 指向不存在的 volume_id：${linkedVolumeId}`);
-  }
-  return {
-    bible: isObjectRecord(candidate.bible) ? candidate.bible : {},
-    volumes: volumes as MacroPlanPutBody["volumes"],
-    anchors: anchors as MacroPlanPutBody["anchors"],
-    cast: Array.isArray(candidate.cast) ? (candidate.cast as MacroPlanPutBody["cast"]) : [],
-    protagonist_character_id:
-      typeof candidate.protagonist_character_id === "string" || candidate.protagonist_character_id === null
-        ? candidate.protagonist_character_id
-        : null,
   };
 }
 
@@ -325,87 +266,6 @@ function mergeStorySettings(current: StoryInput, incoming: StoryInput): StoryInp
   };
 }
 
-function mergeMacroPlan(current: MacroPlanPutBody, incoming: MacroPlanPutBody): MacroPlanPutBody {
-  const volumes = [...current.volumes];
-  const volumeIds = new Set(current.volumes.map((v) => v.volume_id));
-  for (const v of incoming.volumes) {
-    if (!volumeIds.has(v.volume_id)) {
-      volumes.push(v);
-      volumeIds.add(v.volume_id);
-    }
-  }
-  const anchors = [...current.anchors];
-  const anchorIds = new Set(current.anchors.map((a) => a.anchor_id));
-  for (const a of incoming.anchors) {
-    if (!anchorIds.has(a.anchor_id)) {
-      anchors.push(a);
-      anchorIds.add(a.anchor_id);
-    }
-  }
-  const cast = [...current.cast];
-  const castIds = new Set(current.cast.map((c) => c.node_id));
-  for (const c of incoming.cast) {
-    if (!castIds.has(c.node_id)) {
-      cast.push(c);
-      castIds.add(c.node_id);
-    }
-  }
-  return {
-    bible: mergeMacroBibles(
-      (current.bible ?? {}) as Record<string, unknown>,
-      (incoming.bible ?? {}) as Record<string, unknown>,
-    ) as MacroPlanPutBody["bible"],
-    volumes,
-    anchors,
-    cast,
-    protagonist_character_id: current.protagonist_character_id ?? incoming.protagonist_character_id ?? null,
-  };
-}
-
-function namespaceMacroPlanIdsForStory(body: MacroPlanPutBody, storyId: string): MacroPlanPutBody {
-  const mappedVolumes = body.volumes.map((v) => {
-    const original = String(v.volume_id ?? "").trim();
-    const volume_id = original.startsWith(`${storyId}_`) ? original : `${storyId}_${original}`;
-    return { ...v, volume_id };
-  });
-  const volumeMap = new Map<string, string>();
-  for (const v of mappedVolumes) {
-    const original = String(v.volume_id ?? "").trim();
-    if (original.startsWith(`${storyId}_`)) {
-      const raw = original.slice(storyId.length + 1);
-      volumeMap.set(raw, original);
-      volumeMap.set(original, original);
-    }
-  }
-  const mappedAnchors = body.anchors.map((a) => {
-    const rawAnchorId = String(a.anchor_id ?? "").trim();
-    const anchor_id = rawAnchorId.startsWith(`${storyId}_`) ? rawAnchorId : `${storyId}_${rawAnchorId}`;
-    const rawVolumeId = String(a.volume_id ?? "").trim();
-    const volume_id = volumeMap.get(rawVolumeId) ?? (rawVolumeId.startsWith(`${storyId}_`) ? rawVolumeId : `${storyId}_${rawVolumeId}`);
-    return { ...a, anchor_id, volume_id };
-  });
-  const castIdMap = new Map<string, string>();
-  const mappedCast = body.cast.map((c, idx) => {
-    const rawNodeId = String(c.node_id ?? "").trim();
-    const fallbackNodeId = `${storyId}_mc_${String(idx + 1).padStart(2, "0")}`;
-    const node_id = rawNodeId.startsWith(`${storyId}_`) ? rawNodeId : fallbackNodeId;
-    if (rawNodeId) castIdMap.set(rawNodeId, node_id);
-    castIdMap.set(node_id, node_id);
-    return { ...c, node_id };
-  });
-  const rawProtagonistId = String(body.protagonist_character_id ?? "").trim();
-  const protagonist_character_id =
-    castIdMap.get(rawProtagonistId) ??
-    (rawProtagonistId.startsWith(`${storyId}_`) ? rawProtagonistId : null);
-  return {
-    ...body,
-    volumes: mappedVolumes,
-    anchors: mappedAnchors,
-    cast: mappedCast,
-    protagonist_character_id,
-  };
-}
-
 function downloadJsonFile(filename: string, payload: unknown) {
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
   const objectUrl = window.URL.createObjectURL(blob);
@@ -439,10 +299,13 @@ export default function App() {
   const [chapterOutline, setChapterOutline] = useState("");
   const [chapterHardRules, setChapterHardRules] = useState("");
   const [aiFreedomLevel, setAiFreedomLevel] = useState<AiFreedomLevel>("balanced");
+  const [selectedAnchorIds, setSelectedAnchorIds] = useState<string[]>([]);
+  const [manualAnchorSelectionOpen, setManualAnchorSelectionOpen] = useState(false);
   const [writingPreamble, setWritingPreamble] = useState<WritingPreambleResponse | null>(null);
   const [preamblePanelOpen, setPreamblePanelOpen] = useState(false);
   const [writePanelTab, setWritePanelTab] = useState<"progress" | "logs">("progress");
-  const [uiBusyVisible, setUiBusyVisible] = useState(false);
+  const [compileInProgress, setCompileInProgress] = useState(false);
+  const [compileProgress, setCompileProgress] = useState<MacroCompileProgress | null>(null);
   const [regenSummaryBusyChapter, setRegenSummaryBusyChapter] = useState<number | null>(null);
   const [configVersion, setConfigVersion] = useState(0);
   const [hasExportedChapter, setHasExportedChapter] = useState(false);
@@ -455,6 +318,7 @@ export default function App() {
     reviewFix: 0,
     export: 0,
   });
+  const [setupSelectedAnchorNodeId, setSetupSelectedAnchorNodeId] = useState<string | null>(null);
   const [flowStartedAt, setFlowStartedAt] = useState<number | null>(null);
   const workflowEventsUnsubRef = useRef<(() => void) | null>(null);
   const storyIdRef = useRef(storyId);
@@ -482,15 +346,6 @@ export default function App() {
       workflowEventsUnsubRef.current = null;
     };
   }, []);
-
-  useEffect(() => {
-    if (!busy) {
-      setUiBusyVisible(false);
-      return;
-    }
-    const timer = window.setTimeout(() => setUiBusyVisible(true), 120);
-    return () => window.clearTimeout(timer);
-  }, [busy]);
 
   useEffect(() => {
     if (!storyId && (view === "write" || view === "review" || view === "graph" || view === "export")) {
@@ -583,12 +438,70 @@ export default function App() {
     return true;
   }, [workflow]);
 
+  const chapterAnchorCandidates = useMemo(() => {
+    const nodes = macroData?.anchor_nodes ?? [];
+    return nodes.filter((n) => n.status === "UNLOCKED");
+  }, [macroData?.anchor_nodes]);
+  const setupAnchorNodes = useMemo(() => macroData?.anchor_nodes ?? [], [macroData?.anchor_nodes]);
+  const setupSelectedAnchorNode = useMemo(() => {
+    if (!setupAnchorNodes.length) return null;
+    if (setupSelectedAnchorNodeId) {
+      return setupAnchorNodes.find((n) => String(n.id) === setupSelectedAnchorNodeId) ?? setupAnchorNodes[0];
+    }
+    return setupAnchorNodes[0];
+  }, [setupAnchorNodes, setupSelectedAnchorNodeId]);
+  const setupCanEditSelectedNode = useMemo(() => {
+    if (!setupSelectedAnchorNode) return false;
+    const isMainline = (setupSelectedAnchorNode.storyline_ids ?? []).some((sid) => String(sid).endsWith("_main"));
+    const kind = String(setupSelectedAnchorNode.node_kind ?? "NORMAL").toUpperCase();
+    const resolved = String(setupSelectedAnchorNode.status ?? "").toUpperCase() === "RESOLVED";
+    return !isMainline && kind === "NORMAL" && !resolved;
+  }, [setupSelectedAnchorNode]);
+
+  useEffect(() => {
+    const candidateIds = new Set(chapterAnchorCandidates.map((n) => n.id));
+    setSelectedAnchorIds((prev) => prev.filter((id) => candidateIds.has(id)).slice(0, 2));
+  }, [chapterAnchorCandidates]);
+  const autoNextAnchorIds = useMemo(() => {
+    const nodes = macroData?.anchor_nodes ?? [];
+    if (!nodes.length || selectedAnchorIds.length === 0) return [];
+    const selectedSet = new Set(selectedAnchorIds);
+    const children: Array<{ id: string; chapter: number; order: number }> = [];
+    nodes.forEach((node, order) => {
+      const id = String(node.id);
+      const deps = node.depends_on ?? [];
+      const status = String(node.status ?? "").toUpperCase();
+      if (selectedSet.has(id)) return;
+      if (status === "RESOLVED") return;
+      if (!deps.some((dep) => selectedSet.has(String(dep)))) return;
+      children.push({ id, chapter: Number(node.estimated_chapter ?? Number.MAX_SAFE_INTEGER), order });
+    });
+    children.sort((a, b) => a.chapter - b.chapter || a.order - b.order || a.id.localeCompare(b.id));
+    const picked = children.map((r) => r.id).slice(0, 2);
+    if (picked.length >= 1) return picked;
+    const fallback = nodes
+      .filter((n) => String(n.status ?? "").toUpperCase() === "UNLOCKED" && !selectedSet.has(String(n.id)))
+      .map((n) => String(n.id))
+      .slice(0, 2);
+    return fallback;
+  }, [macroData?.anchor_nodes, selectedAnchorIds]);
+
+  useEffect(() => {
+    if (!setupAnchorNodes.length) {
+      setSetupSelectedAnchorNodeId(null);
+      return;
+    }
+    if (!setupSelectedAnchorNodeId || !setupAnchorNodes.some((n) => String(n.id) === setupSelectedAnchorNodeId)) {
+      setSetupSelectedAnchorNodeId(String(setupAnchorNodes[0]?.id ?? ""));
+    }
+  }, [setupAnchorNodes, setupSelectedAnchorNodeId]);
+
   const storySummary = useMemo(() => {
     if (!macroData) {
       return locale === "en" ? "World compile not completed yet." : locale === "zh-Hans" ? "尚未完成世界观编译。" : "尚未完成世界觀編譯。";
     }
     const volumes = macroData.volumes ?? [];
-    const anchors = macroData.anchors ?? [];
+    const anchors = (macroData.anchor_nodes ?? []).length > 0 ? macroData.anchor_nodes ?? [] : macroData.anchors ?? [];
     const cast = macroData.cast ?? [];
     const castPart =
       cast.length > 0
@@ -735,8 +648,12 @@ export default function App() {
         cast_seed: snap.cast_seed,
         volumes: snap.volumes,
         anchors: snap.anchors,
+        storylines: snap.storylines ?? [],
+        anchor_nodes: snap.anchor_nodes ?? [],
         cast: snap.cast,
         protagonist_character_id: snap.protagonist_character_id,
+        macro_topology_mode: snap.macro_topology_mode,
+        topology_locked: snap.topology_locked,
       });
       try {
         setGraph(await fetchGraph(selectedId));
@@ -767,6 +684,8 @@ export default function App() {
   async function handleMacroCompile() {
     if (!storyId) return;
     setBusy(true);
+    setCompileInProgress(true);
+    setCompileProgress({ status: "QUEUED", percent: 5, message: "Macro compile queued..." });
     setError("");
     setNotice("");
     try {
@@ -786,6 +705,7 @@ export default function App() {
           title: storyConfigSnapshot.title,
           premise: storyConfigSnapshot.premise,
           target_total_words: storyConfigSnapshot.target_total_words,
+          branch_count_override: storyConfigSnapshot.branch_count_override ?? null,
           plan_retry_limit: storyConfigSnapshot.plan_retry_limit,
           draft_loop_retry_limit: storyConfigSnapshot.draft_loop_retry_limit,
           macro_author_notes: storyConfigSnapshot.macro_author_notes ?? "",
@@ -794,7 +714,9 @@ export default function App() {
         });
         setPersistedStoryConfig(storyConfigSnapshot);
       }
-      const result = await macroCompile(storyId);
+      const result = await macroCompile(storyId, (progress) => {
+        setCompileProgress(progress);
+      });
       setMacroData(result);
       setGraph(await fetchGraph(storyId));
       try {
@@ -808,6 +730,8 @@ export default function App() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "世界觀編譯失敗");
     } finally {
+      setCompileInProgress(false);
+      setCompileProgress(null);
       setBusy(false);
     }
   }
@@ -822,6 +746,7 @@ export default function App() {
         title: payload.title,
         premise: payload.premise,
         target_total_words: payload.target_total_words,
+        branch_count_override: payload.branch_count_override ?? null,
         plan_retry_limit: payload.plan_retry_limit,
         draft_loop_retry_limit: payload.draft_loop_retry_limit,
         macro_author_notes: payload.macro_author_notes ?? "",
@@ -940,6 +865,16 @@ export default function App() {
 
   async function handleRunChapter() {
     if (!storyId) return;
+    if (manualAnchorSelectionOpen && selectedAnchorIds.length < 1) {
+      setError(
+        locale === "en"
+          ? "Select at least one anchor in advanced mode, or collapse to let director decide."
+          : locale === "zh-Hans"
+            ? "进阶模式下请至少选择一个 anchor，或收起选项改由 director 自动决定。"
+            : "進階模式下請至少選擇一個 anchor，或收起選項改由 director 自動決定。",
+      );
+      return;
+    }
     setError("");
     setNotice("");
     workflowEventsUnsubRef.current?.();
@@ -948,10 +883,15 @@ export default function App() {
     setSelectedChapter(null);
     setBusy(true);
     try {
-      const initial = await runChapter(storyId, chapterId, {
+      const runOptions = {
         chapterOutline,
         chapterHardRules,
         aiFreedomLevel,
+        selectedAnchorIds: manualAnchorSelectionOpen ? selectedAnchorIds : undefined,
+        nextAnchorIds: manualAnchorSelectionOpen ? autoNextAnchorIds : undefined,
+      };
+      const initial = await runChapter(storyId, chapterId, {
+        ...runOptions,
       });
       setWorkflow(initial);
       try {
@@ -989,7 +929,7 @@ export default function App() {
         output_language: "zh-Hant",
       } satisfies StoryInput);
     const vols = macroData?.volumes ?? [];
-    const ancs = macroData?.anchors ?? [];
+    const ancs = (macroData?.anchor_nodes ?? []).length > 0 ? macroData?.anchor_nodes ?? [] : macroData?.anchors ?? [];
     const includeMacro = vols.length > 0 && ancs.length > 0 && macroData;
     const payload: StoryProjectBundlePayload = {
       kind: "story_project_bundle",
@@ -1028,12 +968,14 @@ export default function App() {
         : locale === "zh-Hans"
           ? "（无故事区块）"
           : "（無故事區塊）";
+    const nodeCount = (parsedMacro?.anchor_nodes ?? []).length;
+    const slCount = (parsedMacro?.storylines ?? []).length;
     const macroSummary = parsedMacro
       ? locale === "en"
-        ? `Macro: Volumes ${parsedMacro.volumes.length} · Milestones ${parsedMacro.anchors.length} · Cast ${parsedMacro.cast.length}`
+        ? `Macro: Volumes ${parsedMacro.volumes.length} · DAG nodes ${nodeCount} · Storylines ${slCount} · Cast ${parsedMacro.cast.length}`
         : locale === "zh-Hans"
-          ? `宏观：分卷 ${parsedMacro.volumes.length} · 里程碑 ${parsedMacro.anchors.length} · 人物 ${parsedMacro.cast.length}`
-          : `宏觀：分卷 ${parsedMacro.volumes.length} · 里程碑 ${parsedMacro.anchors.length} · 人物 ${parsedMacro.cast.length}`
+          ? `宏观：分卷 ${parsedMacro.volumes.length} · 剧情节点 ${nodeCount} · 剧情线 ${slCount} · 人物 ${parsedMacro.cast.length}`
+          : `宏觀：分卷 ${parsedMacro.volumes.length} · 劇情節點 ${nodeCount} · 劇情線 ${slCount} · 人物 ${parsedMacro.cast.length}`
       : locale === "en"
         ? "(No macro block)"
         : locale === "zh-Hans"
@@ -1070,6 +1012,7 @@ export default function App() {
         title: merged.title,
         premise: merged.premise,
         target_total_words: merged.target_total_words,
+        branch_count_override: merged.branch_count_override ?? null,
         plan_retry_limit: merged.plan_retry_limit,
         draft_loop_retry_limit: merged.draft_loop_retry_limit,
         macro_author_notes: merged.macro_author_notes ?? "",
@@ -1092,8 +1035,12 @@ export default function App() {
         cast_seed: putResult.cast_seed,
         volumes: putResult.volumes,
         anchors: putResult.anchors,
+        storylines: putResult.storylines ?? [],
+        anchor_nodes: putResult.anchor_nodes ?? [],
         cast: putResult.cast,
         protagonist_character_id: putResult.protagonist_character_id,
+        macro_topology_mode: putResult.macro_topology_mode,
+        topology_locked: putResult.topology_locked,
       });
       try {
         setMacroData(await fetchMacroSnapshot(storyId));
@@ -1142,6 +1089,43 @@ export default function App() {
     }
   }
 
+  function patchSetupAnchorNode(patch: Partial<NonNullable<MacroCompileData["anchor_nodes"]>[number]>) {
+    if (!macroData || !setupSelectedAnchorNode) return;
+    const nextNodes = (macroData.anchor_nodes ?? []).map((n) =>
+      String(n.id) === String(setupSelectedAnchorNode.id) ? { ...n, ...patch } : n,
+    );
+    setMacroData({ ...macroData, anchor_nodes: nextNodes });
+  }
+
+  async function persistSetupDagChanges() {
+    if (!storyId || !macroData || configurationLocked) return;
+    setBusy(true);
+    setError("");
+    try {
+      const payload = buildMacroPutBody(macroData);
+      const updated = await putMacroPlan(storyId, payload);
+      setMacroData({
+        story_id: updated.story_id,
+        bible: updated.bible ?? {},
+        macro_author_notes: updated.macro_author_notes,
+        cast_seed: updated.cast_seed,
+        volumes: updated.volumes,
+        anchors: updated.anchors,
+        storylines: updated.storylines ?? [],
+        anchor_nodes: updated.anchor_nodes ?? [],
+        cast: updated.cast,
+        protagonist_character_id: updated.protagonist_character_id,
+        macro_topology_mode: updated.macro_topology_mode,
+        topology_locked: updated.topology_locked,
+      });
+      setNotice(locale === "en" ? "DAG changes saved." : locale === "zh-Hans" ? "DAG 变更已保存。" : "DAG 變更已儲存。");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "無法儲存 DAG 變更");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function runHitlAction<TPayload>(
     send: (runId: string, payload: TPayload) => Promise<WorkflowPayload>,
     payload: TPayload,
@@ -1170,8 +1154,8 @@ export default function App() {
       runHitlAction(sendDirectorPatch, payload, "無法套用章節方向調整"),
     onExtractionRemap: async (payload: Parameters<typeof sendExtractionRemap>[1]) =>
       runHitlAction(sendExtractionRemap, payload, "無法套用名稱對照"),
-    onBStoryJudgement: async (payload: Parameters<typeof sendBStoryJudgement>[1]) =>
-      runHitlAction(sendBStoryJudgement, payload, "無法送出副線判定"),
+    onAnchorResolution: async (payload: Parameters<typeof sendAnchorResolution>[1]) =>
+      runHitlAction(sendAnchorResolution, payload, "無法送出 anchor 判定"),
     onAnchorDelay: async (payload: Parameters<typeof sendAnchorDelay>[1]) =>
       runHitlAction(sendAnchorDelay, payload, "無法延後里程碑"),
     onContextPrune: async (payload: Parameters<typeof sendContextPrune>[1]) =>
@@ -1179,9 +1163,33 @@ export default function App() {
   };
 
   const showStorySection = Boolean(storyId) || view === "setup";
+  const compileProgressText = useMemo(() => {
+    if (!compileInProgress) return "";
+    const st = String(compileProgress?.status ?? "QUEUED").toUpperCase();
+    if (locale === "en") {
+      if (st === "RUNNING") return "Compiling world bible and macro structure...";
+      if (st === "SUCCEEDED") return "Compile completed.";
+      if (st === "FAILED") return "Compile failed.";
+      return "Queued. Waiting for compile worker...";
+    }
+    if (locale === "zh-Hans") {
+      if (st === "RUNNING") return "正在编译世界观与宏观结构…";
+      if (st === "SUCCEEDED") return "编译完成。";
+      if (st === "FAILED") return "编译失败。";
+      return "排队中，等待编译任务启动…";
+    }
+    if (st === "RUNNING") return "正在編譯世界觀與宏觀結構…";
+    if (st === "SUCCEEDED") return "編譯完成。";
+    if (st === "FAILED") return "編譯失敗。";
+    return "排隊中，等待編譯任務啟動…";
+  }, [compileInProgress, compileProgress?.status, locale]);
   const storySectionLabel =
     storyTitle.trim() || (storyId ? `${storyId.slice(0, 10)}…` : "");
-  const hasMacroCompiled = Boolean(macroData && macroData.volumes.length > 0 && macroData.anchors.length > 0);
+  const hasMacroCompiled = Boolean(
+    macroData &&
+      macroData.volumes.length > 0 &&
+      (((macroData.anchor_nodes ?? []).length > 0) || ((macroData.anchors ?? []).length > 0)),
+  );
   const hasChapterRun = Boolean(workflow || chapters.length > 0);
   const hasReviewed = Boolean(selectedChapter || chapters.length > 0);
   const hasExported = hasExportedChapter || hasExportedProject;
@@ -1209,28 +1217,6 @@ export default function App() {
     const resetLabel = resetDone ? "thread 已重置" : "thread 未重置";
     return `${typeLabel}${bucketLabel}，本次執行已安全終止（${commitLabel} / ${resetLabel}）。${reason ? ` 原因：${reason}` : ""}`;
   }, [workflow]);
-  const activeStage: TaskFlowStageId = useMemo(() => {
-    if (view === "setup") return hasMacroCompiled ? "planStructure" : "projectSetup";
-    if (view === "write") return "writeChapter";
-    if (view === "review" || view === "graph") return "reviewFix";
-    if (view === "export") return "export";
-    if (!storyId) return "projectSetup";
-    if (!hasMacroCompiled) return "projectSetup";
-    if (!hasChapterRun) return "planStructure";
-    if (!hasReviewed) return "writeChapter";
-    if (!hasExported) return "reviewFix";
-    return "export";
-  }, [view, storyId, hasMacroCompiled, hasChapterRun, hasReviewed, hasExported]);
-  const taskFlow = useMemo(
-    () => [
-      { id: "projectSetup" as const, label: "Project Setup", done: Boolean(storyId) },
-      { id: "planStructure" as const, label: "Plan & Structure", done: hasMacroCompiled },
-      { id: "writeChapter" as const, label: "Write Chapter", done: hasChapterRun },
-      { id: "reviewFix" as const, label: "Review & Fix", done: hasReviewed },
-      { id: "export" as const, label: "Export", done: hasExported },
-    ],
-    [storyId, hasMacroCompiled, hasChapterRun, hasReviewed, hasExported],
-  );
   function handleViewChange(nextView: AppView) {
     if (nextView === view) return;
     const markStageVisit = (stage: TaskFlowStageId) => {
@@ -1289,8 +1275,6 @@ export default function App() {
       hasSelectedStory={Boolean(storyId)}
       showStorySection={showStorySection}
       storySectionLabel={storySectionLabel}
-      taskFlow={taskFlow}
-      activeStage={activeStage}
       workflowMiniStatus={workflowMiniStatus}
     >
       <div className="mx-4 mt-4 min-h-[3.5rem]">
@@ -1387,6 +1371,20 @@ export default function App() {
                 onChange={(e) => void handleToolbarImportProjectBundle(e)}
               />
             </div>
+            {compileInProgress ? (
+              <div className="rounded-xl border border-secondary/30 bg-secondary/8 px-3 py-2">
+                <p className="font-mono text-xs text-secondary">
+                  <span className="mr-2 inline-block h-2 w-2 animate-pulse rounded-full bg-secondary" />
+                  {compileProgressText} ({Math.max(0, Math.min(100, Number(compileProgress?.percent ?? 5)))}%)
+                </p>
+                <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-surface-container-highest/70">
+                  <div
+                    className="h-full rounded-full bg-secondary transition-[width] duration-300"
+                    style={{ width: `${Math.max(0, Math.min(100, Number(compileProgress?.percent ?? 5)))}%` }}
+                  />
+                </div>
+              </div>
+            ) : null}
           </div>
 
           <div className="mb-6 max-w-7xl rounded-xl border border-outline-variant/10 bg-surface-container-low px-6 py-4 font-label text-sm text-on-surface-variant">
@@ -1427,6 +1425,130 @@ export default function App() {
                   onError={setError}
                 />
               </div>
+            </div>
+          </div>
+          <div className="mt-8 max-w-7xl">
+            <div className="rounded-xl border border-outline-variant/10 bg-surface-container-low/50 p-3">
+              <div className="mb-3 px-1">
+                <h3 className="font-label text-xs font-semibold uppercase tracking-wider text-on-surface-variant">
+                  {locale === "en" ? "Anchor DAG GraphView" : locale === "zh-Hans" ? "Anchor DAG 图谱" : "Anchor DAG 圖譜"}
+                </h3>
+              </div>
+              {setupAnchorNodes.length > 0 ? (
+                <div className="space-y-3">
+                  <AnchorNodesGraphView
+                    nodes={setupAnchorNodes.map((n) => ({
+                      id: String(n.id),
+                      title: String(n.title ?? ""),
+                      status: n.status,
+                      node_kind: n.node_kind,
+                      storyline_ids: [...(n.storyline_ids ?? [])],
+                      depends_on: [...(n.depends_on ?? [])],
+                    }))}
+                    storylines={macroData?.storylines}
+                    selectedId={setupSelectedAnchorNodeId}
+                    onSelect={(nodeId) => setSetupSelectedAnchorNodeId(nodeId)}
+                    height={420}
+                  />
+                  <div className="rounded-xl border border-outline-variant/20 bg-surface-container-low p-3">
+                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-xs font-semibold text-on-surface-variant">
+                        {locale === "en" ? "Node Detail Card" : locale === "zh-Hans" ? "节点详情卡" : "節點詳情卡"}
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          className="rounded-lg border border-secondary/40 px-3 py-1.5 text-xs font-semibold text-secondary"
+                          onClick={persistSetupDagChanges}
+                          disabled={!storyId || configurationLocked || busy}
+                        >
+                          {locale === "en" ? "Save DAG JSON" : locale === "zh-Hans" ? "保存 DAG JSON" : "儲存 DAG JSON"}
+                        </button>
+                      </div>
+                    </div>
+                    <p className="mb-2 text-[11px] text-on-surface-variant">
+                      {locale === "en"
+                        ? "Temporary mode: node add/remove is paused. You can edit side-arc node title/description only."
+                        : locale === "zh-Hans"
+                          ? "临时模式：暂停新增/删除节点，目前仅提供支线节点内容编辑。"
+                          : "臨時模式：暫停新增/刪除節點，目前僅提供支線節點內容編輯。"}
+                    </p>
+                    {setupSelectedAnchorNode ? (
+                      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                        <label className="text-xs text-on-surface-variant">
+                          {locale === "en" ? "Node ID" : locale === "zh-Hans" ? "节点 ID" : "節點 ID"}
+                          <input
+                            value={String(setupSelectedAnchorNode.id)}
+                            disabled
+                            className="mt-1 w-full rounded-lg border border-outline-variant/25 bg-surface-container-highest px-3 py-2 text-sm"
+                          />
+                        </label>
+                        <label className="text-xs text-on-surface-variant">
+                          {locale === "en" ? "Depends On" : locale === "zh-Hans" ? "依赖节点" : "依賴節點"}
+                          <input
+                            value={(setupSelectedAnchorNode.depends_on ?? []).join(", ")}
+                            disabled
+                            className="mt-1 w-full rounded-lg border border-outline-variant/25 bg-surface-container-highest px-3 py-2 text-sm"
+                          />
+                        </label>
+                        <label className="text-xs text-on-surface-variant">
+                          {locale === "en" ? "Status" : locale === "zh-Hans" ? "状态" : "狀態"}
+                          <input
+                            value={
+                              String(setupSelectedAnchorNode.status ?? "LOCKED").toUpperCase() === "RESOLVED"
+                                ? locale === "en"
+                                  ? "Resolved"
+                                  : locale === "zh-Hans"
+                                    ? "已解决"
+                                    : "已解決"
+                                : String(setupSelectedAnchorNode.status ?? "LOCKED").toUpperCase() === "UNLOCKED"
+                                  ? locale === "en"
+                                    ? "Unlocked"
+                                    : locale === "zh-Hans"
+                                      ? "已解锁"
+                                      : "已解鎖"
+                                  : locale === "en"
+                                    ? "Locked"
+                                    : locale === "zh-Hans"
+                                      ? "已锁定"
+                                      : "已上鎖"
+                            }
+                            disabled
+                            className="mt-1 w-full rounded-lg border border-outline-variant/25 bg-surface-container-highest px-3 py-2 text-sm"
+                          />
+                        </label>
+                        <label className="text-xs text-on-surface-variant">
+                          {locale === "en" ? "Title" : locale === "zh-Hans" ? "标题" : "標題"}
+                          <input
+                            value={String(setupSelectedAnchorNode.title ?? "")}
+                            onChange={(e) => patchSetupAnchorNode({ title: e.target.value })}
+                            disabled={!setupCanEditSelectedNode || configurationLocked}
+                            className="mt-1 w-full rounded-lg border border-outline-variant/25 bg-surface-container-highest px-3 py-2 text-sm"
+                          />
+                        </label>
+                        <label className="text-xs text-on-surface-variant md:col-span-2">
+                          {locale === "en" ? "Description" : locale === "zh-Hans" ? "描述" : "描述"}
+                          <textarea
+                            value={String(setupSelectedAnchorNode.description ?? "")}
+                            onChange={(e) => patchSetupAnchorNode({ description: e.target.value })}
+                            disabled={!setupCanEditSelectedNode || configurationLocked}
+                            rows={3}
+                            className="mt-1 w-full resize-y rounded-lg border border-outline-variant/25 bg-surface-container-highest px-3 py-2 text-sm"
+                          />
+                        </label>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              ) : (
+                <div className="rounded-lg border border-outline-variant/20 bg-surface-container-low p-4 text-sm text-on-surface-variant">
+                  {locale === "en"
+                    ? "No anchor_nodes yet. Run macro compile first."
+                    : locale === "zh-Hans"
+                      ? "尚无 anchor_nodes，请先执行 macro compile。"
+                      : "尚無 anchor_nodes，請先執行 macro compile。"}
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -1585,6 +1707,78 @@ export default function App() {
                   </span>
                 </div>
               ) : null}
+              <div className="mt-3 rounded-lg border border-outline-variant/15 bg-surface-container-high/30 p-3">
+                <p className="mb-2 font-label text-[10px] font-bold uppercase tracking-wider text-secondary">
+                  {locale === "en" ? "Start Chapter Anchors" : locale === "zh-Hans" ? "开章锚点选择" : "開章 Anchor 選點"}
+                </p>
+                <div className="rounded-lg border border-outline-variant/15 bg-surface-container-low px-3 py-2">
+                  <p className="text-xs text-on-surface-variant">
+                    {locale === "en"
+                      ? "Default: keep collapsed and run chapter directly. Director will pick anchors automatically."
+                      : locale === "zh-Hans"
+                        ? "默认：保持收起并直接运行章节，由 director 自动选择锚点。"
+                        : "預設：保持收起並直接執行章節，由 director 自動選擇錨點。"}
+                  </p>
+                  <button
+                    type="button"
+                    className="mt-2 rounded-md border border-secondary/35 px-3 py-1.5 text-xs font-semibold text-secondary"
+                    onClick={() => setManualAnchorSelectionOpen((v) => !v)}
+                    disabled={!storyId || busy || workflowConflictLocked || chapterAlreadyCompleted}
+                  >
+                    {manualAnchorSelectionOpen
+                      ? locale === "en"
+                        ? "Hide Advanced Manual Selection"
+                        : locale === "zh-Hans"
+                          ? "收起进阶手动选择"
+                          : "收起進階手動選擇"
+                      : locale === "en"
+                        ? "Show Advanced Manual Selection"
+                        : locale === "zh-Hans"
+                          ? "展开进阶手动选择"
+                          : "展開進階手動選擇"}
+                  </button>
+                </div>
+                {manualAnchorSelectionOpen ? (
+                  chapterAnchorCandidates.length === 0 ? (
+                    <p className="mt-2 text-xs text-on-surface-variant">
+                      {locale === "en" ? "No unlocked anchor candidates yet." : locale === "zh-Hans" ? "目前没有可用的解锁锚点。" : "目前沒有可用的已解鎖 Anchor。"}
+                    </p>
+                  ) : (
+                    <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-2">
+                      {chapterAnchorCandidates.map((n) => (
+                        <label key={n.id} className="rounded-md border border-outline-variant/15 bg-surface-container-low px-2 py-2 text-xs text-on-surface">
+                          <div className="mb-1 font-semibold">{n.title}</div>
+                          <div className="mb-2 line-clamp-2 text-on-surface-variant">{n.description}</div>
+                          <label className="inline-flex items-center gap-1">
+                            <input
+                              type="checkbox"
+                              checked={selectedAnchorIds.includes(n.id)}
+                              onChange={(e) =>
+                                setSelectedAnchorIds((prev) => {
+                                  const next = e.target.checked ? [...prev, n.id] : prev.filter((id) => id !== n.id);
+                                  return Array.from(new Set(next)).slice(0, 2);
+                                })
+                              }
+                              disabled={!storyId || busy || workflowConflictLocked || chapterAlreadyCompleted}
+                            />
+                            <span>{locale === "en" ? "Use For This Chapter" : locale === "zh-Hans" ? "用于本章" : "用於本章"}</span>
+                          </label>
+                        </label>
+                      ))}
+                    </div>
+                  )
+                ) : null}
+                {manualAnchorSelectionOpen ? (
+                  <p className="mt-2 text-[11px] text-on-surface-variant">
+                    {locale === "en"
+                      ? `Advanced mode enabled: director will be skipped. Selected anchors carry auto next-step anchors (window size = 2): ${autoNextAnchorIds.join(", ") || "auto-detecting..."}`
+                      : locale === "zh-Hans"
+                        ? `已启用进阶模式：将跳过 director。已选锚点会自动携带下一步锚点（window size = 2）：${autoNextAnchorIds.join("、") || "自动推断中…"}`
+                        : `已啟用進階模式：將跳過 director。已選錨點會自動帶出下一步錨點（window size = 2）：${autoNextAnchorIds.join("、") || "自動推斷中…"}`
+                    }
+                  </p>
+                ) : null}
+              </div>
               <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
                 <div>
                   <p className="mb-2 font-label text-[10px] font-bold uppercase tracking-wider text-secondary">
@@ -1789,14 +1983,6 @@ export default function App() {
           />
         </div>
       ) : null}
-      <div
-        aria-hidden={!uiBusyVisible}
-        className={`pointer-events-none fixed inset-0 z-40 transition-opacity duration-150 ${
-          uiBusyVisible ? "opacity-100" : "opacity-0"
-        }`}
-      >
-        <div className="absolute inset-0 bg-background/22 backdrop-blur-[1px]" />
-      </div>
     </AppShell>
   );
 }

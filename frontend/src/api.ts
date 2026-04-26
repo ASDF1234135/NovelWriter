@@ -105,8 +105,30 @@ export async function putMacroPlan(storyId: string, body: MacroPlanPutBody): Pro
 const MACRO_POLL_MS = 800;
 const MACRO_TIMEOUT_MS = 30 * 60 * 1000;
 
+export type MacroCompileProgress = {
+  status: string;
+  percent: number;
+  message: string;
+};
+
 /** POST returns 202; polls macro-snapshot until terminal status, then returns compile-shaped data. */
-export async function macroCompile(storyId: string): Promise<MacroCompileData> {
+export async function macroCompile(
+  storyId: string,
+  onProgress?: (progress: MacroCompileProgress) => void,
+): Promise<MacroCompileData> {
+  const messageForStatus = (status: string): string => {
+    if (status === "RUNNING") return "Compiling macro structure...";
+    if (status === "SUCCEEDED") return "Macro compile completed.";
+    if (status === "FAILED") return "Macro compile failed.";
+    return "Macro compile queued...";
+  };
+  const percentForStatus = (status: string): number => {
+    if (status === "RUNNING") return 60;
+    if (status === "SUCCEEDED") return 100;
+    if (status === "FAILED") return 100;
+    return 15;
+  };
+
   const response = await fetch(`${API_BASE}/stories/${storyId}/macro-compile`, {
     method: "POST",
   });
@@ -114,10 +136,16 @@ export async function macroCompile(storyId: string): Promise<MacroCompileData> {
   if (!ack.accepted) {
     throw new Error("Macro compile was not accepted");
   }
+  onProgress?.({ status: "ACCEPTED", percent: 10, message: "Macro compile accepted." });
   const deadline = Date.now() + MACRO_TIMEOUT_MS;
   while (Date.now() < deadline) {
     const snap = await fetchMacroSnapshot(storyId);
     const st = snap.macro_compile_status ?? "IDLE";
+    onProgress?.({
+      status: st,
+      percent: percentForStatus(st),
+      message: messageForStatus(st),
+    });
     if (st === "SUCCEEDED") {
       return {
         story_id: snap.story_id,
@@ -125,9 +153,12 @@ export async function macroCompile(storyId: string): Promise<MacroCompileData> {
         macro_author_notes: snap.macro_author_notes,
         cast_seed: snap.cast_seed,
         volumes: snap.volumes,
-        anchors: snap.anchors,
         cast: snap.cast,
         protagonist_character_id: snap.protagonist_character_id,
+        storylines: snap.storylines,
+        anchor_nodes: snap.anchor_nodes,
+        macro_topology_mode: snap.macro_topology_mode,
+        topology_locked: snap.topology_locked,
       };
     }
     if (st === "FAILED") {
@@ -148,6 +179,8 @@ export async function runChapter(
     aiFreedomLevel?: AiFreedomLevel;
     extractionSurfaceHints?: Array<{ node_id: string; surface_forms: string[] }>;
     waiveMandatoryNodeIds?: string[];
+    selectedAnchorIds?: string[];
+    nextAnchorIds?: string[];
   },
 ): Promise<WorkflowPayload> {
   const chapterOutline = (options?.chapterOutline ?? options?.authorChapterPlan ?? "").trim();
@@ -155,6 +188,8 @@ export async function runChapter(
   const aiFreedomLevel = options?.aiFreedomLevel ?? "balanced";
   const extraction_surface_hints = options?.extractionSurfaceHints ?? [];
   const waive_mandatory_node_ids = options?.waiveMandatoryNodeIds ?? [];
+  const selected_anchor_ids = options?.selectedAnchorIds ?? [];
+  const next_anchor_ids = options?.nextAnchorIds ?? [];
   const response = await fetch(`${API_BASE}/stories/${storyId}/chapters/${chapterId}/run`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -167,6 +202,8 @@ export async function runChapter(
       ai_freedom_level: aiFreedomLevel,
       extraction_surface_hints,
       waive_mandatory_node_ids,
+      selected_anchor_ids,
+      next_anchor_ids,
     }),
   });
   return parseJson(response);
@@ -272,6 +309,25 @@ export async function sendExtractionRemap(
   return parseJson(response);
 }
 
+export async function sendAnchorResolution(
+  runId: string,
+  payload: {
+    action: "force_resolve" | "rewrite" | "delay_anchor";
+    resolved_anchor_ids?: string[];
+    delayed_anchor_ids?: string[];
+    reject_resume_from?: string;
+    reason?: string;
+  },
+): Promise<WorkflowPayload> {
+  const response = await fetch(`${API_BASE}/workflows/${runId}/hitl/anchor-resolution`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return parseJson(response);
+}
+
+// Backward-compatible adapter used by existing UI call-sites.
 export async function sendBStoryJudgement(
   runId: string,
   payload: {
@@ -283,12 +339,18 @@ export async function sendBStoryJudgement(
     reason?: string;
   },
 ): Promise<WorkflowPayload> {
-  const response = await fetch(`${API_BASE}/workflows/${runId}/hitl/b-story-judgement`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+  if (payload.action === "force_resolve") {
+    return sendAnchorResolution(runId, {
+      action: "force_resolve",
+      resolved_anchor_ids: payload.resolved_b_stories ?? [],
+      reason: payload.reason,
+    });
+  }
+  return sendAnchorResolution(runId, {
+    action: "rewrite",
+    reject_resume_from: payload.reject_resume_from,
+    reason: payload.reason,
   });
-  return parseJson(response);
 }
 
 export async function sendAnchorDelay(

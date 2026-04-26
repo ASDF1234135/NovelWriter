@@ -220,6 +220,12 @@ class StoryInput(BaseModel):
         description="Optional structured core cast names for macro compile; empty keeps LLM-only roster.",
     )
     target_total_words: int = 100_000
+    branch_count_override: int | None = Field(
+        default=None,
+        ge=1,
+        le=64,
+        description="Optional manual override for generated branch storyline count in macro compile.",
+    )
     plan_retry_limit: int = Field(default=3, ge=0, le=20)
     draft_loop_retry_limit: int = Field(default=3, ge=0, le=20)
     output_language: StoryOutputLanguage = Field(
@@ -234,6 +240,7 @@ class StoryPatch(BaseModel):
     title: str | None = None
     premise: str | None = None
     target_total_words: int | None = Field(default=None, ge=1)
+    branch_count_override: int | None = Field(default=None, ge=1, le=64)
     plan_retry_limit: int | None = Field(default=None, ge=0, le=20)
     draft_loop_retry_limit: int | None = Field(default=None, ge=0, le=20)
     macro_author_notes: str | None = None
@@ -267,6 +274,14 @@ class ChapterRunRequest(BaseModel):
     waive_mandatory_node_ids: list[str] = Field(
         default_factory=list,
         description="Optional mandatory node ids to waive for extraction gate (same merge as extraction hints).",
+    )
+    selected_anchor_ids: list[str] = Field(
+        default_factory=list,
+        description="Optional human/director-selected anchor ids for this chapter (max 2).",
+    )
+    next_anchor_ids: list[str] = Field(
+        default_factory=list,
+        description="Optional post-chapter navigation anchor ids (must remain reachable).",
     )
 
     @field_validator("ai_freedom_level", mode="before")
@@ -408,6 +423,8 @@ class CharacterEvolutionRequest(BaseModel):
 
 
 class StateAnchor(BaseModel):
+    """Legacy runtime compatibility anchor row (DAG compile still emits anchor_nodes as source of truth)."""
+
     anchor_id: str
     story_id: str
     volume_id: str
@@ -418,24 +435,13 @@ class StateAnchor(BaseModel):
     priority: int = 1
 
 
-class MacroPlanAnchorBody(BaseModel):
-    """Anchor row for manual macro-plan PUT/PATCH (story_id set server-side)."""
-
-    anchor_id: str
-    volume_id: str
-    title: str = ""
-    description: str = ""
-    target_state: dict[str, Any] = Field(default_factory=dict)
-    chapter_target: int
-    priority: int = Field(default=1, ge=1)
-
-
 class MacroPlanPut(BaseModel):
     """Full replacement of macro-planned artifacts (manual edit; same persistence as macro compile)."""
 
     bible: dict[str, Any] = Field(default_factory=dict)
     volumes: list[VolumePlan] = Field(..., min_length=1)
-    anchors: list[MacroPlanAnchorBody] = Field(..., min_length=1)
+    storylines: list["Storyline"] = Field(default_factory=list)
+    anchor_nodes: list["AnchorNode"] = Field(..., min_length=1)
     cast: list[StoryCastMemberStored] = Field(default_factory=list)
     protagonist_character_id: str | None = None
 
@@ -504,6 +510,44 @@ class PlotSummarySource(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
+class StorylineTier(str, Enum):
+    MAIN = "MAIN"
+    S_TIER = "S_TIER"
+    A_TIER = "A_TIER"
+    B_TIER = "B_TIER"
+
+
+class AnchorStatus(str, Enum):
+    LOCKED = "LOCKED"
+    UNLOCKED = "UNLOCKED"
+    RESOLVED = "RESOLVED"
+
+
+class Storyline(BaseModel):
+    id: str
+    type: StorylineTier
+    title: str
+    overall_goal: str
+    involved_entities: list[str] = Field(default_factory=list)
+
+
+class AnchorNode(BaseModel):
+    id: str
+    storyline_ids: list[str] = Field(default_factory=list)
+    volume_id: str
+    node_kind: Literal["NORMAL", "FORK", "MERGE", "CHECKPOINT", "ENDING"] = "NORMAL"
+    title: str
+    description: str
+    depends_on: list[str] = Field(default_factory=list)
+    status: AnchorStatus = AnchorStatus.LOCKED
+
+
+class StoryMapState(BaseModel):
+    resolved_anchors: list[str] = Field(default_factory=list)
+    active_anchors: list[str] = Field(default_factory=list)
+    anchor_candidates: list[str] = Field(default_factory=list)
+
+
 class BStoryType(str, Enum):
     FETCH_QUEST = "FETCH_QUEST"
     RELATIONSHIP_DRAMA = "RELATIONSHIP_DRAMA"
@@ -569,6 +613,8 @@ class DirectorOutput(BaseModel):
     tone_direction: str
     target_anchor_id: Optional[str] = None
     chapter_type: ChapterType = ChapterType.PLOT_DRIVEN
+    selected_anchor_ids: list[str] = Field(default_factory=list)
+    next_anchor_ids: list[str] = Field(default_factory=list)
     b_story_directive: Optional[str] = None
     b_story_type: Optional[BStoryType] = None
     new_elements_to_introduce: list[DirectorNewElement] = Field(default_factory=list)
@@ -737,6 +783,8 @@ class PlannerOutput(BaseModel):
         description="Chapter length target: English=en word count (whitespace tokens); Chinese=normalized alnum character count; must match draft_supervisor measurement.",
     )
     chapter_start_location: str = ""
+    selected_anchor_ids: list[str] = Field(default_factory=list)
+    next_anchor_ids: list[str] = Field(default_factory=list)
     author_goal: str = ""
     must_include_beats: list[str] = Field(default_factory=list)
     must_include_beat_outlines: list[BeatOutline] = Field(default_factory=list)
@@ -839,6 +887,29 @@ class BStoryResolutionOutput(BaseModel):
     )
     resolution_evidence_event_ids: list[str] = Field(default_factory=list)
     resolved_b_stories: list[str] = Field(default_factory=list)
+
+
+class AnchorResolutionOutput(BaseModel):
+    resolution_analysis: str = Field(
+        ...,
+        min_length=20,
+        description="Resolver reasoning about planned anchors and chapter draft.",
+    )
+    resolved_anchor_ids: list[str] = Field(default_factory=list)
+    unresolved_anchor_ids: list[str] = Field(default_factory=list)
+    chapter_matches_plan: bool = False
+    evidence_summary: list[dict[str, Any]] = Field(default_factory=list)
+    decision_reason: str = ""
+    resolver_confidence: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="Resolver confidence (0..1). Use low values when evidence is ambiguous.",
+    )
+    requires_human_review: bool = Field(
+        default=False,
+        description="True only when resolver is uncertain and requests HITL adjudication.",
+    )
 
 
 class DraftSupervisorOutput(BaseModel):
@@ -1089,6 +1160,7 @@ class HitlReason:
     EXTRACTION_GATE_FAILED = "Extraction_Gate_Failed"
     B_STORY_RESOLUTION_FAILED = "B_Story_Resolution_Failed"
     B_STORY_COOLDOWN_VIOLATION = "B_Story_Cooldown_Violation"
+    ANCHOR_RESOLUTION_FAILED = "Anchor_Resolution_Failed"
     RESOLUTION_TACTIC_COOLDOWN_VIOLATION = "Resolution_Tactic_Cooldown_Violation"
     ENDING_VIBE_COOLDOWN_VIOLATION = "Ending_Vibe_Cooldown_Violation"
     CONTEXT_LENGTH_EXCEEDED = "Context_Length_Exceeded"
@@ -1253,6 +1325,14 @@ class HitlBStoryJudgementRequest(BaseModel):
     resolution_evidence_event_ids: list[str] = Field(default_factory=list)
     resolution_analysis: str = ""
     reject_resume_from: str = "extraction_gate"
+    reason: str = ""
+
+
+class HitlAnchorResolutionRequest(BaseModel):
+    action: Literal["force_resolve", "rewrite", "delay_anchor"]
+    resolved_anchor_ids: list[str] = Field(default_factory=list)
+    delayed_anchor_ids: list[str] = Field(default_factory=list)
+    reject_resume_from: str = "planner"
     reason: str = ""
 
 

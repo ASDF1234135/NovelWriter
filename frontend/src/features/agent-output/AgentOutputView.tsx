@@ -12,6 +12,30 @@ type Props = {
   variant?: "default" | "compact";
 };
 
+function redactVerboseState(
+  state: WorkflowPayload["state"],
+): WorkflowPayload["state"] {
+  const out = { ...(state ?? {}) };
+  delete out.anchor_candidates;
+  delete out.resolved_anchors;
+  delete out.llm_weave_debug;
+  return out;
+}
+
+function redactUnknownPayload(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => redactUnknownPayload(item));
+  if (value && typeof value === "object") {
+    const row = value as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(row)) {
+      if (key === "llm_weave_debug") continue;
+      out[key] = redactUnknownPayload(item);
+    }
+    return out;
+  }
+  return value;
+}
+
 export function AgentOutputView({ workflow, variant = "default" }: Props) {
   const { locale } = useI18n();
   const stepsEndRef = useRef<HTMLDivElement>(null);
@@ -67,7 +91,7 @@ export function AgentOutputView({ workflow, variant = "default" }: Props) {
                   {locale === "en" ? "Current State (Full)" : locale === "zh-Hans" ? "当前状态（完整）" : "目前狀態（完整）"}
                 </h3>
                 <pre className="auteur-pre max-h-[320px] max-w-full overflow-auto whitespace-pre-wrap break-all text-xs">
-                  {JSON.stringify(workflow.state, null, 2)}
+                  {JSON.stringify(redactVerboseState(workflow.state), null, 2)}
                 </pre>
               </article>
               <article className="min-w-0">
@@ -92,7 +116,7 @@ export function AgentOutputView({ workflow, variant = "default" }: Props) {
                           {locale === "en" ? `Step ${step.step_index}` : locale === "zh-Hans" ? `第 ${step.step_index} 步` : `第 ${step.step_index} 步`} · {workflowAgentStepLabel(step.agent_name)} · {locale === "en" ? "Route" : locale === "zh-Hans" ? "分支" : "分支"}：{branch} · {statusZh}
                         </summary>
                         <pre className="auteur-pre mt-2 max-h-[280px] max-w-full overflow-auto whitespace-pre-wrap break-all text-[11px]">
-                          {JSON.stringify(step.output_payload_json, null, 2)}
+                          {JSON.stringify(redactUnknownPayload(step.output_payload_json), null, 2)}
                         </pre>
                       </details>
                     );

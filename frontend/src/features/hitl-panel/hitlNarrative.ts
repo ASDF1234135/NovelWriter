@@ -81,9 +81,9 @@ export function buildHitlPrimaryHeadline(
     case HITL_REASON.EXTRACTION_GATE:
       return { headline: t("hitl.extraction.headline"), extraLine: buildExtractionEntityLine(state, t) };
     case HITL_REASON.B_STORY: {
-      const cand = asRecord(state.b_story_resolution_hitl_candidate);
+      const cand = asRecord(state.anchor_resolution_hitl_candidate ?? state.b_story_resolution_hitl_candidate);
       const name =
-        (cand && (String(cand.subplot_title ?? cand.title ?? cand.name ?? "").trim() || String(cand.id ?? "").trim())) ||
+        (cand && (String(cand.anchor_title ?? cand.title ?? cand.name ?? "").trim() || String(cand.id ?? "").trim())) ||
         t("hitl.bStoryResolve.nameFallback");
       return { headline: t("hitl.bStoryResolve.headline", "", { name }), extraLine: null };
     }

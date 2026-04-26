@@ -13,6 +13,7 @@ from app.domain.schema import (
     ChapterRunRequest,
     GraphQueryRequest,
     HitlAnchorDelayRequest,
+    HitlAnchorResolutionRequest,
     HitlBStoryJudgementRequest,
     HitlContextPruneRequest,
     HitlDecisionRequest,
@@ -78,7 +79,10 @@ def get_story_detail(
         "title": row["title"],
         "premise": row["premise"],
         "bible": row["bible_json"],
+        "storylines": list(row.get("storylines_json") or []),
+        "anchor_nodes": list(row.get("anchor_nodes_json") or []),
         "target_total_words": row["target_total_words"],
+        "branch_count_override": row.get("branch_count_override"),
         "plan_retry_limit": row["plan_retry_limit"],
         "draft_loop_retry_limit": row["draft_loop_retry_limit"],
         "output_language": normalize_output_language(str(row.get("output_language") or "")),
@@ -88,6 +92,8 @@ def get_story_detail(
         "macro_compile_updated_at": str(row.get("macro_compile_updated_at") or ""),
         "macro_compile_error": str(row.get("macro_compile_error") or ""),
         "configuration_locked": locked,
+        "macro_topology_mode": "fixed_fishbone",
+        "topology_locked": True,
     }
 
 
@@ -110,7 +116,10 @@ def patch_story(
         "title": row["title"],
         "premise": row["premise"],
         "bible": row["bible_json"],
+        "storylines": list(row.get("storylines_json") or []),
+        "anchor_nodes": list(row.get("anchor_nodes_json") or []),
         "target_total_words": row["target_total_words"],
+        "branch_count_override": row.get("branch_count_override"),
         "plan_retry_limit": row["plan_retry_limit"],
         "draft_loop_retry_limit": row["draft_loop_retry_limit"],
         "output_language": normalize_output_language(str(row.get("output_language") or "")),
@@ -120,6 +129,8 @@ def patch_story(
         "macro_compile_updated_at": str(row.get("macro_compile_updated_at") or ""),
         "macro_compile_error": str(row.get("macro_compile_error") or ""),
         "configuration_locked": locked,
+        "macro_topology_mode": "fixed_fishbone",
+        "topology_locked": True,
     }
 
 
@@ -199,6 +210,8 @@ def run_chapter(
             ai_freedom_level=run_body.ai_freedom_level,
             extraction_surface_hints=run_body.extraction_surface_hints,
             waive_mandatory_node_ids=run_body.waive_mandatory_node_ids,
+            selected_anchor_ids=run_body.selected_anchor_ids,
+            next_anchor_ids=run_body.next_anchor_ids,
         )
         run_id = payload["run"]["run_id"]
         background_tasks.add_task(workflow_service.execute_stored_run, run_id)
@@ -442,6 +455,23 @@ def hitl_extraction_remap(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+@router.post("/workflows/{run_id}/hitl/anchor-resolution")
+def hitl_anchor_resolution(
+    run_id: str,
+    request: HitlAnchorResolutionRequest,
+    background_tasks: BackgroundTasks,
+    workflow_service: WorkflowService = Depends(get_workflow_service),
+) -> dict:
+    try:
+        workflow_service.apply_hitl_anchor_resolution(run_id, request)
+        background_tasks.add_task(workflow_service.execute_stored_run, run_id)
+        return workflow_service.get_workflow(run_id)
+    except HitlNotWaitingError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.post("/workflows/{run_id}/hitl/b-story-judgement")
 def hitl_b_story_judgement(
     run_id: str,
@@ -449,6 +479,7 @@ def hitl_b_story_judgement(
     background_tasks: BackgroundTasks,
     workflow_service: WorkflowService = Depends(get_workflow_service),
 ) -> dict:
+    """Backward-compatible endpoint kept for older frontend clients."""
     try:
         workflow_service.apply_hitl_b_story_judgement(run_id, request)
         background_tasks.add_task(workflow_service.execute_stored_run, run_id)

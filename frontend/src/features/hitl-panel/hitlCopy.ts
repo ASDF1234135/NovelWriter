@@ -12,7 +12,7 @@ export const HITL_REASON = {
   PLAN_LOOP: "Plan_Loop_Exceeded",
   DRAFT_LOOP: "Draft_Loop_Exceeded",
   EXTRACTION_GATE: "Extraction_Gate_Failed",
-  B_STORY: "B_Story_Resolution_Failed",
+  B_STORY: "Anchor_Resolution_Failed",
   B_STORY_COOLDOWN: "B_Story_Cooldown_Violation",
   RESOLUTION_TACTIC: "Resolution_Tactic_Cooldown_Violation",
   ENDING_VIBE: "Ending_Vibe_Cooldown_Violation",
@@ -33,7 +33,7 @@ export const FLOW_STEPS = [
   { id: "draft_supervisor", userLabel: pick("內文審核", "正文审核", "Draft Review") },
   { id: "reader", userLabel: pick("閱讀檢查", "阅读检查", "Reader Check") },
   { id: "extraction_gate", userLabel: pick("設定歸檔", "设定归档", "Extraction Gate") },
-  { id: "b_story_resolve", userLabel: pick("副線收尾", "副线收尾", "Subplot Resolve") },
+  { id: "anchor_resolve", userLabel: pick("錨點結算", "锚点结算", "Anchor Resolve") },
   { id: "state_updater", userLabel: pick("完稿更新", "完稿更新", "State Update") },
 ] as const;
 
@@ -49,7 +49,7 @@ const RESUME_TO_STEP_INDEX: Record<string, number> = {
   extraction_gate: 8,
   output_language_gate: 9,
   chapter_summarizer: 9,
-  b_story_resolve: 9,
+  anchor_resolve: 9,
   state_updater: 10,
 };
 
@@ -371,7 +371,7 @@ export const HINTS_RESUME_OPTIONS: { value: string; label: string }[] = [
 export const B_STORY_REJECT_RESUME_OPTIONS: { value: string; label: string }[] = [
   { value: "extraction_gate", label: pick("設定歸檔", "设定归档", "Extraction Gate") },
   { value: "author", label: pick("撰寫內文", "撰写正文", "Write Draft") },
-  { value: "b_story_resolve", label: pick("副線收尾", "副线收尾", "Subplot Resolve") },
+  { value: "anchor_resolve", label: pick("錨點結算", "锚点结算", "Anchor Resolve") },
 ];
 
 export function isPlanFamilyReason(reason: string): boolean {

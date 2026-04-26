@@ -71,11 +71,10 @@ type Props = {
     waive_mandatory_node_ids?: string[];
     reason?: string;
   }) => Promise<void>;
-  onBStoryJudgement?: (payload: {
-    action: "force_resolve" | "reject";
-    resolved_b_stories?: string[];
-    resolution_evidence_event_ids?: string[];
-    resolution_analysis?: string;
+  onAnchorResolution?: (payload: {
+    action: "force_resolve" | "rewrite" | "delay_anchor";
+    resolved_anchor_ids?: string[];
+    delayed_anchor_ids?: string[];
     reject_resume_from?: string;
     reason?: string;
   }) => Promise<void>;
@@ -161,7 +160,7 @@ export function HitlPanel({
   onDraftEdit,
   onDirectorPatch = asyncNoop,
   onExtractionRemap = asyncNoop,
-  onBStoryJudgement = asyncNoop,
+  onAnchorResolution = asyncNoop,
   onAnchorDelay = asyncNoop,
   onContextPrune = asyncNoop,
 }: Props) {
@@ -319,12 +318,21 @@ export function HitlPanel({
     if (reason === HITL_REASON.B_STORY) {
       setBStoryRejectOpen(false);
       setValue("bRejectNote", "");
-      const cand = st.b_story_resolution_hitl_candidate;
+      const cand = st.anchor_resolution_hitl_candidate ?? st.b_story_resolution_hitl_candidate;
       if (cand && typeof cand === "object") {
         setValue("bAnalysis", JSON.stringify(cand, null, 2));
         const c = cand as Record<string, unknown>;
-        const suggestedB = Array.isArray(c.suggested_resolved_b_stories) ? c.suggested_resolved_b_stories : [];
-        const suggestedE = Array.isArray(c.suggested_resolution_evidence_event_ids) ? c.suggested_resolution_evidence_event_ids : [];
+        const suggestedB = Array.isArray(c.resolved_anchor_ids) ? c.resolved_anchor_ids : [];
+        const evidenceRows = Array.isArray(c.evidence_summary) ? c.evidence_summary : [];
+        const suggestedE = evidenceRows
+          .map((row) => {
+            if (!row || typeof row !== "object") return "";
+            const r = row as Record<string, unknown>;
+            const aid = String(r.anchor_id ?? "").trim();
+            const reasonTxt = String(r.decision_reason ?? "").trim();
+            return [aid, reasonTxt].filter(Boolean).join(": ");
+          })
+          .filter(Boolean);
         setValue(
           "bResolved",
           suggestedB.map((x) => String(x).trim()).filter(Boolean),
@@ -443,6 +451,14 @@ export function HitlPanel({
             ) : null}
             {hitlContext?.primary_issue && reason !== HITL_REASON.ALIGNMENT_RULES_REQUIRED ? (
               <p className="mt-2 rounded-md bg-surface-container-highest/60 px-2 py-2 font-body text-xs text-on-surface">{hitlContext.primary_issue}</p>
+            ) : null}
+            {reason === HITL_REASON.B_STORY && String(hitlContext?.problematic_draft_snippet ?? "").trim() ? (
+              <div className="mt-3 rounded-md border border-outline-variant/20 bg-surface-container-low/70 px-2 py-2">
+                <p className="font-label text-[10px] uppercase tracking-wider text-on-surface-variant">{t("hitl.draft.title")}</p>
+                <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap font-body text-xs text-on-surface">
+                  {String(hitlContext?.problematic_draft_snippet ?? "").trim()}
+                </pre>
+              </div>
             ) : null}
             {hitlContext?.context_metadata?.payload_type === "output_language" &&
             hitlContext.context_metadata.expected_output_language ? (
@@ -865,11 +881,10 @@ export function HitlPanel({
                     className="rounded-xl border border-tertiary/40 bg-tertiary/15 px-4 py-4 text-left font-label text-sm font-semibold text-tertiary transition-colors hover:bg-tertiary/25 disabled:opacity-40"
                     disabled={controlsLocked}
                     onClick={() =>
-                      onBStoryJudgement({
+                      onAnchorResolution({
                         action: "force_resolve",
-                        resolved_b_stories: watch("bResolved"),
-                        resolution_evidence_event_ids: watch("bEvidence"),
-                        resolution_analysis: watch("bAnalysis"),
+                        resolved_anchor_ids: watch("bResolved"),
+                        reason: watch("bAnalysis"),
                       })
                     }
                   >
@@ -902,10 +917,10 @@ export function HitlPanel({
                         className={btnClass + " sm:flex-1"}
                         disabled={controlsLocked}
                         onClick={() =>
-                          void onBStoryJudgement({
-                            action: "reject",
+                          void onAnchorResolution({
+                            action: "rewrite",
                             reject_resume_from: watch("bRejectResume"),
-                            reason: (getValues("bRejectNote").trim() || getValues("bAnalysis")).slice(0, 500),
+                            reason: (getValues("bRejectNote").trim() || getValues("bAnalysis")).slice(0, 800),
                           })
                         }
                       >

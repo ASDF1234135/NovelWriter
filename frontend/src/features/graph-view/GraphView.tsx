@@ -13,6 +13,8 @@ type Props = {
 type RawNode = Record<string, unknown>;
 type RawEdge = Record<string, unknown>;
 type ViewMode = "all" | "ego" | "location-item" | "epoch";
+type LayoutMode = "fixed" | "dagre-ltr";
+type DagEditMode = "read" | "edit";
 
 const EDGE_LIMIT = 400;
 const EPOCH_DEBOUNCE_MS = 300;
@@ -83,6 +85,38 @@ function bfsNeighborhood(nodeIds: Set<string>, edges: RawEdge[], centerId: strin
   return visited;
 }
 
+function detectCycle(nodes: RawNode[], edges: RawEdge[]): boolean {
+  const ids = new Set(nodes.map((n) => toNodeId(n.node_id)).filter(Boolean));
+  const indeg = new Map<string, number>();
+  const graph = new Map<string, string[]>();
+  for (const id of ids) {
+    indeg.set(id, 0);
+    graph.set(id, []);
+  }
+  for (const e of edges) {
+    const s = String(e.source_id ?? "");
+    const t = String(e.target_id ?? "");
+    if (!ids.has(s) || !ids.has(t) || s === t) continue;
+    graph.get(s)?.push(t);
+    indeg.set(t, (indeg.get(t) ?? 0) + 1);
+  }
+  const q: string[] = [];
+  for (const [id, d] of indeg.entries()) {
+    if (d === 0) q.push(id);
+  }
+  let seen = 0;
+  while (q.length > 0) {
+    const cur = q.shift()!;
+    seen += 1;
+    for (const nxt of graph.get(cur) ?? []) {
+      const d = (indeg.get(nxt) ?? 1) - 1;
+      indeg.set(nxt, d);
+      if (d === 0) q.push(nxt);
+    }
+  }
+  return seen !== ids.size;
+}
+
 export function GraphView({ graph, protagonistCharacterId }: Props) {
   const { locale } = useI18n();
   const nodes = (graph?.nodes ?? []) as RawNode[];
@@ -94,6 +128,8 @@ export function GraphView({ graph, protagonistCharacterId }: Props) {
   const [pendingEpochIndex, setPendingEpochIndex] = useState(0);
   const [activeEpochIndex, setActiveEpochIndex] = useState(0);
   const [pruneIsolatedNodes, setPruneIsolatedNodes] = useState(true);
+  const [layoutMode, setLayoutMode] = useState<LayoutMode>("dagre-ltr");
+  const [dagEditMode, setDagEditMode] = useState<DagEditMode>("read");
 
   useEffect(() => {
     const timer = window.setTimeout(() => setActiveEpochIndex(pendingEpochIndex), EPOCH_DEBOUNCE_MS);
@@ -226,6 +262,10 @@ export function GraphView({ graph, protagonistCharacterId }: Props) {
   const displayNodes = pruneIsolatedNodes
     ? nodesWithEdges
     : ((filteredGraph.nodes ?? []) as RawNode[]);
+  const dagCycleDetected = useMemo(
+    () => detectCycle(displayNodes, drawnEdges),
+    [displayNodes, drawnEdges],
+  );
   const hasCharacterInGraph = displayNodes.some((n) => String(n.node_type).toUpperCase() === "CHARACTER");
 
   return (
@@ -345,7 +385,42 @@ export function GraphView({ graph, protagonistCharacterId }: Props) {
                   {locale === "en" ? "Prune orphan nodes" : locale === "zh-Hans" ? "清理孤立节点（Orphan）" : "清理無邊界點（Orphan）"}
                 </span>
               </label>
+              <label className="flex flex-col gap-1 md:col-span-2">
+                <span className="font-label text-[11px] uppercase tracking-wider text-on-surface-variant">
+                  {locale === "en" ? "Layout Strategy" : locale === "zh-Hans" ? "布局策略" : "佈局策略"}
+                </span>
+                <select
+                  className="rounded-lg border border-outline-variant/20 bg-surface-container-lowest px-2 py-2 text-sm"
+                  value={layoutMode}
+                  onChange={(e) => setLayoutMode(e.target.value as LayoutMode)}
+                >
+                  <option value="dagre-ltr">Hierarchical Left-to-Right (Dagre)</option>
+                  <option value="fixed">Fixed Positioning</option>
+                </select>
+              </label>
+              <label className="flex flex-col gap-1 md:col-span-2">
+                <span className="font-label text-[11px] uppercase tracking-wider text-on-surface-variant">
+                  {locale === "en" ? "DAG Edit Mode" : locale === "zh-Hans" ? "DAG 编辑模式" : "DAG 編輯模式"}
+                </span>
+                <select
+                  className="rounded-lg border border-outline-variant/20 bg-surface-container-lowest px-2 py-2 text-sm"
+                  value={dagEditMode}
+                  onChange={(e) => setDagEditMode(e.target.value as DagEditMode)}
+                >
+                  <option value="read">{locale === "en" ? "Read" : locale === "zh-Hans" ? "只读" : "唯讀"}</option>
+                  <option value="edit">{locale === "en" ? "Edit" : locale === "zh-Hans" ? "编辑" : "編輯"}</option>
+                </select>
+              </label>
             </div>
+            {dagEditMode === "edit" && dagCycleDetected ? (
+              <div className="mb-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+                {locale === "en"
+                  ? "Cycle detected. DAG guardrail would block edit-save."
+                  : locale === "zh-Hans"
+                    ? "检测到循环依赖，DAG 防护会阻止保存。"
+                    : "偵測到循環依賴，DAG 防護會阻擋儲存。"}
+              </div>
+            ) : null}
 
             <h3 className="mb-3 font-headline text-sm font-bold uppercase tracking-wider text-secondary">
               {locale === "en"
@@ -372,7 +447,13 @@ export function GraphView({ graph, protagonistCharacterId }: Props) {
               <>
                 <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-2">
                   <span className="font-label text-[10px] uppercase tracking-wider text-on-surface-variant">
-                    {viewMode === "ego"
+                    {layoutMode === "fixed"
+                      ? locale === "en"
+                        ? "Layout: Fixed Positioning"
+                        : locale === "zh-Hans"
+                          ? "布局：固定坐标"
+                          : "佈局：固定座標"
+                      : viewMode === "ego"
                       ? locale === "en"
                         ? "Layout: Concentric/Radial (Ego)"
                         : locale === "zh-Hans"
@@ -419,6 +500,7 @@ export function GraphView({ graph, protagonistCharacterId }: Props) {
                   graph={filteredGraph}
                   protagonistCharacterId={viewMode === "ego" ? selectedEgoCenterId || protagonistCharacterId : protagonistCharacterId}
                   viewMode={viewMode}
+                  layoutMode={layoutMode}
                   pruneIsolatedNodes={pruneIsolatedNodes}
                   onSetEgoCenter={(nodeId) => {
                     setViewMode("ego");
