@@ -5,10 +5,7 @@ import type { Anchor, CastMember, MacroCompileData, MacroPlanPutBody, VolumePlan
 import { putMacroPlan } from "../../api";
 import {
   BIBLE_LINE_KEYS,
-  type BStoryRow,
   type ExtraRow,
-  asLines,
-  bStoriesToPayload,
   buildExtraObject,
   extractAnchorGoal,
   findOverlappingVolumes,
@@ -16,8 +13,6 @@ import {
   mergeMacroBibles,
   newLocalId,
   normalizeAnchors,
-  parseNonEmptyLines,
-  parseBStories,
   splitBibleForForm,
 } from "./macroPlanHelpers";
 import { useI18n } from "../../i18n/useI18n";
@@ -36,26 +31,17 @@ type EditSurface = "off" | "bible" | "volume" | "cast";
 
 const FIELD_LABELS: Record<(typeof BIBLE_LINE_KEYS)[number], { "zh-Hant": string; "zh-Hans": string; en: string }> = {
   genre: { "zh-Hant": "故事類型", "zh-Hans": "故事类型", en: "Genre" },
-  tone: { "zh-Hant": "氛圍基調", "zh-Hans": "氛围基调", en: "Tone" },
-  theme: { "zh-Hant": "主題（選填）", "zh-Hans": "主题（选填）", en: "Theme (optional)" },
-  narrative_pov: { "zh-Hant": "敘事視角（選填）", "zh-Hans": "叙事视角（选填）", en: "Narrative POV (optional)" },
-  writing_style: { "zh-Hant": "文風（選填）", "zh-Hans": "文风（选填）", en: "Writing Style (optional)" },
-  world_rules: { "zh-Hant": "世界規則", "zh-Hans": "世界规则", en: "World Rules" },
-  factions: { "zh-Hant": "勢力與陣營", "zh-Hans": "势力与阵营", en: "Factions" },
-  writing_note: { "zh-Hant": "寫作備註", "zh-Hans": "写作备注", en: "Writing Notes" },
+  general_world_lore: {
+    "zh-Hant": "世界與寫作設定（Markdown）",
+    "zh-Hans": "世界与写作设定（Markdown）",
+    en: "World & craft lore (Markdown)",
+  },
 };
 
 type FormState = {
   genre: string;
-  tone: string;
-  theme: string;
-  narrative_pov: string;
-  writing_style: string;
-  world_rules: string;
-  factions: string;
-  writing_note: string;
+  generalWorldLore: string;
   extraRows: ExtraRow[];
-  activeBStories: BStoryRow[];
 };
 
 type AnchorEdit = {
@@ -84,45 +70,24 @@ function toFormState(macro: MacroCompileData): FormState {
   const split = splitBibleForForm(bible as Record<string, unknown>);
   return {
     genre: String(bible.story_genre ?? bible.genre ?? "").trim(),
-    tone: asLines(bible.tone),
-    theme: asLines(bible.theme ?? bible.themes),
-    narrative_pov: asLines(bible.narrative_pov),
-    writing_style: asLines(bible.writing_style),
-    world_rules: asLines(bible.world_rules),
-    factions: asLines(bible.factions),
-    writing_note: asLines(bible.writing_note),
+    generalWorldLore: split.generalWorldLore,
     extraRows: split.extraRows,
-    activeBStories: split.activeBStories,
   };
 }
 
 function emptyFormState(): FormState {
   return {
     genre: "",
-    tone: "",
-    theme: "",
-    narrative_pov: "",
-    writing_style: "",
-    world_rules: "",
-    factions: "",
-    writing_note: "",
+    generalWorldLore: "",
     extraRows: [],
-    activeBStories: [],
   };
 }
 
 function buildBiblePayload(form: FormState): Record<string, unknown> {
   return {
     genre: form.genre.trim(),
-    tone: form.tone.trim(),
-    theme: form.theme.trim(),
-    narrative_pov: form.narrative_pov.trim(),
-    writing_style: form.writing_style.trim(),
-    world_rules: parseNonEmptyLines(form.world_rules),
-    factions: parseNonEmptyLines(form.factions),
-    writing_note: parseNonEmptyLines(form.writing_note),
+    general_world_lore: form.generalWorldLore.trim(),
     extra: buildExtraObject(form.extraRows),
-    active_b_stories: bStoriesToPayload(form.activeBStories),
   };
 }
 
@@ -157,15 +122,11 @@ function findVolumeIdByChapter(
 }
 
 function formatBibleReadRows(locale: "zh-Hant" | "zh-Hans" | "en", form: FormState): Array<{ label: string; value: string }> {
+  const lore = form.generalWorldLore.trim();
+  const preview = lore.length > 900 ? `${lore.slice(0, 900)}…` : lore;
   return [
     { label: FIELD_LABELS.genre[locale], value: form.genre.trim() || "—" },
-    { label: FIELD_LABELS.tone[locale], value: form.tone.trim() || "—" },
-    { label: tr(locale, "主題", "主题", "Theme"), value: form.theme.trim() || "—" },
-    { label: tr(locale, "敘事視角", "叙事视角", "Narrative POV"), value: form.narrative_pov.trim() || "—" },
-    { label: tr(locale, "文風", "文风", "Writing Style"), value: form.writing_style.trim() || "—" },
-    { label: FIELD_LABELS.world_rules[locale], value: form.world_rules.trim() || "—" },
-    { label: FIELD_LABELS.factions[locale], value: form.factions.trim() || "—" },
-    { label: FIELD_LABELS.writing_note[locale], value: form.writing_note.trim() || "—" },
+    { label: FIELD_LABELS.general_world_lore[locale], value: preview || "—" },
   ];
 }
 
@@ -196,7 +157,6 @@ export function MacroPlanPanel({
   const [draftMacro, setDraftMacro] = useState<MacroCompileData | null>(null);
   const [form, setForm] = useState<FormState>(emptyFormState());
   const [selectedEntityId, setSelectedEntityId] = useState<string | null>(null);
-  const [selectedBStoryId, setSelectedBStoryId] = useState<string | null>(null);
   const [anchorEdits, setAnchorEdits] = useState<Record<string, AnchorEdit>>({});
   const [inlineError, setInlineError] = useState("");
 
@@ -209,7 +169,6 @@ export function MacroPlanPanel({
     setDraftMacro(null);
     setForm(macroData ? toFormState(macroData) : emptyFormState());
     setSelectedEntityId(null);
-    setSelectedBStoryId(null);
     setAnchorEdits(macroData ? anchorEditsFromMacro(macroData.anchors) : {});
     setInlineError("");
   }, [macroData]);
@@ -220,7 +179,6 @@ export function MacroPlanPanel({
       setDraftMacro(null);
       setForm(emptyFormState());
       setSelectedEntityId(null);
-      setSelectedBStoryId(null);
       setAnchorEdits({});
       setInlineError("");
       return;
@@ -229,7 +187,6 @@ export function MacroPlanPanel({
     setDraftMacro(null);
     setForm(toFormState(macroData));
     setSelectedEntityId(null);
-    setSelectedBStoryId(null);
     setAnchorEdits(anchorEditsFromMacro(macroData.anchors));
     setInlineError("");
   }
@@ -266,7 +223,6 @@ export function MacroPlanPanel({
     ensureDraft();
     setEditSurface("bible");
     setSelectedEntityId(null);
-    setSelectedBStoryId(null);
   }
 
   function startEditVolume(volumeId: string) {
@@ -285,20 +241,38 @@ export function MacroPlanPanel({
 
   function validateAndBuildPutBody(d: MacroCompileData, biblePayload: Record<string, unknown>): MacroPlanPutBody {
     const genre = String(biblePayload.genre ?? "").trim();
-    const tone = String(biblePayload.tone ?? "").trim();
-    if (!genre) throw new Error("請填寫「故事類型」。");
-    if (!tone) throw new Error("請填寫「氛圍基調」。");
-    const wr = biblePayload.world_rules;
-    const fac = biblePayload.factions;
-    const wn = biblePayload.writing_note;
-    if (!Array.isArray(wr) || wr.length === 0) throw new Error("請至少填寫一條「世界規則」。");
-    if (!Array.isArray(fac) || fac.length === 0) throw new Error("請至少填寫一條「勢力與陣營」。");
-    if (!Array.isArray(wn) || wn.length === 0) throw new Error("請至少填寫一條「寫作備註」。");
+    const lore = String(biblePayload.general_world_lore ?? "").trim();
+    if (!genre) {
+      throw new Error(tr(locale, "請填寫「故事類型」。", "请填写「故事类型」。", "Please fill in Genre."));
+    }
+    if (!lore || lore.length < 12) {
+      throw new Error(
+        tr(
+          locale,
+          "請填寫「世界與寫作設定」（至少一小段說明）。",
+          "请填写「世界与写作设定」（至少一小段说明）。",
+          "Please add world & craft lore (at least a short paragraph).",
+        ),
+      );
+    }
 
     const mergedBible = mergeMacroBibles(
       biblePayload as Record<string, unknown>,
       isObjectRecord(d.bible) ? d.bible : {},
     );
+    for (const k of [
+      "tone",
+      "theme",
+      "themes",
+      "narrative_pov",
+      "writing_style",
+      "world_rules",
+      "factions",
+      "writing_note",
+      "active_b_stories",
+    ] as const) {
+      delete (mergedBible as Record<string, unknown>)[k];
+    }
     const mergedGenre = String(mergedBible.genre ?? mergedBible.story_genre ?? "").trim();
     if (!mergedGenre) {
       (mergedBible as Record<string, unknown>).genre = genre;
@@ -568,21 +542,6 @@ export function MacroPlanPanel({
     setSelectedEntityId(id);
   }
 
-  function addBStory() {
-    const dm = ensureDraft();
-    if (!dm) return;
-    const id = newLocalId("bs");
-    const row: BStoryRow = { id, desc: "", type: "UNKNOWN", resolution_condition: "" };
-    setForm((f) => ({ ...f, activeBStories: [...f.activeBStories, row] }));
-    setSelectedBStoryId(id);
-    setEditSurface("bible");
-  }
-
-  function removeBStory(id: string) {
-    setForm((f) => ({ ...f, activeBStories: f.activeBStories.filter((r) => r.id !== id) }));
-    if (selectedBStoryId === id) setSelectedBStoryId(null);
-  }
-
   const sortedVolumes = useMemo(() => [...(displayMacro?.volumes ?? [])], [displayMacro?.volumes]);
   const castList = displayMacro?.cast ?? [];
   const castByNodeId = useMemo(() => {
@@ -688,10 +647,10 @@ export function MacroPlanPanel({
               </h3>
               <p className="mt-1 text-xs text-on-surface-variant">
                 {locale === "en"
-                  ? "Book-level world settings and long-arc subplots (maintained separately from story settings bible fields)."
+                  ? "Book-level genre tag plus one Markdown field for world-building and craft rules (separate from topology tabs)."
                   : locale === "zh-Hans"
-                    ? "全书世界设定与长线副线（与故事设置中的圣经栏位分开维护）。"
-                    : "全書世界設定與長線副線（與故事設定中的聖經欄位分開維護）。"}
+                    ? "全书层面的类型标签与单一 Markdown 世界／写作设定（剧情线与锚点仍在其他分页）。"
+                    : "全書層面的類型標籤與單一 Markdown 世界／寫作設定（劇情線與錨點仍在其他分頁）。"}
               </p>
             </div>
             {canEdit && editSurface !== "bible" ? (
@@ -707,13 +666,6 @@ export function MacroPlanPanel({
 
           {editSurface === "bible" && canEdit ? (
             <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center sm:gap-2">
-              <button
-                type="button"
-                onClick={addBStory}
-                className="rounded-lg bg-surface-container-highest px-3 py-2 text-sm font-medium text-on-surface ring-1 ring-outline-variant/20"
-              >
-                {tr(locale, "新增長線副線", "新增长线副线", "Add Long-arc Subplot")}
-              </button>
               <button
                 type="button"
                 onClick={() =>
@@ -732,101 +684,28 @@ export function MacroPlanPanel({
           {editSurface === "bible" && canEdit ? (
             <div className="space-y-4">
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                {BIBLE_LINE_KEYS.map((key) => (
-                  <label key={key} className="block min-w-0">
-                    <span className="mb-1 block font-label text-[10px] font-semibold uppercase tracking-wide text-on-surface-variant">
-                      {FIELD_LABELS[key][locale]}
-                    </span>
-                    {key === "genre" || key === "tone" ? (
-                      <input
-                        value={key === "genre" ? form.genre : form.tone}
-                        onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
-                        className="w-full rounded-lg border border-outline-variant/25 bg-surface-container-highest px-3 py-2 text-sm text-on-surface"
-                      />
-                    ) : (
-                      <textarea
-                        value={String(form[key as keyof FormState] ?? "")}
-                        onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
-                        rows={4}
-                        className="w-full resize-y rounded-lg border border-outline-variant/25 bg-surface-container-highest px-3 py-2 text-sm text-on-surface"
-                      />
-                    )}
-                  </label>
-                ))}
-              </div>
-
-              <div>
-                <h4 className="mb-2 font-body text-sm font-semibold text-on-surface">
-                  {tr(locale, "長線副線", "长线副线", "Long-arc Subplots")}
-                </h4>
-                <div className="space-y-3">
-                  {form.activeBStories.map((row) => {
-                    const selected = selectedBStoryId === row.id;
-                    return (
-                      <div
-                        key={row.id}
-                        className={`rounded-xl border p-3 ${selected ? "border-secondary/50 bg-secondary/5" : "border-outline-variant/15 bg-surface-container-highest/60"}`}
-                      >
-                        <div className="grid grid-cols-12 gap-3">
-                          <div className="col-span-12 sm:col-span-2">
-                            <ReadonlyId label={tr(locale, "內部編號", "内部编号", "Internal ID")} value={row.id} />
-                          </div>
-                          <label className="col-span-12 block min-w-0 sm:col-span-5">
-                            <span className="mb-1 block font-label text-[10px] font-semibold text-on-surface-variant">
-                              {tr(locale, "說明", "说明", "Description")}
-                            </span>
-                            <textarea
-                              value={row.desc}
-                              onChange={(e) =>
-                                setForm((f) => ({
-                                  ...f,
-                                  activeBStories: f.activeBStories.map((r) =>
-                                    r.id === row.id ? { ...r, desc: e.target.value } : r,
-                                  ),
-                                }))
-                              }
-                              rows={3}
-                              className="w-full resize-y rounded-lg border border-outline-variant/25 bg-surface-container-highest px-3 py-2 text-sm"
-                            />
-                          </label>
-                          <div className="col-span-12 sm:col-span-2">
-                            <ReadonlyId
-                              label={tr(locale, "類型（自動）", "类型（自动）", "Type (auto)")}
-                              value={row.type === "UNKNOWN" || !row.type ? tr(locale, "未分類", "未分类", "Uncategorized") : row.type}
-                            />
-                          </div>
-                          <label className="col-span-12 block min-w-0 sm:col-span-2">
-                            <span className="mb-1 block font-label text-[10px] font-semibold text-on-surface-variant">
-                              {tr(locale, "收尾條件", "收尾条件", "Resolution Condition")}
-                            </span>
-                            <textarea
-                              value={row.resolution_condition}
-                              onChange={(e) =>
-                                setForm((f) => ({
-                                  ...f,
-                                  activeBStories: f.activeBStories.map((r) =>
-                                    r.id === row.id ? { ...r, resolution_condition: e.target.value } : r,
-                                  ),
-                                }))
-                              }
-                              rows={3}
-                              className="w-full resize-y rounded-lg border border-outline-variant/25 bg-surface-container-highest px-3 py-2 text-sm"
-                            />
-                          </label>
-                          <div className="col-span-12 flex items-end justify-end sm:col-span-1">
-                            <button
-                              type="button"
-                              onClick={() => removeBStory(row.id)}
-                              className="rounded-lg border border-outline-variant/30 px-2 py-1 text-xs text-on-surface-variant hover:bg-surface-container"
-                            >
-                              {tr(locale, "移除", "移除", "Remove")}
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
+                <label className="block min-w-0 md:col-span-2">
+                  <span className="mb-1 block font-label text-[10px] font-semibold uppercase tracking-wide text-on-surface-variant">
+                    {FIELD_LABELS.genre[locale]}
+                  </span>
+                  <input
+                    value={form.genre}
+                    onChange={(e) => setForm((f) => ({ ...f, genre: e.target.value }))}
+                    className="w-full max-w-xl rounded-lg border border-outline-variant/25 bg-surface-container-highest px-3 py-2 text-sm text-on-surface"
+                  />
+                </label>
+                <label className="block min-w-0 md:col-span-2">
+                  <span className="mb-1 block font-label text-[10px] font-semibold uppercase tracking-wide text-on-surface-variant">
+                    {FIELD_LABELS.general_world_lore[locale]}
+                  </span>
+                  <textarea
+                    value={form.generalWorldLore}
+                    onChange={(e) => setForm((f) => ({ ...f, generalWorldLore: e.target.value }))}
+                    rows={18}
+                    className="w-full resize-y rounded-lg border border-outline-variant/25 bg-surface-container-highest px-3 py-2 font-mono text-sm leading-relaxed text-on-surface"
+                    spellCheck={false}
+                  />
+                </label>
               </div>
 
               <div>
@@ -914,21 +793,6 @@ export function MacroPlanPanel({
                   <p className="whitespace-pre-wrap">{row.value}</p>
                 </div>
               ))}
-              <div>
-                <p className="text-on-surface-variant">{tr(locale, "長線副線", "长线副线", "Long-arc Subplots")}</p>
-                <ul className="mt-1 list-disc space-y-1 pl-5">
-                  {parseBStories(macroData.bible?.active_b_stories).map((r) => (
-                    <li key={r.id}>
-                      <p>{r.desc || r.id}</p>
-                      {r.resolution_condition ? (
-                        <p className="text-xs text-on-surface-variant">
-                          {tr(locale, "收尾條件", "收尾条件", "Resolution Condition")}：{r.resolution_condition}
-                        </p>
-                      ) : null}
-                    </li>
-                  ))}
-                </ul>
-              </div>
               <div>
                 <p className="text-on-surface-variant">{tr(locale, "延伸筆記", "延伸笔记", "Extra Notes")}</p>
                 <div className="mt-1 space-y-2">

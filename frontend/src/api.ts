@@ -15,7 +15,11 @@ import type {
   RegenerateChapterSummaryResponse,
 } from "./types";
 
+import { NB_ERR_SSE_DISCONNECTED } from "./apiErrorCodes";
+
 const API_BASE = "http://localhost:8000/api";
+
+export { NB_ERR_SSE_DISCONNECTED } from "./apiErrorCodes";
 
 function formatErrorBody(text: string): string {
   if (!text) return "Request failed";
@@ -431,7 +435,7 @@ export function subscribeWorkflowEvents(
 
   es.onerror = () => {
     if (finished || es.readyState === EventSource.CLOSED) return;
-    handlers.onError?.(new Error("與伺服器的即時連線中斷，請重新整理或再試一次"));
+    handlers.onError?.(new Error(NB_ERR_SSE_DISCONNECTED));
     finish();
   };
 

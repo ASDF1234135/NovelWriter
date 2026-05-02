@@ -2,15 +2,15 @@ import { describe, expect, it } from "vitest";
 import { buildExtraObject, extractAnchorGoal, findOverlappingVolumes, mergeMacroBibles, normalizeAnchors, splitBibleForForm } from "./macroPlanHelpers";
 
 describe("splitBibleForForm", () => {
-  it("migrates top-level tags into extra rows and preserves active_b_stories", () => {
-    const { extraRows, activeBStories } = splitBibleForForm({
+  it("migrates top-level tags into extra rows and synthesizes lore when general_world_lore is missing", () => {
+    const { extraRows, generalWorldLore } = splitBibleForForm({
       genre: "科幻",
       tags: ["A", "B"],
-      active_b_stories: [{ id: "x1", desc: "副線", type: "UNKNOWN", resolution_condition: "" }],
+      active_b_stories: [{ id: "x1", desc: "ignored", type: "UNKNOWN", resolution_condition: "" }],
     });
     expect(extraRows.some((r) => r.key === "tags" && r.isList)).toBe(true);
-    expect(activeBStories).toHaveLength(1);
-    expect(activeBStories[0]?.id).toBe("x1");
+    expect(generalWorldLore).toContain("Genre");
+    expect(generalWorldLore).toContain("科幻");
   });
 
   it("reads nested extra object", () => {
@@ -37,6 +37,15 @@ describe("splitBibleForForm", () => {
     expect(extraRows.some((r) => r.key === "narrative_pov")).toBe(false);
     expect(extraRows.some((r) => r.key === "writing_style")).toBe(false);
   });
+
+  it("uses existing general_world_lore when set", () => {
+    const { generalWorldLore } = splitBibleForForm({
+      genre: "X",
+      general_world_lore: "## Custom\n\nbody",
+      tone: "should not duplicate into lore string when lore exists",
+    });
+    expect(generalWorldLore).toBe("## Custom\n\nbody");
+  });
 });
 
 describe("buildExtraObject", () => {
@@ -58,14 +67,17 @@ describe("mergeMacroBibles", () => {
     expect((out.extra as Record<string, number>).c).toBe(4);
   });
 
-  it("dedupes active_b_stories by id with current winning", () => {
+  it("prefers current (first arg) general_world_lore when non-empty", () => {
     const out = mergeMacroBibles(
-      { active_b_stories: [{ id: "s1", desc: "cur" }] },
-      { active_b_stories: [{ id: "s1", desc: "inc" }, { id: "s2", desc: "b" }] },
+      { general_world_lore: "## Form\n\nedited" },
+      { general_world_lore: "## Stored\n\nold" },
     );
-    const stories = out.active_b_stories as Array<{ id: string; desc: string }>;
-    expect(stories.find((s) => s.id === "s1")?.desc).toBe("cur");
-    expect(stories.find((s) => s.id === "s2")?.desc).toBe("b");
+    expect(out.general_world_lore).toBe("## Form\n\nedited");
+  });
+
+  it("falls back to incoming lore when current is blank", () => {
+    const out = mergeMacroBibles({ general_world_lore: "   " }, { general_world_lore: "from-stored" });
+    expect(out.general_world_lore).toBe("from-stored");
   });
 });
 

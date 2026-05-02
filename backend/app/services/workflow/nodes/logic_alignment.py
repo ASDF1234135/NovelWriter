@@ -20,7 +20,7 @@ def _clip(text: str, max_chars: int) -> str:
 
 
 def _should_run_canon_audit(state: dict[str, Any]) -> bool:
-    outline = str(state.get("chapter_outline") or state.get("author_chapter_plan") or "").strip()
+    outline = str(state.get("chapter_outline") or "").strip()
     if len(outline) >= 20:
         return True
     if len(str(state.get("graph_context") or "").strip()) > 80:
@@ -41,7 +41,7 @@ def _build_logic_alignment_prompt(state: dict[str, Any]) -> str:
     draft_events = list(state.get("ground_truth_events") or [])
     boundary = str(state.get("ending_boundary_rule") or "")
     forbidden = list(state.get("forbidden_reveals") or [])
-    human_outline = str(state.get("chapter_outline") or state.get("author_chapter_plan") or "").strip()
+    human_outline = str(state.get("chapter_outline") or "").strip()
     bible = _clip(str(state.get("bible_context") or ""), LOGIC_ALIGN_BIBLE_CAP)
     graph = _clip(str(state.get("graph_context") or ""), LOGIC_ALIGN_GRAPH_CAP)
     vector = _clip(str(state.get("vector_context") or ""), LOGIC_ALIGN_VECTOR_CAP)

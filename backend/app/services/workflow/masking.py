@@ -52,35 +52,27 @@ from app.services.workflow.utils import (
 
 
 def visible_unachieved_anchors(state: dict[str, Any]) -> list[dict[str, Any]]:
-    """Sliding window: first N unfinished anchors (ordered like list_anchors / state)."""
-    anchors = state.get("unachieved_anchors") or []
-    return list(anchors[:VISIBLE_UNACHIEVED_ANCHOR_LIMIT])
+    """Sliding window of dependency-ready DAG candidates."""
+    ready, _blocked = _anchor_candidate_views(state)
+    return list(ready[:VISIBLE_UNACHIEVED_ANCHOR_LIMIT])
 
 
 def build_planner_payload(state: dict, story: dict | None = None, volumes: list[dict] | None = None) -> SafePlannerPayload:
     settings = get_settings()
     target_anchor = _resolve_target_anchor(state)
     current_volume = _resolve_current_volume(state["chapter_id"], volumes or [])
-    window = visible_unachieved_anchors(state)
-    upcoming = [
-        {
-            "anchor_id": a.get("anchor_id"),
-            "title": a.get("title"),
-            "chapter_target": a.get("chapter_target"),
-        }
-        for a in window
-    ]
+    ready_candidates, blocked_candidates = _anchor_candidate_views(state)
     return SafePlannerPayload(
         active_epoch_id=state["active_epoch_id"],
         pov_character_id=state["pov_character_id"],
         narrative_directive=state["narrative_directive"],
-        target_anchor_id=state.get("target_anchor_id"),
         story_premise=(story or {}).get("premise", ""),
         current_volume_title=(current_volume or {}).get("title", ""),
         current_volume_summary=(current_volume or {}).get("summary", ""),
         current_anchor_title=(target_anchor or {}).get("title", ""),
         current_anchor_description=(target_anchor or {}).get("description", ""),
-        upcoming_unachieved_anchors=upcoming,
+        ready_anchor_candidates=ready_candidates,
+        blocked_anchor_candidates=blocked_candidates,
         graph_context=state["graph_context"],
         vector_context=state["vector_context"],
         bible_context=state["bible_context"],
@@ -107,12 +99,12 @@ def build_planner_payload(state: dict, story: dict | None = None, volumes: list[
         b_story_directive=state.get("b_story_directive"),
         new_elements_to_introduce=coerce_new_elements_items(state.get("new_elements_to_introduce")),
         request_new_b_story=state.get("request_new_b_story"),
-        distance_to_anchor=state.get("distance_to_anchor"),
-        active_b_stories=list(state.get("active_b_stories") or []),
+        selected_anchor_ids=list(state.get("selected_anchor_ids") or []),
+        next_anchor_ids=list(state.get("next_anchor_ids") or []),
         lore_mysteries_progression=list(state.get("lore_mysteries_progression") or []),
         ending_vibe_cooldown_constraint=dict(state.get("ending_vibe_cooldown_constraint") or {}),
-        writing_note=list(state.get("writing_note") or []),
-        author_chapter_plan=str(state.get("chapter_outline") or state.get("author_chapter_plan") or ""),
+        general_world_lore=str(state.get("general_world_lore") or ""),
+        author_chapter_plan=str(state.get("chapter_outline") or ""),
         ai_freedom_level=str(state.get("ai_freedom_level") or "balanced"),
         outline_binding_mode=str(state.get("outline_binding_mode") or "ABSENT"),
         director_state_brief=str(state.get("director_state_brief") or ""),
@@ -174,7 +166,7 @@ def build_author_payload(state: dict) -> SafeAuthorPayload:
         reader_feedback=state["reader_feedback"],
         length_adjustment=state.get("length_adjustment", "NONE"),
         mandatory_new_entities=sanitized["mandatory_new_entities"],
-        writing_note=list(state.get("writing_note") or []),
+        general_world_lore=str(state.get("general_world_lore") or ""),
         safe_chapter_rules=str(state.get("safe_chapter_rules") or ""),
         ai_freedom_level=str(state.get("ai_freedom_level") or "balanced"),
         outline_binding_mode=str(state.get("outline_binding_mode") or "ABSENT"),
@@ -237,21 +229,15 @@ def _build_active_character_profiles(
 
 def build_plan_supervisor_payload(state: dict) -> SafeSupervisorPayload:
     settings = get_settings()
-    target_anchor = _resolve_target_anchor(state)
-    target_anchor_chapter = target_anchor["chapter_target"] if target_anchor else None
-    chapters_until_anchor = (
-        target_anchor_chapter - state["chapter_id"]
-        if target_anchor_chapter is not None
-        else None
-    )
+    ready_candidates, blocked_candidates = _anchor_candidate_views(state)
     return SafeSupervisorPayload(
         chapter_id=state["chapter_id"],
         current_chapter_id=state["chapter_id"],
         active_epoch_id=state["active_epoch_id"],
-        target_anchor_id=state.get("target_anchor_id"),
-        target_anchor_chapter=target_anchor_chapter,
-        chapters_until_anchor=chapters_until_anchor,
-        partial_convergence_allowed=bool(chapters_until_anchor is not None and chapters_until_anchor > 0),
+        selected_anchor_ids=list(state.get("selected_anchor_ids") or []),
+        next_anchor_ids=list(state.get("next_anchor_ids") or []),
+        ready_anchor_candidates=ready_candidates,
+        blocked_anchor_candidates=blocked_candidates,
         target_word_count=state.get("target_word_count", 0),
         chapter_word_min=settings.chapter_word_min,
         chapter_word_max=settings.chapter_word_max,
@@ -273,14 +259,12 @@ def build_plan_supervisor_payload(state: dict) -> SafeSupervisorPayload:
         vector_context=state["vector_context"],
         bible_context=state["bible_context"],
         chapter_type=str(state.get("chapter_type") or "PLOT_DRIVEN"),
-        distance_to_anchor=state.get("distance_to_anchor"),
         b_story_directive=state.get("b_story_directive"),
         new_elements_to_introduce=coerce_new_elements_items(state.get("new_elements_to_introduce")),
         proposed_new_nodes=list(state.get("planned_graph_nodes") or []),
-        new_active_b_stories=list(state.get("new_active_b_stories") or []),
         request_new_b_story=state.get("request_new_b_story"),
         previous_chapter_tail_excerpt=state.get("previous_chapter_tail_excerpt", ""),
-        chapter_outline=str(state.get("chapter_outline") or state.get("author_chapter_plan") or ""),
+        chapter_outline=str(state.get("chapter_outline") or ""),
         ai_freedom_level=str(state.get("ai_freedom_level") or "balanced"),
         outline_binding_mode=str(state.get("outline_binding_mode") or "ABSENT"),
     )
@@ -288,21 +272,15 @@ def build_plan_supervisor_payload(state: dict) -> SafeSupervisorPayload:
 
 def build_draft_supervisor_payload(state: dict) -> SafeSupervisorPayload:
     settings = get_settings()
-    target_anchor = _resolve_target_anchor(state)
-    target_anchor_chapter = target_anchor["chapter_target"] if target_anchor else None
-    chapters_until_anchor = (
-        target_anchor_chapter - state["chapter_id"]
-        if target_anchor_chapter is not None
-        else None
-    )
+    ready_candidates, blocked_candidates = _anchor_candidate_views(state)
     return SafeSupervisorPayload(
         chapter_id=state["chapter_id"],
         current_chapter_id=state["chapter_id"],
         active_epoch_id=state["active_epoch_id"],
-        target_anchor_id=state.get("target_anchor_id"),
-        target_anchor_chapter=target_anchor_chapter,
-        chapters_until_anchor=chapters_until_anchor,
-        partial_convergence_allowed=bool(chapters_until_anchor is not None and chapters_until_anchor > 0),
+        selected_anchor_ids=list(state.get("selected_anchor_ids") or []),
+        next_anchor_ids=list(state.get("next_anchor_ids") or []),
+        ready_anchor_candidates=ready_candidates,
+        blocked_anchor_candidates=blocked_candidates,
         target_word_count=state.get("target_word_count", 0),
         chapter_word_min=settings.chapter_word_min,
         chapter_word_max=settings.chapter_word_max,
@@ -328,11 +306,9 @@ def build_draft_supervisor_payload(state: dict) -> SafeSupervisorPayload:
         vector_context=state["vector_context"],
         bible_context=state["bible_context"],
         chapter_type=str(state.get("chapter_type") or "PLOT_DRIVEN"),
-        distance_to_anchor=state.get("distance_to_anchor"),
         b_story_directive=state.get("b_story_directive"),
         new_elements_to_introduce=coerce_new_elements_items(state.get("new_elements_to_introduce")),
         proposed_new_nodes=list(state.get("planned_graph_nodes") or []),
-        new_active_b_stories=list(state.get("new_active_b_stories") or []),
         request_new_b_story=state.get("request_new_b_story"),
         normalized_length_min=int(state.get("normalized_length_min") or 0),
         normalized_length_max=int(state.get("normalized_length_max") or 0),
@@ -371,9 +347,10 @@ def compact_plan_supervisor_payload_for_prompt(payload: SafeSupervisorPayload) -
         "chapter_word_min": payload.chapter_word_min,
         "chapter_word_max": payload.chapter_word_max,
         "words_per_beat_floor": payload.words_per_beat_floor,
-        "target_anchor_id": payload.target_anchor_id,
-        "target_anchor_chapter": payload.target_anchor_chapter,
-        "partial_convergence_allowed": payload.partial_convergence_allowed,
+        "selected_anchor_ids": list(payload.selected_anchor_ids or []),
+        "next_anchor_ids": list(payload.next_anchor_ids or []),
+        "ready_anchor_candidates": list(payload.ready_anchor_candidates or [])[:8],
+        "blocked_anchor_candidates": list(payload.blocked_anchor_candidates or [])[:8],
         "previous_chapter_summary": (payload.previous_chapter_summary or "")[:PLAN_SUPERVISOR_PREVIOUS_SUMMARY_CAP],
         "recent_chapter_context": (payload.recent_chapter_context or "")[:PLAN_SUPERVISOR_RECENT_CONTEXT_CAP],
         "last_known_location": payload.last_known_location,
@@ -388,11 +365,9 @@ def compact_plan_supervisor_payload_for_prompt(payload: SafeSupervisorPayload) -
         "vector_context": (payload.vector_context or "")[:PLAN_SUPERVISOR_VECTOR_CAP],
         "bible_context": (payload.bible_context or "")[:PLAN_SUPERVISOR_BIBLE_CAP],
         "chapter_type": payload.chapter_type,
-        "distance_to_anchor": payload.distance_to_anchor,
         "b_story_directive": (payload.b_story_directive or "")[:240],
         "new_elements_to_introduce": (payload.new_elements_to_introduce or [])[:8],
         "proposed_new_nodes": (payload.proposed_new_nodes or [])[:3],
-        "new_active_b_stories": (getattr(payload, "new_active_b_stories", None) or [])[:2],
         "request_new_b_story": getattr(payload, "request_new_b_story", None),
         "chapter_outline": (getattr(payload, "chapter_outline", None) or "")[:900],
         "ai_freedom_level": getattr(payload, "ai_freedom_level", None) or "balanced",
@@ -402,13 +377,47 @@ def compact_plan_supervisor_payload_for_prompt(payload: SafeSupervisorPayload) -
 
 
 def _resolve_target_anchor(state: dict) -> dict | None:
-    target_anchor_id = state.get("target_anchor_id")
+    target_anchor_id = _resolve_target_anchor_id(state)
     if not target_anchor_id:
         return None
-    for anchor in state.get("unachieved_anchors", []):
-        if anchor.get("anchor_id") == target_anchor_id:
+    for anchor in state.get("anchor_nodes", []):
+        if str(anchor.get("id") or "").strip() == target_anchor_id:
             return anchor
     return None
+
+
+def _resolve_target_anchor_id(state: dict) -> str | None:
+    selected = [str(x).strip() for x in (state.get("selected_anchor_ids") or []) if str(x).strip()]
+    return selected[0] if selected else None
+
+
+def _anchor_candidate_views(state: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    nodes = {
+        str(row.get("id") or "").strip(): row
+        for row in list(state.get("anchor_nodes") or [])
+        if isinstance(row, dict) and str(row.get("id") or "").strip()
+    }
+    resolved = {str(x).strip() for x in (state.get("resolved_anchors") or []) if str(x).strip()}
+    candidate_ids = [str(x).strip() for x in (state.get("anchor_candidates") or []) if str(x).strip()]
+    ready: list[dict[str, Any]] = []
+    blocked: list[dict[str, Any]] = []
+    for aid in candidate_ids:
+        row = nodes.get(aid)
+        if not row or aid in resolved:
+            continue
+        deps = [str(x).strip() for x in (row.get("depends_on") or []) if str(x).strip()]
+        unmet = [dep for dep in deps if dep not in resolved]
+        record = {
+            "anchor_id": aid,
+            "title": str(row.get("title") or ""),
+            "description": str(row.get("description") or ""),
+            "node_kind": str(row.get("node_kind") or ""),
+        }
+        if unmet:
+            blocked.append({**record, "unmet_dependencies": unmet})
+        else:
+            ready.append(record)
+    return ready, blocked
 
 
 def _resolve_current_volume(chapter_id: int, volumes: list[dict]) -> dict | None:

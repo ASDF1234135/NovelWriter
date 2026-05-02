@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 from typing import Any
 
 from app.domain.schema import ChapterType, DirectorOutput
@@ -12,25 +13,16 @@ from app.services.workflow.profiles import get_profile
 
 
 def normalize_director_output(state: dict, raw: dict) -> dict:
+    def _shuffle_candidates(items: list[str], salt: str) -> list[str]:
+        shuffled = list(items)
+        seed = f"{state.get('trace_id', '')}:{state.get('chapter_id', '')}:{salt}:{','.join(shuffled)}"
+        random.Random(seed).shuffle(shuffled)
+        return shuffled
+
     """Normalize director output under Anchor DAG semantics."""
     out = dict(raw)
-    dist = state.get("distance_to_anchor")
-    active = state.get("active_b_stories") or []
     bdir = (out.get("b_story_directive") or "").strip()
-    try:
-        dval = int(dist) if dist is not None else None
-    except (TypeError, ValueError):
-        dval = None
-    # Backward-compatible fallback for legacy tests/runs.
-    if dval is not None and dval >= 2:
-        has_active_story = any(isinstance(row, dict) and str(row.get("id") or "").strip() for row in active)
-        if not has_active_story or not bdir:
-            out["chapter_type"] = ChapterType.WORLD_BUILDING.value
-            out["b_story_directive"] = (
-                bdir
-                or "Explore surroundings and local texture; accumulate sensory and everyday detail without forcing the main plot."
-            )
-    if dval is not None and dval <= 1:
+    if not bdir:
         out["chapter_type"] = ChapterType.PLOT_DRIVEN.value
     ct = str(out.get("chapter_type") or ChapterType.PLOT_DRIVEN.value)
     neo_raw = list(out.get("new_elements_to_introduce") or [])
@@ -60,7 +52,8 @@ def normalize_director_output(state: dict, raw: dict) -> dict:
     nxt = [str(x).strip() for x in (out.get("next_anchor_ids") or []) if str(x).strip()]
     if not nxt:
         candidates = [str(x).strip() for x in (state.get("anchor_candidates") or []) if str(x).strip()]
-        nxt = [x for x in candidates if x not in set(selected)][:2]
+        shuffled_candidates = _shuffle_candidates(candidates, "primary")
+        nxt = [x for x in shuffled_candidates if x not in set(selected)][:2]
     # Guardrails: next anchors must be unresolved + dependency-ready + ending-reachable.
     resolved = {str(x).strip() for x in (state.get("resolved_anchors") or []) if str(x).strip()}
     nodes = {str(n.get("id")): n for n in (state.get("anchor_nodes") or []) if isinstance(n, dict)}
@@ -105,8 +98,12 @@ def normalize_director_output(state: dict, raw: dict) -> dict:
             continue
         allowed.append(nid)
     if not allowed:
-        for nid in (state.get("anchor_candidates") or []):
+        fallback_candidates = [str(x).strip() for x in (state.get("anchor_candidates") or []) if str(x).strip()]
+        for nid in _shuffle_candidates(fallback_candidates, "secondary"):
             if not isinstance(nid, str) or nid in resolved:
+                continue
+            row = nodes.get(nid) or {}
+            if str(row.get("node_kind") or "").upper() in {"CHECKPOINT", "ENDING"}:
                 continue
             if nid in nodes and _reachable_to_ending(nid):
                 allowed.append(nid)
@@ -124,10 +121,24 @@ def run_director(state: dict, context: WorkflowContext) -> dict:
             "director_state_brief": "User pre-selected anchors; director bypassed.",
         }
 
-    anchors = state.get("unachieved_anchors", [])
+    nodes = [dict(n) for n in (state.get("anchor_nodes") or []) if isinstance(n, dict)]
+    by_id = {str(n.get("id") or ""): n for n in nodes if str(n.get("id") or "").strip()}
+    resolved = {str(x).strip() for x in (state.get("resolved_anchors") or []) if str(x).strip()}
+    candidate_ids = [str(x).strip() for x in (state.get("anchor_candidates") or []) if str(x).strip()]
+    anchors = []
+    for aid in candidate_ids:
+        row = by_id.get(aid)
+        if not row or aid in resolved:
+            continue
+        anchors.append(
+            {
+                "anchor_id": aid,
+                "title": str(row.get("title") or ""),
+                "description": str(row.get("description") or ""),
+            }
+        )
     next_anchor = anchors[0] if anchors else None
     story = context.story_repository.get_story(state["story_id"]) or {}
-    volumes = context.story_repository.list_volumes(state["story_id"])
     bible_context = context.bible_service.compile_context(
         story.get("bible_json") or {},
         macro_author_notes=str(story.get("macro_author_notes") or ""),
@@ -139,8 +150,6 @@ def run_director(state: dict, context: WorkflowContext) -> dict:
         output, _ = context.llm_client.invoke_json(prompt, DirectorOutput, profile)
         return normalize_director_output(state, output.model_dump(mode="json"))
 
-    dval = int(state.get("distance_to_anchor") or 0)
-    mock_type = ChapterType.PLOT_DRIVEN if dval <= 1 else ChapterType.CHARACTER_DRIVEN
     output = DirectorOutput(
         chapter_id=state["chapter_id"],
         active_epoch_id="epoch_present",
@@ -152,7 +161,7 @@ def run_director(state: dict, context: WorkflowContext) -> dict:
         ),
         tone_direction="tense, restrained suspense",
         target_anchor_id=next_anchor["anchor_id"] if next_anchor else None,
-        chapter_type=mock_type,
+        chapter_type=ChapterType.PLOT_DRIVEN,
         selected_anchor_ids=([next_anchor["anchor_id"]] if next_anchor else []),
         next_anchor_ids=[str(a.get("anchor_id")) for a in anchors[1:3] if isinstance(a, dict)],
         b_story_directive=None,
@@ -194,6 +203,7 @@ def _build_director_prompt(
         "## Output Requirements\n"
         "- Choose selected_anchor_ids with 1-2 anchor ids for this chapter.\n"
         "- Choose next_anchor_ids with 1-2 reachable unresolved ids for the next chapter.\n"
+        "- Prioritize smooth plot progression when selecting anchors; avoid repeatedly advancing only one storyline when viable alternatives exist.\n"
         "- Keep chapter_type conservative (PLOT_DRIVEN unless evidence supports otherwise).\n"
         "- Keep narrative_directive concise and anchor-focused.\n"
         "- Keep b_story_directive empty unless required by bible continuity.\n"
@@ -215,12 +225,3 @@ def _previous_chapter_outline(state: dict) -> str:
         if text:
             return text
     return str(state.get("previous_chapter_summary") or "").strip()
-
-
-def _resolve_current_volume(chapter_id: int, volumes: list[dict[str, Any]]) -> dict[str, Any] | None:
-    for volume in volumes:
-        start = volume.get("chapter_start")
-        end = volume.get("chapter_end")
-        if isinstance(start, int) and isinstance(end, int) and start <= chapter_id <= end:
-            return volume
-    return None

@@ -5,13 +5,38 @@ from typing import Any, NotRequired, TypedDict
 from pydantic import BaseModel, Field
 
 from app.domain.schema import (
+    AiFreedomLevel,
     BeatOutline,
+    BStoryType,
+    ChapterType,
     EndingVibe,
     EventOutline,
     HitlDecisionMode,
     LengthAdjustment,
     MandatoryNewEntity,
+    WorkflowStatus,
 )
+
+STATE_DEPRECATED_FIELDS: frozenset[str] = frozenset(
+    {
+        "author_chapter_plan",
+    }
+)
+
+# Removal catalog for next-stage cleanup planning.
+LOW_RISK_REMOVABLE_STATE_FIELDS: frozenset[str] = frozenset({"manual_override_payload", "b_story_route"})
+MEDIUM_RISK_MIGRATION_FIELDS: frozenset[str] = frozenset({"author_chapter_plan"})
+HIGH_RISK_CONTROL_STATE_FIELDS: dict[str, str] = {
+    "resume_from": "Core resume control for START/HITL continuation; removing breaks restart flow.",
+    "state_version": "Migration safety gate for persisted runs; required for version-aware execution.",
+    "workflow_thread_id": "Failure-recovery execution context identifier for retried runs.",
+    "thread_reset_done": "Failure/timeout reset marker paired with workflow_thread_id lifecycle.",
+    "pending_db_commit": "Transactional commit envelope for idempotent state replay.",
+    "commit_executed": "Commit idempotency marker to prevent duplicate side effects.",
+    "anchor_route": "Graph conditional routing key after anchor_resolve.",
+    "graph_rag_route": "Graph conditional routing key after graph_rag.",
+    "language_gate_route": "Graph conditional routing key after output_language_gate.",
+}
 
 
 class AgentWorkflowState(TypedDict):
@@ -22,8 +47,6 @@ class AgentWorkflowState(TypedDict):
     narrative_directive: str
     tone_direction: str
     target_word_count: int
-    unachieved_anchors: list[dict[str, Any]]
-    target_anchor_id: str | None
     bible_context: str
     graph_context: str
     vector_context: str
@@ -65,8 +88,8 @@ class AgentWorkflowState(TypedDict):
     best_draft_content: str
     requires_hitl: bool
     hitl_reason: str
-    hitl_decision_mode: str
-    workflow_status: str
+    hitl_decision_mode: HitlDecisionMode | str
+    workflow_status: WorkflowStatus | str
     last_reader_score: int
     last_agent: str
     trace_id: str
@@ -75,28 +98,23 @@ class AgentWorkflowState(TypedDict):
     draft_route: NotRequired[str]
     reader_route: NotRequired[str]
     resume_from: NotRequired[str]
-    manual_override_payload: NotRequired[dict[str, Any]]
     state_updater_output: NotRequired[dict[str, Any]]
     state_transaction_id: NotRequired[str]
     author_extraction_surface_hints: NotRequired[list[dict[str, Any]]]
-    chapter_type: NotRequired[str]
+    chapter_type: NotRequired[ChapterType | str]
     selected_anchor_ids: NotRequired[list[str]]
     next_anchor_ids: NotRequired[list[str]]
     b_story_directive: NotRequired[str | None]
-    b_story_type: NotRequired[str | None]
+    b_story_type: NotRequired[BStoryType | str | None]
     new_elements_to_introduce: NotRequired[list[dict[str, Any]]]
     request_new_b_story: NotRequired[dict[str, Any] | None]
-    active_b_stories: NotRequired[list[dict[str, Any]]]
     recent_b_story_types: NotRequired[list[str]]
-    distance_to_anchor: NotRequired[int | None]
     planned_graph_nodes: NotRequired[list[dict[str, Any]]]
     normalized_length_min: NotRequired[int]
     normalized_length_max: NotRequired[int]
     plan_warnings: NotRequired[list[str]]
     pending_chapter_extraction: NotRequired[dict[str, Any]]
     b_story_resolution: NotRequired[dict[str, Any]]
-    post_polish_route: NotRequired[str]
-    pending_b_story_additions: NotRequired[list[dict[str, Any]]]
     pending_cast_updates: NotRequired[list[dict[str, Any]]]
     pending_cast_evolutions: NotRequired[list[dict[str, Any]]]
     extraction_gate_failure_streak: NotRequired[int]
@@ -107,7 +125,6 @@ class AgentWorkflowState(TypedDict):
     graph_rag_context_tier: NotRequired[int]
     hitl_extraction_remap_hints: NotRequired[list[dict[str, Any]]]
     b_story_resolution_hitl_candidate: NotRequired[dict[str, Any]]
-    b_story_route: NotRequired[str]
     anchor_resolution: NotRequired[dict[str, Any]]
     anchor_resolution_hitl_candidate: NotRequired[dict[str, Any]]
     anchor_route: NotRequired[str]
@@ -126,7 +143,7 @@ class AgentWorkflowState(TypedDict):
     lore_mysteries_progression: NotRequired[list[dict[str, Any]]]
     resolution_cooldown_constraint: NotRequired[dict[str, Any]]
     ending_vibe_cooldown_constraint: NotRequired[dict[str, Any]]
-    writing_note: NotRequired[list[str]]
+    general_world_lore: NotRequired[str]
     author_chapter_plan: NotRequired[str]
     chapter_outline: NotRequired[str]
     chapter_hard_rules: NotRequired[str]
@@ -137,7 +154,7 @@ class AgentWorkflowState(TypedDict):
     original_draft_must_include_beats: NotRequired[list[str]]
     original_draft_ground_truth_events: NotRequired[list[dict[str, Any]]]
     allowed_identity_reveals_this_chapter: NotRequired[list[str]]
-    ai_freedom_level: NotRequired[str]
+    ai_freedom_level: NotRequired[AiFreedomLevel | str]
     outline_binding_mode: NotRequired[str]
     director_state_brief: NotRequired[str]
     human_outline_conflict_notes: NotRequired[list[str]]
@@ -154,6 +171,11 @@ class AgentWorkflowState(TypedDict):
     workflow_thread_id: NotRequired[str]
     thread_reset_done: NotRequired[bool]
     state_version: NotRequired[int]
+    graph_rag_route: NotRequired[str]
+    anchor_hitl_required: NotRequired[bool]
+    volume_stretch_required: NotRequired[bool]
+    volume_stretch_applied_to_chapter: NotRequired[int]
+    word_count: NotRequired[int]
 
 
 class SafeAuthorPayload(BaseModel):
@@ -185,7 +207,7 @@ class SafeAuthorPayload(BaseModel):
     reader_feedback: list[dict[str, Any]] = Field(default_factory=list)
     length_adjustment: LengthAdjustment = LengthAdjustment.NONE
     mandatory_new_entities: list[MandatoryNewEntity] = Field(default_factory=list)
-    writing_note: list[str] = Field(default_factory=list)
+    general_world_lore: str = ""
     safe_chapter_rules: str = ""
     ai_freedom_level: str = "balanced"
     outline_binding_mode: str = "ABSENT"
@@ -195,13 +217,13 @@ class SafePlannerPayload(BaseModel):
     active_epoch_id: str
     pov_character_id: str
     narrative_directive: str
-    target_anchor_id: str | None = None
     story_premise: str = ""
     current_volume_title: str = ""
     current_volume_summary: str = ""
     current_anchor_title: str = ""
     current_anchor_description: str = ""
-    upcoming_unachieved_anchors: list[dict[str, Any]] = Field(default_factory=list)
+    ready_anchor_candidates: list[dict[str, Any]] = Field(default_factory=list)
+    blocked_anchor_candidates: list[dict[str, Any]] = Field(default_factory=list)
     graph_context: str
     vector_context: str
     bible_context: str
@@ -227,11 +249,9 @@ class SafePlannerPayload(BaseModel):
     b_story_directive: str | None = None
     new_elements_to_introduce: list[dict[str, Any]] = Field(default_factory=list)
     request_new_b_story: dict[str, Any] | None = None
-    distance_to_anchor: int | None = None
-    active_b_stories: list[dict[str, Any]] = Field(default_factory=list)
     lore_mysteries_progression: list[dict[str, Any]] = Field(default_factory=list)
     ending_vibe_cooldown_constraint: dict[str, Any] = Field(default_factory=dict)
-    writing_note: list[str] = Field(default_factory=list)
+    general_world_lore: str = ""
     author_chapter_plan: str = ""
     ai_freedom_level: str = "balanced"
     outline_binding_mode: str = "ABSENT"
@@ -243,10 +263,10 @@ class SafeSupervisorPayload(BaseModel):
     chapter_id: int
     current_chapter_id: int
     active_epoch_id: str
-    target_anchor_id: str | None = None
-    target_anchor_chapter: int | None = None
-    chapters_until_anchor: int | None = None
-    partial_convergence_allowed: bool = False
+    selected_anchor_ids: list[str] = Field(default_factory=list)
+    next_anchor_ids: list[str] = Field(default_factory=list)
+    ready_anchor_candidates: list[dict[str, Any]] = Field(default_factory=list)
+    blocked_anchor_candidates: list[dict[str, Any]] = Field(default_factory=list)
     target_word_count: int = 0
     chapter_word_min: int = 800
     chapter_word_max: int = 12000
@@ -269,11 +289,9 @@ class SafeSupervisorPayload(BaseModel):
     vector_context: str = ""
     bible_context: str = ""
     chapter_type: str = "PLOT_DRIVEN"
-    distance_to_anchor: int | None = None
     b_story_directive: str | None = None
     new_elements_to_introduce: list[dict[str, Any]] = Field(default_factory=list)
     proposed_new_nodes: list[dict[str, Any]] = Field(default_factory=list)
-    new_active_b_stories: list[dict[str, Any]] = Field(default_factory=list)
     request_new_b_story: dict[str, Any] | None = None
     normalized_length_min: int = 0
     normalized_length_max: int = 0
@@ -290,15 +308,14 @@ class SafeSupervisorPayload(BaseModel):
 class WorkflowBootstrapState(BaseModel):
     story_id: str
     chapter_id: int
-    unachieved_anchors: list[dict[str, Any]] = Field(default_factory=list)
     trace_id: str
 
 
 def build_initial_state(
     story_id: str,
     chapter_id: int,
-    unachieved_anchors: list[dict[str, Any]],
-    trace_id: str,
+    trace_id_or_legacy_unachieved: str | list[dict[str, Any]] | None = None,
+    trace_id: str | None = None,
     *,
     plan_retry_limit: int = 3,
     draft_loop_retry_limit: int = 3,
@@ -309,6 +326,12 @@ def build_initial_state(
     ai_freedom_level: str = "balanced",
     outline_binding_mode: str = "ABSENT",
 ) -> AgentWorkflowState:
+    # Backward compatibility for older callers:
+    # build_initial_state(story_id, chapter_id, unachieved_anchors, trace_id, ...)
+    if trace_id is None:
+        resolved_trace_id = str(trace_id_or_legacy_unachieved or "")
+    else:
+        resolved_trace_id = str(trace_id)
     return AgentWorkflowState(
         story_id=story_id,
         chapter_id=chapter_id,
@@ -317,8 +340,6 @@ def build_initial_state(
         narrative_directive="推進劇情",
         tone_direction="懸疑",
         target_word_count=2500,
-        unachieved_anchors=unachieved_anchors,
-        target_anchor_id=unachieved_anchors[0]["anchor_id"] if unachieved_anchors else None,
         bible_context="",
         graph_context="",
         vector_context="",
@@ -362,7 +383,7 @@ def build_initial_state(
         workflow_status="RUNNING",
         last_reader_score=0,
         last_agent="bootstrap",
-        trace_id=trace_id,
+        trace_id=resolved_trace_id,
         pending_hitl_options=[],
         plan_route="planner",
         draft_route="author",
@@ -375,14 +396,11 @@ def build_initial_state(
         b_story_type=None,
         new_elements_to_introduce=[],
         request_new_b_story=None,
-        active_b_stories=[],
         recent_b_story_types=[],
-        distance_to_anchor=None,
         planned_graph_nodes=[],
         normalized_length_min=0,
         normalized_length_max=0,
         plan_warnings=[],
-        post_polish_route="anchor_resolve",
         author_extraction_surface_hints=[],
         extraction_gate_failure_streak=0,
         extraction_hitl_limit=4,
@@ -391,7 +409,6 @@ def build_initial_state(
         manual_plan_force_approve=False,
         graph_rag_context_tier=2,
         hitl_extraction_remap_hints=[],
-        b_story_route="profile_expander",
         anchor_route="profile_expander",
         anchor_resolution={},
         anchor_resolution_hitl_candidate={},
@@ -410,7 +427,7 @@ def build_initial_state(
         lore_mysteries_progression=[],
         resolution_cooldown_constraint={},
         ending_vibe_cooldown_constraint={},
-        writing_note=[],
+        general_world_lore="",
         author_chapter_plan=author_chapter_plan or "",
         chapter_outline=chapter_outline or "",
         chapter_hard_rules=chapter_hard_rules or "",
@@ -430,7 +447,7 @@ def build_initial_state(
         commit_executed=False,
         failure_type="",
         timeout_bucket="",
-        workflow_thread_id=trace_id,
+        workflow_thread_id=resolved_trace_id,
         thread_reset_done=False,
         state_version=2,
     )
@@ -439,22 +456,18 @@ def build_initial_state(
 def normalize_workflow_state(state: dict[str, Any]) -> dict[str, Any]:
     """Fill defaults for workflow state (migration / resume compatibility)."""
     defaults: dict[str, Any] = {
-        "chapter_type": "WORLD_BUILDING",
+        "chapter_type": ChapterType.PLOT_DRIVEN.value,
         "selected_anchor_ids": [],
         "next_anchor_ids": [],
         "b_story_directive": None,
         "b_story_type": None,
         "new_elements_to_introduce": [],
         "request_new_b_story": None,
-        "active_b_stories": [],
         "recent_b_story_types": [],
-        "distance_to_anchor": None,
         "planned_graph_nodes": [],
         "normalized_length_min": 0,
         "normalized_length_max": 0,
         "plan_warnings": [],
-        "post_polish_route": "anchor_resolve",
-        "pending_b_story_additions": [],
         "pending_cast_updates": [],
         "pending_cast_evolutions": [],
         "previous_chapter_tail_excerpt": "",
@@ -466,7 +479,6 @@ def normalize_workflow_state(state: dict[str, Any]) -> dict[str, Any]:
         "manual_plan_force_approve": False,
         "graph_rag_context_tier": 2,
         "hitl_extraction_remap_hints": [],
-        "b_story_route": "profile_expander",
         "anchor_route": "profile_expander",
         "anchor_resolution": {},
         "anchor_resolution_hitl_candidate": {},
@@ -483,7 +495,7 @@ def normalize_workflow_state(state: dict[str, Any]) -> dict[str, Any]:
         "lore_mysteries_progression": [],
         "resolution_cooldown_constraint": {},
         "ending_vibe_cooldown_constraint": {},
-        "writing_note": [],
+        "general_world_lore": "",
         "author_chapter_plan": "",
         "chapter_outline": "",
         "chapter_hard_rules": "",
@@ -509,6 +521,10 @@ def normalize_workflow_state(state: dict[str, Any]) -> dict[str, Any]:
         "workflow_thread_id": "",
         "thread_reset_done": False,
         "state_version": 2,
+        "graph_rag_route": "planner",
+        "anchor_hitl_required": False,
+        "volume_stretch_required": False,
+        "word_count": 0,
     }
     for key, val in defaults.items():
         if key not in state:
@@ -520,6 +536,25 @@ def normalize_workflow_state(state: dict[str, Any]) -> dict[str, Any]:
         ]
     if state.get("resume_from") == "prose_polish":
         state["resume_from"] = "extraction_gate"
+    canonicalize_workflow_state_contract(state)
+    return state
+
+
+def canonicalize_workflow_state_contract(state: dict[str, Any]) -> dict[str, Any]:
+    """Normalize legacy aliases to canonical state keys without removing old keys."""
+    # Canonical outline field: chapter_outline; keep legacy author_chapter_plan mirrored.
+    outline = str(state.get("chapter_outline") or state.get("author_chapter_plan") or "").strip()
+    state["chapter_outline"] = outline
+    state["author_chapter_plan"] = outline
+
+    # Canonical anchor target field: selected_anchor_ids.
+    selected = [str(x).strip() for x in (state.get("selected_anchor_ids") or []) if str(x).strip()]
+    state["selected_anchor_ids"] = selected
+
+    # Clean removed legacy keys when loading old runs.
+    state.pop("post_polish_route", None)
+    state.pop("manual_override_payload", None)
+    state.pop("b_story_route", None)
     return state
 
 

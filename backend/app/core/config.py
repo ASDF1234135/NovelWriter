@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     sqlite_busy_timeout_ms: int = 30000
     use_in_memory_stores: bool = True
     use_mock_llm: bool = True
+    use_mock_generation: bool | None = None
+    use_mock_embeddings: bool | None = None
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_username: str = "neo4j"
     neo4j_password: str = "novelbuilder"
@@ -30,6 +32,7 @@ class Settings(BaseSettings):
     qdrant_vector_size: int = 64
     qdrant_recreate_on_dimension_mismatch: bool = False
     llm_provider: str = "mock"
+    embedding_provider: str = ""
     llm_model: str = "mock-story-model"
     macro_llm_model: str = ""
     director_llm_model: str = ""
@@ -51,8 +54,11 @@ class Settings(BaseSettings):
     copyeditor_prev_tail_n2_max_chars: int = 500
     openai_base_url: str = "https://api.openai.com/v1"
     openai_api_key: str = ""
+    embedding_base_url: str = ""
+    embedding_api_key: str = ""
     openai_embedding_model: str = "text-embedding-3-small"
     openai_timeout_seconds: float = 120.0
+    embedding_timeout_seconds: float = 0.0
     # Chat completions: optional SSE streaming (keeps connection busy; may help proxy idle timeouts).
     openai_stream_chat: bool = False
     # When True, structured (json_object) calls may use stream; unsupported providers fall back to non-stream on 4xx.
@@ -62,6 +68,12 @@ class Settings(BaseSettings):
     openai_connect_timeout_seconds: float = 30.0
     # Max idle time between SSE chunks while streaming.
     openai_stream_read_timeout_seconds: float = 300.0
+    # invoke_json: send OpenAI-style response_format json_object (disable for broken gateways).
+    llm_json_response_format: bool = True
+    # Max repair HTTP calls after the initial structured_generation fails parse/validate.
+    llm_json_repair_attempts: int = 2
+    # From the 2nd repair onward, omit response_format (prompt-only JSON).
+    llm_json_repair_plain_on_retry: bool = False
     # Chapter word targets (Planner output is clamped; independent of volume budgets).
     chapter_word_min: int = 800
     chapter_word_max: int = 12000
@@ -96,6 +108,34 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def effective_use_mock_generation(self) -> bool:
+        if self.use_mock_generation is None:
+            return self.use_mock_llm
+        return self.use_mock_generation
+
+    @property
+    def effective_use_mock_embeddings(self) -> bool:
+        if self.use_mock_embeddings is None:
+            return self.use_mock_llm
+        return self.use_mock_embeddings
+
+    @property
+    def effective_embedding_provider(self) -> str:
+        return self.embedding_provider or self.llm_provider
+
+    @property
+    def effective_embedding_base_url(self) -> str:
+        return self.embedding_base_url or self.openai_base_url
+
+    @property
+    def effective_embedding_api_key(self) -> str:
+        return self.embedding_api_key or self.openai_api_key
+
+    @property
+    def effective_embedding_timeout_seconds(self) -> float:
+        return self.embedding_timeout_seconds if self.embedding_timeout_seconds > 0 else self.openai_timeout_seconds
 
 
 @lru_cache

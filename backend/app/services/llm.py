@@ -14,6 +14,181 @@ from app.services.workflow.profiles import AgentPromptProfile
 StructuredModelT = TypeVar("StructuredModelT", bound=BaseModel)
 logger = get_logger(__name__)
 
+_JSON_REPAIR_RAW_MAX_CHARS = 100_000
+_JSON_ERROR_CONTEXT_CHARS = 400
+
+
+def _coerce_message_content(raw: Any) -> str:
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, list):
+        parts: list[str] = []
+        for item in raw:
+            if isinstance(item, dict):
+                if item.get("type") == "text":
+                    parts.append(str(item.get("text") or ""))
+                elif "text" in item:
+                    parts.append(str(item.get("text") or ""))
+            elif isinstance(item, str):
+                parts.append(item)
+        return "".join(parts)
+    return str(raw)
+
+
+def _strip_markdown_json_fence(text: str) -> str:
+    t = text.strip()
+    if not t.startswith("```"):
+        return t
+    lines = t.split("\n")
+    if not lines:
+        return t
+    if lines[0].strip().startswith("```"):
+        lines = lines[1:]
+    while lines and lines[-1].strip() == "```":
+        lines.pop()
+    return "\n".join(lines).strip()
+
+
+def _first_balanced_json_object(s: str) -> str | None:
+    """Return the first top-level `{...}` slice with brace depth outside of JSON strings."""
+    i = 0
+    start = -1
+    depth = 0
+    in_string = False
+    escape = False
+    n = len(s)
+    while i < n:
+        c = s[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == '"':
+                in_string = False
+            i += 1
+            continue
+        if c == '"':
+            in_string = True
+            i += 1
+            continue
+        if c == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif c == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start != -1:
+                    return s[start : i + 1]
+        i += 1
+    return None
+
+
+def _legacy_brace_slice(stripped: str) -> str | None:
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    return stripped[start : end + 1]
+
+
+def _extract_json_payload(content: str) -> Any:
+    stripped = _strip_markdown_json_fence(content.strip())
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def _add(cand: str | None) -> None:
+        if not cand or cand in seen:
+            return
+        seen.add(cand)
+        candidates.append(cand)
+
+    _add(stripped)
+    _add(_first_balanced_json_object(stripped))
+    _add(_legacy_brace_slice(stripped))
+
+    last_err: json.JSONDecodeError | None = None
+    for cand in candidates:
+        try:
+            return json.loads(cand)
+        except json.JSONDecodeError as e:
+            last_err = e
+    if last_err is not None:
+        raise last_err
+    raise json.JSONDecodeError("Expected JSON value", stripped, 0)
+
+
+def _log_structured_parse_failure(
+    *,
+    agent_name: str,
+    provider: str,
+    model: str,
+    request_kind: str,
+    content_preview: str,
+    exc: Exception,
+    repair_round: int | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "agent_name": agent_name,
+        "provider": provider,
+        "model": model,
+        "request_kind": request_kind,
+        "error_type": type(exc).__name__,
+        "error_message": str(exc)[:800],
+    }
+    if repair_round is not None:
+        payload["repair_round"] = repair_round
+    if isinstance(exc, json.JSONDecodeError):
+        pos = exc.pos if exc.pos is not None else 0
+        lo = max(0, pos - _JSON_ERROR_CONTEXT_CHARS)
+        hi = min(len(content_preview), pos + _JSON_ERROR_CONTEXT_CHARS)
+        payload["json_exc_lineno"] = exc.lineno
+        payload["json_exc_colno"] = exc.colno
+        payload["json_exc_pos"] = pos
+        payload["context_snippet"] = content_preview[lo:hi]
+    logger.warning("LLM structured output parse failed", extra={"extra_payload": payload})
+
+
+def _build_json_repair_user_prompt(
+    schema: str,
+    raw_text: str,
+    error: Exception | None,
+    repair_idx: int,
+) -> str:
+    head = (
+        "Repair the following output so it becomes exactly one valid JSON object that matches the schema. "
+        "Return JSON only — no markdown fences, comments, or surrounding text.\n"
+    )
+    err_detail = ""
+    if error is not None:
+        err_detail = f"\nParse/validation error:\n{error}\n"
+        if isinstance(error, json.JSONDecodeError):
+            pos = error.pos if error.pos is not None else 0
+            lo = max(0, pos - _JSON_ERROR_CONTEXT_CHARS)
+            hi = min(len(raw_text), pos + _JSON_ERROR_CONTEXT_CHARS)
+            err_detail += (
+                f"\nContext around character position {pos} "
+                f"(line {error.lineno}, col {error.colno}):\n{raw_text[lo:hi]}\n"
+            )
+
+    if repair_idx == 0:
+        body = raw_text
+        if len(body) > _JSON_REPAIR_RAW_MAX_CHARS:
+            body = body[:_JSON_REPAIR_RAW_MAX_CHARS] + "\n... [truncated]"
+        return f"{head}{err_detail}\nSchema:\n{schema}\n\nRaw output:\n{body}"
+
+    if isinstance(error, json.JSONDecodeError) and error.pos is not None:
+        pos = error.pos
+        lo = max(0, pos - _JSON_ERROR_CONTEXT_CHARS)
+        hi = min(len(raw_text), pos + _JSON_ERROR_CONTEXT_CHARS)
+        excerpt = raw_text[lo:hi]
+    else:
+        excerpt = raw_text[-8000:] if len(raw_text) > 8000 else raw_text
+    return f"{head}{err_detail}\nSchema:\n{schema}\n\nRaw excerpt:\n{excerpt}"
+
 
 @dataclass
 class LLMResult:
@@ -158,6 +333,9 @@ class OpenAICompatibleLLMClient:
         stream_include_usage: bool = False,
         connect_timeout: float = 10.0,
         stream_read_timeout: float = 300.0,
+        json_response_format_enabled: bool = True,
+        json_repair_max_attempts: int = 2,
+        json_repair_plain_on_retry: bool = False,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
@@ -168,6 +346,9 @@ class OpenAICompatibleLLMClient:
         self.stream_include_usage = stream_include_usage
         self.connect_timeout = connect_timeout
         self.stream_read_timeout = stream_read_timeout
+        self.json_response_format_enabled = json_response_format_enabled
+        self.json_repair_max_attempts = max(0, int(json_repair_max_attempts))
+        self.json_repair_plain_on_retry = json_repair_plain_on_retry
 
     def invoke(self, prompt: str) -> LLMResult:
         return self.invoke_text(
@@ -179,6 +360,18 @@ class OpenAICompatibleLLMClient:
                 temperature=0.3,
             ),
         )
+
+    def _structured_rf_for_generation(self) -> dict[str, Any] | None:
+        if not self.json_response_format_enabled:
+            return None
+        return {"type": "json_object"}
+
+    def _structured_rf_for_repair(self, repair_idx: int) -> dict[str, Any] | None:
+        if not self.json_response_format_enabled:
+            return None
+        if self.json_repair_plain_on_retry and repair_idx >= 1:
+            return None
+        return {"type": "json_object"}
 
     def _httpx_timeout_non_stream(self) -> httpx.Timeout:
         return httpx.Timeout(
@@ -478,7 +671,9 @@ class OpenAICompatibleLLMClient:
             temperature=profile.temperature,
             request_kind="text_generation",
         )
-        content = data["choices"][0]["message"]["content"]
+        choice0 = (data.get("choices") or [{}])[0]
+        msg = choice0.get("message") or {}
+        content = _coerce_message_content(msg.get("content"))
         usage = data.get("usage", {})
         token_usage = usage.get("total_tokens", max(32, len(prompt) // 2))
         return LLMResult(content=content, token_usage=token_usage, latency_ms=latency_ms)
@@ -496,6 +691,7 @@ class OpenAICompatibleLLMClient:
             "Do not include markdown, comments, or extra explanation."
             f"\nJSON Schema:\n{schema}"
         )
+        gen_rf = self._structured_rf_for_generation()
         data, latency_ms = self._request(
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -505,65 +701,83 @@ class OpenAICompatibleLLMClient:
             model=profile.model or self.model,
             temperature=profile.temperature,
             request_kind="structured_generation",
-            response_format={"type": "json_object"},
+            response_format=gen_rf,
         )
-        content = data["choices"][0]["message"]["content"]
+        choice0 = (data.get("choices") or [{}])[0]
+        msg0 = choice0.get("message") or {}
+        content = _coerce_message_content(msg0.get("content"))
         usage = data.get("usage", {})
         token_usage = usage.get("total_tokens", max(32, len(prompt) // 2))
         llm_result = LLMResult(content=content, token_usage=token_usage, latency_ms=latency_ms)
-        try:
-            parsed_json = _extract_json_payload(content)
-            parsed = response_model.model_validate(parsed_json)
+        model_name = profile.model or self.model
+
+        def try_validate(raw: str) -> tuple[StructuredModelT | None, Exception | None]:
+            try:
+                parsed_json = _extract_json_payload(raw)
+                validated = response_model.model_validate(parsed_json)
+                return validated, None
+            except (json.JSONDecodeError, ValidationError) as e:
+                return None, e
+
+        parsed, err = try_validate(content)
+        if parsed is not None:
             return parsed, llm_result
-        except (json.JSONDecodeError, ValidationError):
-            logger.warning(
-                "LLM structured output requires repair",
-                extra={
-                    "extra_payload": {
-                        "agent_name": profile.agent_name,
-                        "provider": self.base_url,
-                        "model": profile.model or self.model,
-                        "request_kind": "structured_generation",
-                        "initial_latency_ms": latency_ms,
-                    }
-                },
-            )
-            repair_prompt = (
-                "Repair the following output so it becomes exactly one valid JSON object that matches the schema."
-                f"\nSchema:\n{schema}\nRaw output:\n{content}"
-            )
+
+        assert err is not None
+        _log_structured_parse_failure(
+            agent_name=profile.agent_name,
+            provider=self.base_url,
+            model=model_name,
+            request_kind="structured_generation",
+            content_preview=content,
+            exc=err,
+        )
+
+        last_exc: Exception = err
+        current_raw = content
+
+        for repair_idx in range(self.json_repair_max_attempts):
+            repair_rf = self._structured_rf_for_repair(repair_idx)
+            repair_body = _build_json_repair_user_prompt(schema, current_raw, last_exc, repair_idx)
             repair_data, repair_latency_ms = self._request(
                 messages=[
                     {"role": "system", "content": "You are a JSON repair assistant. Return valid JSON only."},
-                    {"role": "user", "content": repair_prompt},
+                    {"role": "user", "content": repair_body},
                 ],
                 agent_name=profile.agent_name,
                 model=profile.model or self.model,
                 temperature=0.0,
                 request_kind="json_repair",
-                response_format={"type": "json_object"},
+                response_format=repair_rf,
             )
-            repaired_content = repair_data["choices"][0]["message"]["content"]
+            r_choice = (repair_data.get("choices") or [{}])[0]
+            r_msg = r_choice.get("message") or {}
+            repaired_content = _coerce_message_content(r_msg.get("content"))
             repair_usage = repair_data.get("usage", {})
             repaired_result = LLMResult(
                 content=repaired_content,
                 token_usage=repair_usage.get("total_tokens", token_usage),
                 latency_ms=repair_latency_ms,
             )
-            parsed = response_model.model_validate(_extract_json_payload(repaired_content))
-            return parsed, repaired_result
+            parsed_r, err_r = try_validate(repaired_content)
+            if parsed_r is not None:
+                return parsed_r, repaired_result
+            last_exc = err_r if err_r is not None else last_exc
+            current_raw = repaired_content
+            _log_structured_parse_failure(
+                agent_name=profile.agent_name,
+                provider=self.base_url,
+                model=model_name,
+                request_kind="json_repair",
+                content_preview=repaired_content,
+                exc=last_exc,
+                repair_round=repair_idx + 1,
+            )
 
-
-def _extract_json_payload(content: str) -> dict[str, Any]:
-    stripped = content.strip()
-    try:
-        return json.loads(stripped)
-    except json.JSONDecodeError:
-        start = stripped.find("{")
-        end = stripped.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            raise
-        return json.loads(stripped[start : end + 1])
+        raise RuntimeError(
+            f"LLM structured output failed after {self.json_repair_max_attempts} repair attempt(s) "
+            f"for agent {profile.agent_name}: {last_exc}"
+        ) from last_exc
 
 
 def _compact_error_text(text: str, limit: int = 1200) -> str:

@@ -139,8 +139,8 @@ describe("MacroPlanPanel", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "編輯世界觀總表" }));
-    const toneInput = screen.getByDisplayValue("冷峻");
-    fireEvent.change(toneInput, { target: { value: "冷峻且克制" } });
+    const loreBox = screen.getByDisplayValue(/冷峻/) as HTMLTextAreaElement;
+    fireEvent.change(loreBox, { target: { value: loreBox.value.replace("冷峻", "冷峻且克制") } });
     fireEvent.click(screen.getByRole("button", { name: "儲存" }));
     await screen.findByRole("button", { name: "編輯世界觀總表" });
 
@@ -148,6 +148,7 @@ describe("MacroPlanPanel", () => {
     const calls = vi.mocked(putMacroPlan).mock.calls;
     const payload = calls[calls.length - 1]?.[1];
     expect(payload?.bible.genre).toBe("科幻");
+    expect(String((payload?.bible as { general_world_lore?: string }).general_world_lore ?? "")).toContain("冷峻且克制");
     expect((payload?.bible as { extra?: { tags?: string[] } }).extra?.tags).toEqual(["A", "B"]);
     expect(Array.isArray(payload?.anchor_nodes)).toBe(true);
   });

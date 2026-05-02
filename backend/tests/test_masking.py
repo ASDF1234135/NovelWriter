@@ -31,7 +31,7 @@ def test_author_payload_masks_sensitive_state() -> None:
         "ground_truth_events": [{"event_id": "secret", "description": "真相"}],
         "graph_context": "forbidden",
         "plan_feedback": [{"message": "future leak"}],
-        "writing_note": ["短句優先", "避免過度抒情"],
+        "general_world_lore": "短句優先\n避免過度抒情",
         "safe_chapter_rules": "規則：每回合只能行動一次",
     }
 
@@ -56,7 +56,7 @@ def test_author_payload_masks_sensitive_state() -> None:
     assert dumped["normalized_length_max"] == 2700
     assert dumped["length_adjustment"] == "NONE"
     assert dumped["author_safe_continuity_notes"] == ["灰鴉的密信尚未解讀。"]
-    assert dumped["writing_note"] == ["短句優先", "避免過度抒情"]
+    assert dumped["general_world_lore"] == "短句優先\n避免過度抒情"
     assert dumped["safe_chapter_rules"] == "規則：每回合只能行動一次"
     assert "ground_truth_events" not in dumped
     assert "graph_context" not in dumped
@@ -119,17 +119,21 @@ def test_author_payload_does_not_treat_memory_label_as_identity_token() -> None:
     assert "[REDACTED_IDENTITY]" not in " ".join(payload["author_safe_continuity_notes"])
 
 
-def test_plan_supervisor_payload_includes_anchor_distance() -> None:
+def test_plan_supervisor_payload_includes_dag_candidates() -> None:
     state = {
         "chapter_id": 1,
         "active_epoch_id": "epoch_present",
-        "target_anchor_id": "anchor_06",
-        "unachieved_anchors": [
+        "selected_anchor_ids": ["anchor_06"],
+        "anchor_nodes": [
             {
-                "anchor_id": "anchor_06",
-                "chapter_target": 6,
+                "id": "anchor_06",
+                "title": "主角被迫踏上旅程",
+                "description": "主角離開原本安穩場域，正式捲入主線。",
+                "depends_on": [],
             }
         ],
+        "anchor_candidates": ["anchor_06"],
+        "resolved_anchors": [],
         "ground_truth_events": [{"event_id": "e1", "description": "事件", "caused_by_event_id": None}],
         "narrative_script": "主角發現微小異常，為未來危機鋪墊。",
         "chapter_start_location": "王都外環。",
@@ -148,9 +152,8 @@ def test_plan_supervisor_payload_includes_anchor_distance() -> None:
     payload = build_plan_supervisor_payload(state)
 
     assert payload.current_chapter_id == 1
-    assert payload.target_anchor_chapter == 6
-    assert payload.chapters_until_anchor == 5
-    assert payload.partial_convergence_allowed is True
+    assert payload.selected_anchor_ids == ["anchor_06"]
+    assert payload.ready_anchor_candidates[0]["anchor_id"] == "anchor_06"
     assert payload.chapter_start_location == "王都外環。"
     assert payload.chapter_end_location_hint == "王都西門。"
     assert payload.ending_boundary_rule == "本章最遠只能停在王都西門。"
@@ -166,15 +169,17 @@ def test_planner_payload_includes_story_premise_volume_and_anchor_context() -> N
         "active_epoch_id": "epoch_present",
         "pov_character_id": "char_public_observer",
         "narrative_directive": "推進劇情",
-        "target_anchor_id": "anchor_01",
-        "unachieved_anchors": [
+        "selected_anchor_ids": ["anchor_01"],
+        "anchor_nodes": [
             {
-                "anchor_id": "anchor_01",
+                "id": "anchor_01",
                 "title": "主角被迫踏上旅程",
                 "description": "主角離開原本安穩場域，正式捲入主線。",
-                "chapter_target": 6,
+                "depends_on": [],
             }
         ],
+        "anchor_candidates": ["anchor_01"],
+        "resolved_anchors": [],
         "graph_context": "{}",
         "vector_context": "{}",
         "bible_context": "{}",
@@ -186,7 +191,7 @@ def test_planner_payload_includes_story_premise_volume_and_anchor_context() -> N
         "continuity_notes": ["灰鴉要求主角回城。"],
         "recent_entity_names": ["Kaelen", "灰鴉"],
         "plan_feedback": [],
-        "writing_note": ["短句優先", "避免過度抒情"],
+        "general_world_lore": "短句優先\n避免過度抒情",
     }
 
     story = {
@@ -218,15 +223,17 @@ def test_planner_payload_includes_story_premise_volume_and_anchor_context() -> N
     assert planner_payload.previous_attempt_narrative_script == "主角收到密信後準備返城。"
     assert planner_payload.continuity_notes == ["灰鴉要求主角回城。"]
     assert planner_payload.recent_entity_names == ["Kaelen", "灰鴉"]
-    assert planner_payload.writing_note == ["短句優先", "避免過度抒情"]
+    assert planner_payload.general_world_lore == "短句優先\n避免過度抒情"
 
 
 def test_draft_supervisor_payload_includes_normalized_length() -> None:
     state = {
         "chapter_id": 1,
         "active_epoch_id": "epoch_present",
-        "target_anchor_id": "anchor_01",
-        "unachieved_anchors": [],
+        "selected_anchor_ids": ["anchor_01"],
+        "anchor_nodes": [],
+        "anchor_candidates": [],
+        "resolved_anchors": [],
         "target_word_count": 10,
         "ground_truth_events": [{"event_id": "e1", "description": "事件", "caused_by_event_id": None}],
         "narrative_script": "劇本",

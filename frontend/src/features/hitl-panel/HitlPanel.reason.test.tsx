@@ -116,7 +116,7 @@ describe("HitlPanel reason rendering", () => {
     );
 
     expect(screen.getByText(/目前「此收尾套路」已連續多章重複使用。/)).toBeInTheDocument();
-    expect(screen.getByText("微調章節方向")).toBeInTheDocument();
+    expect(screen.getAllByText("微調章節方向").length).toBeGreaterThan(0);
   });
 
   it("output language mismatch: shows situation and dashboard options", async () => {

@@ -288,11 +288,9 @@ def _format_mandatory_new_entities(payload) -> str:
     return "\n".join(lines)
 
 
-def _format_writing_note(payload) -> str:
-    rows = [str(x).strip() for x in (getattr(payload, "writing_note", None) or []) if str(x).strip()]
-    if not rows:
-        return "(none)"
-    return "\n".join(f"- {x}" for x in rows[:12])
+def _format_general_world_lore(payload) -> str:
+    text = str(getattr(payload, "general_world_lore", None) or "").strip()
+    return text if text else "(none)"
 
 
 def _format_active_character_profiles(payload) -> str:
@@ -362,9 +360,9 @@ length_adjustment: {payload.length_adjustment}
 - COMPRESS: prior draft too long—keep core events/beats, cut repeated waiting, repeated interior monologue, dead-end atmosphere padding.
 - NONE: normal chapter writing, still stay inside the allowed band.
 
-## Author writing_note (hard)
-{_format_writing_note(payload)}
-These lines are hard constraints for this chapter; if they conflict with generic style advice, obey writing_note.
+## Author world / craft lore (hard)
+{_format_general_world_lore(payload)}
+This block is a hard constraint for this chapter; if it conflicts with generic style advice, obey this lore.
 
 ## Absolute chapter laws (hard; treat as physics)
 {str(getattr(payload, "safe_chapter_rules", "") or "").strip() or "(no hard rules)"}

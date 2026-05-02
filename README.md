@@ -48,6 +48,22 @@ Details: **[`memery_graph.md`](memery_graph.md)** *(filename as in repo).*
    - `NOVEL_BUILDER_USE_MOCK_LLM=false` when calling a real chat model
    - `NOVEL_BUILDER_QDRANT_VECTOR_SIZE` must match your embedding model dimension
 
+### Split generation and embedding providers
+
+The backend now supports independent provider settings for generation vs embeddings.
+
+- Generation uses `NOVEL_BUILDER_OPENAI_BASE_URL` + `NOVEL_BUILDER_OPENAI_API_KEY`.
+- Embeddings can override with `NOVEL_BUILDER_EMBEDDING_BASE_URL` + `NOVEL_BUILDER_EMBEDDING_API_KEY`.
+- If embedding override fields are empty, they fall back to generation settings.
+- `NOVEL_BUILDER_QDRANT_VECTOR_SIZE` must still match embedding model output dimension.
+
+Example mixed setup:
+
+- Generation: DeepSeek (`NOVEL_BUILDER_OPENAI_BASE_URL=https://api.deepseek.com`)
+- Embeddings: Gemini through an OpenAI-compatible embeddings gateway (`NOVEL_BUILDER_EMBEDDING_BASE_URL=...`, `NOVEL_BUILDER_OPENAI_EMBEDDING_MODEL=gemini-embedding-001`)
+
+If your generation provider has structured JSON or streaming limits, consider disabling `NOVEL_BUILDER_OPENAI_STREAM_STRUCTURED` for first-pass validation.
+
 2. Start the stack:
 
    ```bash

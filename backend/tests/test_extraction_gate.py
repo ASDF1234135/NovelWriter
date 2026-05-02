@@ -79,7 +79,7 @@ def test_extraction_gate_message_includes_planned_labels_and_fallback_notice(wf_
     ):
         out = run_extraction_gate(state, wf_context)
 
-    assert out["post_polish_route"] == "author"
+    assert out["extraction_route"] == "author"
     msg = out["extraction_gate_error"]
     assert "char_slot" in msg
     assert "黑市商人" in msg

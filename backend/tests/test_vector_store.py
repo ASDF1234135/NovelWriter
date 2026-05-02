@@ -14,6 +14,11 @@ class FakeEmbeddingClient:
         return [[0.1] * self.dimension for _ in texts]
 
 
+class EmptyProbeEmbeddingClient:
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        return [[] for _ in texts]
+
+
 class FakeQdrantClient:
     def __init__(self, existing_size: int | None = None) -> None:
         self.existing_size = existing_size
@@ -91,3 +96,18 @@ def test_qdrant_store_recreates_collection_when_enabled(monkeypatch) -> None:
     assert store.vector_size == 1024
     assert fake_client.deleted_collections == ["story_chunks"]
     assert fake_client.created_collections == [("story_chunks", 1024)]
+
+
+def test_qdrant_store_init_fails_on_empty_embedding_probe(monkeypatch) -> None:
+    fake_client = FakeQdrantClient()
+    monkeypatch.setattr("app.services.vector_store.QdrantClient", lambda url: fake_client)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        QdrantVectorStore(
+            url="http://qdrant:6333",
+            collection_name="story_chunks",
+            vector_size=64,
+            embedding_client=EmptyProbeEmbeddingClient(),
+        )
+
+    assert "empty vector during startup validation" in str(exc_info.value).lower()

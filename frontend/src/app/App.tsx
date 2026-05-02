@@ -57,6 +57,7 @@ import type {
 } from "../types";
 import { AppShell, type AppView, type TaskFlowStageId } from "./AppShell";
 import { buildMacroPutBody, mergeMacroPlan, namespaceMacroPlanIdsForStory, parseMacroImportJson } from "./macroPlanBundle";
+import { localizeUserFacingError } from "../i18n/userFacingError";
 import { useI18n } from "../i18n/useI18n";
 
 /** Same heuristic as backend OUTLINE_MIN_CHARS_FOR_FULL_BINDING — UX hint only. */
@@ -277,7 +278,7 @@ function downloadJsonFile(filename: string, payload: unknown) {
 }
 
 export default function App() {
-  const { locale } = useI18n();
+  const { locale, t } = useI18n();
   const navigate = useNavigate();
   const location = useLocation();
   const view = pathToView(location.pathname);
@@ -291,6 +292,10 @@ export default function App() {
   const [selectedChapter, setSelectedChapter] = useState<ChapterContent | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>("");
+  function reportApiError(err: unknown, fallbackKey: string) {
+    const raw = err instanceof Error ? err.message : "";
+    setError(localizeUserFacingError(raw, t) || t(fallbackKey));
+  }
   const [notice, setNotice] = useState<string>("");
   const [chapterAlreadyCompleted, setChapterAlreadyCompleted] = useState(false);
   const [storyConfigSnapshot, setStoryConfigSnapshot] = useState<StoryInput | null>(null);
@@ -534,7 +539,7 @@ export default function App() {
       const p = await fetchWritingPreamble(storyId, chapterId);
       setWritingPreamble(p);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "重新產生摘要失敗");
+      reportApiError(err, "errors.regenerateSummaryFailed");
     } finally {
       setRegenSummaryBusyChapter(null);
     }
@@ -565,7 +570,7 @@ export default function App() {
       setStageVisitCount({ projectSetup: 1, planStructure: 0, writeChapter: 0, reviewFix: 0, export: 0 });
       setView("setup");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "無法建立故事");
+      reportApiError(err, "errors.createStoryFailed");
     } finally {
       setBusy(false);
     }
@@ -675,7 +680,7 @@ export default function App() {
       setStageVisitCount({ projectSetup: 1, planStructure: 0, writeChapter: 0, reviewFix: 0, export: 0 });
       setView("setup");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "無法載入故事");
+      reportApiError(err, "errors.loadStoryFailed");
     } finally {
       setBusy(false);
     }
@@ -698,7 +703,7 @@ export default function App() {
               : "偵測到未儲存的故事設定（包含輸出語言）。是否先儲存設定再執行 compile？",
         );
         if (!confirmed) {
-          setNotice("已取消 compile；請先儲存設定後再試。");
+          setNotice(t("setup.compileCancelledNotice"));
           return;
         }
         await patchStory(storyId, {
@@ -728,7 +733,7 @@ export default function App() {
         /* optional refresh */
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "世界觀編譯失敗");
+      reportApiError(err, "errors.macroCompileFailed");
     } finally {
       setCompileInProgress(false);
       setCompileProgress(null);
@@ -757,7 +762,7 @@ export default function App() {
       setPersistedStoryConfig(payload);
       setStoryTitle(payload.title);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "儲存設定失敗");
+      reportApiError(err, "errors.saveSettingsFailed");
     } finally {
       setBusy(false);
     }
@@ -788,7 +793,7 @@ export default function App() {
         setChapterAlreadyCompleted(probe?.status === "completed");
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "流程結束後更新畫面失敗");
+      reportApiError(err, "errors.finalizeWorkflowFailed");
     } finally {
       setBusy(false);
     }
@@ -836,7 +841,7 @@ export default function App() {
           } catch {
             /* fall through and show SSE error */
           }
-          setError(err.message);
+          setError(localizeUserFacingError(err.message, t));
           setBusy(false);
         })();
       },
@@ -908,7 +913,7 @@ export default function App() {
       setView("write");
       attachWorkflowEventStream(runId);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "無法開始撰寫本章");
+      reportApiError(err, "errors.runChapterFailed");
     } finally {
       setBusy(false);
     }
@@ -1083,7 +1088,7 @@ export default function App() {
       const text = await file.text();
       await importProjectBundle(text, mode);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "匯入專案 JSON 失敗");
+      reportApiError(err, "errors.importJsonFailed");
     } finally {
       setBusy(false);
     }
@@ -1120,7 +1125,7 @@ export default function App() {
       });
       setNotice(locale === "en" ? "DAG changes saved." : locale === "zh-Hans" ? "DAG 变更已保存。" : "DAG 變更已儲存。");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "無法儲存 DAG 變更");
+      reportApiError(err, "errors.saveDagFailed");
     } finally {
       setBusy(false);
     }
@@ -1129,7 +1134,7 @@ export default function App() {
   async function runHitlAction<TPayload>(
     send: (runId: string, payload: TPayload) => Promise<WorkflowPayload>,
     payload: TPayload,
-    fallbackMessage: string,
+    fallbackI18nKey: string,
   ) {
     if (!workflow) return;
     setBusy(true);
@@ -1137,52 +1142,40 @@ export default function App() {
     try {
       applyHitlWorkflowResponse(await send(workflow.run.run_id, payload));
     } catch (err) {
-      setError(err instanceof Error ? err.message : fallbackMessage);
+      reportApiError(err, fallbackI18nKey);
       setBusy(false);
     }
   }
 
   const hitlHandlers = {
-    onDecision: async (optionId: string) => runHitlAction(sendHitlDecision, optionId, "無法送出您的選擇"),
+    onDecision: async (optionId: string) => runHitlAction(sendHitlDecision, optionId, "errors.sendChoiceFailed"),
     onOutlineEdit: async (payload: Parameters<typeof sendOutlineEdit>[1]) =>
-      runHitlAction(sendOutlineEdit, payload, "無法套用大綱變更"),
+      runHitlAction(sendOutlineEdit, payload, "errors.applyOutlineFailed"),
     onDraftEdit: async (payload: Parameters<typeof sendDraftEdit>[1]) =>
-      runHitlAction(sendDraftEdit, payload, "無法套用內文變更"),
+      runHitlAction(sendDraftEdit, payload, "errors.applyDraftFailed"),
     onStateInjection: async (payload: Parameters<typeof sendStateInjection>[1]) =>
-      runHitlAction(sendStateInjection, payload, "無法寫入資料"),
+      runHitlAction(sendStateInjection, payload, "errors.writeDataFailed"),
     onDirectorPatch: async (payload: Parameters<typeof sendDirectorPatch>[1]) =>
-      runHitlAction(sendDirectorPatch, payload, "無法套用章節方向調整"),
+      runHitlAction(sendDirectorPatch, payload, "errors.directorPatchFailed"),
     onExtractionRemap: async (payload: Parameters<typeof sendExtractionRemap>[1]) =>
-      runHitlAction(sendExtractionRemap, payload, "無法套用名稱對照"),
+      runHitlAction(sendExtractionRemap, payload, "errors.extractionRemapFailed"),
     onAnchorResolution: async (payload: Parameters<typeof sendAnchorResolution>[1]) =>
-      runHitlAction(sendAnchorResolution, payload, "無法送出 anchor 判定"),
+      runHitlAction(sendAnchorResolution, payload, "errors.anchorResolutionFailed"),
     onAnchorDelay: async (payload: Parameters<typeof sendAnchorDelay>[1]) =>
-      runHitlAction(sendAnchorDelay, payload, "無法延後里程碑"),
+      runHitlAction(sendAnchorDelay, payload, "errors.anchorDelayFailed"),
     onContextPrune: async (payload: Parameters<typeof sendContextPrune>[1]) =>
-      runHitlAction(sendContextPrune, payload, "無法套用背景精簡"),
+      runHitlAction(sendContextPrune, payload, "errors.contextPruneFailed"),
   };
 
   const showStorySection = Boolean(storyId) || view === "setup";
   const compileProgressText = useMemo(() => {
     if (!compileInProgress) return "";
     const st = String(compileProgress?.status ?? "QUEUED").toUpperCase();
-    if (locale === "en") {
-      if (st === "RUNNING") return "Compiling world bible and macro structure...";
-      if (st === "SUCCEEDED") return "Compile completed.";
-      if (st === "FAILED") return "Compile failed.";
-      return "Queued. Waiting for compile worker...";
-    }
-    if (locale === "zh-Hans") {
-      if (st === "RUNNING") return "正在编译世界观与宏观结构…";
-      if (st === "SUCCEEDED") return "编译完成。";
-      if (st === "FAILED") return "编译失败。";
-      return "排队中，等待编译任务启动…";
-    }
-    if (st === "RUNNING") return "正在編譯世界觀與宏觀結構…";
-    if (st === "SUCCEEDED") return "編譯完成。";
-    if (st === "FAILED") return "編譯失敗。";
-    return "排隊中，等待編譯任務啟動…";
-  }, [compileInProgress, compileProgress?.status, locale]);
+    if (st === "RUNNING") return t("compile.progress.running");
+    if (st === "SUCCEEDED") return t("compile.progress.succeeded");
+    if (st === "FAILED") return t("compile.progress.failed");
+    return t("compile.progress.queued");
+  }, [compileInProgress, compileProgress?.status, t]);
   const storySectionLabel =
     storyTitle.trim() || (storyId ? `${storyId.slice(0, 10)}…` : "");
   const hasMacroCompiled = Boolean(
@@ -1210,13 +1203,25 @@ export default function App() {
     const resetDone = workflow.state.thread_reset_done === true;
     const commitExecuted = workflow.state.commit_executed === true;
     const reason = String(workflow.state.hitl_reason ?? workflow.run.hitl_reason ?? "").trim();
-    const typeLabel = failureType === "TIMEOUT" ? "節點逾時" : "流程錯誤";
+    const typeLabel =
+      failureType === "TIMEOUT" ? t("workflow.failure.typeTimeout") : t("workflow.failure.typeWorkflow");
     const bucketLabel =
-      timeoutBucket === "llm" ? "（LLM 節點 8-10 分鐘級）" : timeoutBucket === "logic" ? "（邏輯/API 節點 2-3 分鐘級）" : "";
-    const commitLabel = commitExecuted ? "已提交資料" : "未提交資料";
-    const resetLabel = resetDone ? "thread 已重置" : "thread 未重置";
-    return `${typeLabel}${bucketLabel}，本次執行已安全終止（${commitLabel} / ${resetLabel}）。${reason ? ` 原因：${reason}` : ""}`;
-  }, [workflow]);
+      timeoutBucket === "llm"
+        ? t("workflow.failure.bucketLlm")
+        : timeoutBucket === "logic"
+          ? t("workflow.failure.bucketLogic")
+          : "";
+    const commitLabel = commitExecuted ? t("workflow.failure.commitYes") : t("workflow.failure.commitNo");
+    const resetLabel = resetDone ? t("workflow.failure.threadResetYes") : t("workflow.failure.threadResetNo");
+    const reasonLine = reason ? t("workflow.failure.reasonLine", undefined, { reason }) : "";
+    return t("workflow.failure.notice", undefined, {
+      type: typeLabel,
+      bucket: bucketLabel,
+      commit: commitLabel,
+      reset: resetLabel,
+      reasonLine,
+    });
+  }, [workflow, t]);
   function handleViewChange(nextView: AppView) {
     if (nextView === view) return;
     const markStageVisit = (stage: TaskFlowStageId) => {
@@ -1576,7 +1581,7 @@ export default function App() {
                   setNotice("章節尚未落盤，請稍後再讀取。");
                   setSelectedChapter(null);
                 } else {
-                  setError(err instanceof Error ? err.message : "無法載入章節");
+                  reportApiError(err, "errors.loadChapterFailed");
                 }
               } finally {
                 setBusy(false);
@@ -1590,7 +1595,7 @@ export default function App() {
                 await downloadChapterTxt(storyId, nextChapterId);
                 setHasExportedChapter(true);
               } catch (err) {
-                setError(err instanceof Error ? err.message : "無法下載章節");
+                reportApiError(err, "errors.downloadChapterFailed");
               } finally {
                 setBusy(false);
               }
@@ -1970,7 +1975,7 @@ export default function App() {
                 await downloadChapterTxt(storyId, chapterToExport);
                 setHasExportedChapter(true);
               } catch (err) {
-                setError(err instanceof Error ? err.message : "無法下載章節");
+                reportApiError(err, "errors.downloadChapterFailed");
               } finally {
                 setBusy(false);
               }

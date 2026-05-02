@@ -19,7 +19,7 @@ isProject: false
 - 在 `[backend/app/domain/schema.py](backend/app/domain/schema.py)` 新增小型模型，例如：
   - `StoryCastSeedEntry`：`canonical_name: str`（必填）、`role: MacroCastRole | None`（可選，供提示用）、`short_hint: str`（可選，一句話給 macro 參考）。
 - `**StoryInput`**：`cast_seed: list[StoryCastSeedEntry] = Field(default_factory=list)`。
-- `**StoryPatch**`：可選 `cast_seed: list[StoryCastSeedEntry] | None`（與既有 patch 規則一致：有 workflow 後鎖定等仍由現有邏輯處理）。
+- `**StoryPatch`**：可選 `cast_seed: list[StoryCastSeedEntry] | None`（與既有 patch 規則一致：有 workflow 後鎖定等仍由現有邏輯處理）。
 - **SQLite**：在 `[database.py](backend/app/repositories/sqlite/database.py)` 以 `_ensure_column` 新增 `cast_seed_json TEXT NOT NULL DEFAULT '[]'`。
 - **Repository**：`[story_repository.py](backend/app/repositories/sqlite/story_repository.py)` 的 `create_story` / `patch_story` / `get_story` 讀寫 `cast_seed_json`（與 `cast_json` 區分：`cast_json` 仍為 **macro compile 產出**，`cast_seed` 為 **使用者預先指定的核心名單**）。
 

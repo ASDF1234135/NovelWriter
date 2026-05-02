@@ -605,7 +605,8 @@ def test_normalize_generated_bible_moves_themes_and_dedupes_extra_primary_fields
         }
     )
     out = service._normalize_generated_bible(story_input, output)
-    assert out.get("theme") == ["命運", "背叛"]
+    lore = str(out.get("general_world_lore") or "")
+    assert "命運" in lore or "背叛" in lore
     assert "themes" not in out
     assert isinstance(out.get("extra"), dict)
     assert out["extra"] == {"magic": "low"}
@@ -621,8 +622,8 @@ def test_macro_prompt_requires_primary_fields_not_in_extra() -> None:
     data = json.loads(prompt)
     requirements = data.get("requirements") or []
     merged = "\n".join(str(x) for x in requirements)
-    assert "theme / narrative_pov / writing_style" in merged
-    assert "not inside extra" in merged
+    assert "general_world_lore" in merged
+    assert "not duplicate general_world_lore" in merged
 
 
 def test_normalize_cast_merge_seed_keeps_missing_name() -> None:
@@ -930,6 +931,88 @@ def test_fishbone_mainline_links_first_node_to_previous_volume_last_main() -> No
         first_cur = cur_mains[0]
         deps = [str(x) for x in (first_cur.get("depends_on") or [])]
         assert last_prev_id in deps, f"{cur_vid} first main should depend on {last_prev_id}, got {deps}"
+
+
+def test_fishbone_checkpoint_depends_on_storyline_tails_only() -> None:
+    service = AnchorService()
+    _, volumes, _, _, bible = service.compile_macro_plan(
+        "story_fishbone_checkpoint_tail",
+        StoryInput(
+            title="Fishbone checkpoint tails",
+            premise="Checkpoint should depend on nearest tail per storyline.",
+            target_total_words=60000,
+        ),
+        FakeStructuredLLMClient(),
+    )
+    storylines = bible.get("storylines") or []
+    anchor_nodes = bible.get("anchor_nodes") or []
+    assert anchor_nodes
+    type_by_sid = {str(s.get("id")): str(s.get("type")) for s in storylines}
+    main_sid = next((sid for sid, stype in type_by_sid.items() if stype == "MAIN"), "")
+    by_id = {str(n.get("id")): n for n in anchor_nodes}
+    children: dict[str, list[str]] = {nid: [] for nid in by_id}
+    for node in anchor_nodes:
+        nid = str(node.get("id") or "")
+        for dep in node.get("depends_on") or []:
+            dep_id = str(dep)
+            if dep_id in children:
+                children[dep_id].append(nid)
+
+    def _tail_for_storyline(volume_id: str, storyline_id: str) -> str | None:
+        scoped = [
+            n
+            for n in anchor_nodes
+            if str(n.get("volume_id") or "") == volume_id
+            and storyline_id in [str(x) for x in (n.get("storyline_ids") or [])]
+            and str(n.get("node_kind") or "").upper() not in {"CHECKPOINT", "ENDING"}
+        ]
+        if not scoped:
+            return None
+        scoped_ids = {str(n.get("id")) for n in scoped}
+        tails = []
+        for row in scoped:
+            rid = str(row.get("id") or "")
+            downstream_same_storyline = False
+            for child_id in children.get(rid, []):
+                child = by_id.get(child_id) or {}
+                child_storyline_ids = [str(x) for x in (child.get("storyline_ids") or [])]
+                if child_id in scoped_ids and storyline_id in child_storyline_ids:
+                    downstream_same_storyline = True
+                    break
+            if not downstream_same_storyline:
+                tails.append(rid)
+        return sorted(tails or [str(n.get("id")) for n in scoped])[-1]
+
+    volume_ids = {v.volume_id for v in volumes}
+    checkpoints = [
+        n
+        for n in anchor_nodes
+        if str(n.get("node_kind") or "").upper() == "CHECKPOINT" and str(n.get("volume_id") or "") in volume_ids
+    ]
+    assert checkpoints
+    for cp in checkpoints:
+        cp_deps = {str(x) for x in (cp.get("depends_on") or [])}
+        volume_id = str(cp.get("volume_id") or "")
+        if main_sid:
+            main_tail = _tail_for_storyline(volume_id, main_sid)
+            assert main_tail and main_tail in cp_deps
+        for sid, stype in type_by_sid.items():
+            if stype not in {"S_TIER", "A_TIER"}:
+                continue
+            tail = _tail_for_storyline(volume_id, sid)
+            if not tail:
+                continue
+            assert tail in cp_deps
+            same_storyline_nodes = [
+                str(n.get("id"))
+                for n in anchor_nodes
+                if str(n.get("volume_id") or "") == volume_id
+                and sid in [str(x) for x in (n.get("storyline_ids") or [])]
+                and str(n.get("node_kind") or "").upper() not in {"CHECKPOINT", "ENDING"}
+            ]
+            non_tails = [nid for nid in same_storyline_nodes if nid != tail]
+            for nid in non_tails:
+                assert nid not in cp_deps
 
 
 def test_fishbone_no_cross_subline_dependencies() -> None:

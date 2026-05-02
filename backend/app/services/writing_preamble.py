@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 from app.repositories.sqlite.story_repository import StoryRepository
-from app.services.workflow.bible_writing_notes import normalize_writing_note
+from app.services.workflow.bible_general_lore import effective_general_world_lore
 from app.services.workflow.chapter_pacing import (
     build_ending_vibe_cooldown_constraint,
     build_resolution_cooldown_constraint,
-    chapter_distance_to_anchor,
 )
 
 
@@ -40,6 +39,25 @@ def _serialize_summary_row(row: dict) -> dict:
     }
 
 
+def _unachieved_from_anchor_nodes(story: dict) -> list[dict]:
+    nodes = [dict(n) for n in (story.get("anchor_nodes_json") or []) if isinstance(n, dict)]
+    if not nodes:
+        return []
+    unresolved = [n for n in nodes if str(n.get("status") or "").upper() != "RESOLVED"]
+    unresolved.sort(key=lambda n: str(n.get("id") or ""))
+    rows: list[dict] = []
+    for n in unresolved:
+        rows.append(
+            {
+                "anchor_id": str(n.get("id") or ""),
+                "volume_id": str(n.get("volume_id") or ""),
+                "title": str(n.get("title") or ""),
+                "description": str(n.get("description") or ""),
+            }
+        )
+    return rows
+
+
 def build_writing_preamble(repo: StoryRepository, story_id: str, chapter_id: int) -> dict:
     """
     Aggregate milestones, recent summaries, next anchor, and human-readable pacing hints.
@@ -53,8 +71,7 @@ def build_writing_preamble(repo: StoryRepository, story_id: str, chapter_id: int
         raise ValueError("chapter_id must be >= 1")
 
     bible = story.get("bible_json") or {}
-    anchors = repo.list_anchors(story_id)
-    unachieved = [a for a in anchors if int(a["chapter_target"]) >= cid]
+    unachieved = _unachieved_from_anchor_nodes(story)
 
     next_focus: dict | None = None
     if unachieved:
@@ -64,7 +81,6 @@ def build_writing_preamble(repo: StoryRepository, story_id: str, chapter_id: int
             "volume_id": str(a.get("volume_id") or ""),
             "title": str(a.get("title") or ""),
             "description": str(a.get("description") or ""),
-            "chapter_target": int(a["chapter_target"]),
             "priority": int(a.get("priority") or 1),
         }
 
@@ -110,10 +126,11 @@ def build_writing_preamble(repo: StoryRepository, story_id: str, chapter_id: int
             "earlier_chapters_with_summary_count": earlier_count,
         },
         "writing_hints": {
-            "writing_notes": normalize_writing_note(bible.get("writing_note")),
+            "writing_notes": [
+                ln.strip() for ln in effective_general_world_lore(dict(bible)).split("\n") if ln.strip()
+            ],
             "macro_author_notes": str(story.get("macro_author_notes") or ""),
             "next_focus_anchor": next_focus,
-            "chapters_until_next_anchor": chapter_distance_to_anchor(cid, unachieved),
             "pacing_hints": pacing_hints,
         },
     }

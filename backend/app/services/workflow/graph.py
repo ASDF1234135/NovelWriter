@@ -204,54 +204,43 @@ def build_chapter_graph(context: WorkflowContext):
     recorder = WorkflowRecorder(context)
 
     def director_node(state: AgentWorkflowState) -> dict:
-        def _inner(in_state: AgentWorkflowState) -> dict:
-            start = timed()
-            output = run_director(in_state, context)
-            # Cooldown enforcement: if director picks a b_story_type contained in the recent pool,
-            # pause for manual correction (HITL).
-            forbidden = {str(x).strip() for x in (in_state.get("recent_b_story_types") or []) if str(x).strip()}
-            chosen = output.get("b_story_type") or output.get("b_story_type_selected")
-            bdir = output.get("b_story_directive") or ""
-            if not chosen and bdir:
-                for bs in in_state.get("active_b_stories") or []:
-                    if not isinstance(bs, dict):
-                        continue
-                    desc = str(bs.get("desc") or "")
-                    if desc and (desc in bdir or bdir in desc):
-                        chosen = bs.get("type")
-                        break
-            chosen_str = str(chosen).strip() if chosen is not None else ""
-            chosen_norm = chosen_str.upper()
-            forbidden_norm = {f.upper() for f in forbidden}
-            req_b = output.get("request_new_b_story")
-            req_type = ""
-            if isinstance(req_b, dict):
-                req_type = str(req_b.get("type") or "").strip().upper()
-            if req_type and req_type in forbidden_norm:
-                output = {
-                    **output,
-                    "requires_hitl": True,
-                    "hitl_reason": HitlReason.B_STORY_COOLDOWN_VIOLATION,
-                    "hitl_decision_mode": "MANUAL_EDIT",
-                    "workflow_status": WorkflowStatus.WAITING_HITL.value,
-                    "pending_hitl_options": [],
-                    "resume_from": "graph_rag",
-                }
-            elif chosen_norm and chosen_norm in forbidden_norm:
-                output = {
-                    **output,
-                    "requires_hitl": True,
-                        "hitl_reason": HitlReason.B_STORY_COOLDOWN_VIOLATION,
-                    "hitl_decision_mode": "MANUAL_EDIT",
-                    "workflow_status": WorkflowStatus.WAITING_HITL.value,
-                    "pending_hitl_options": [],
-                    "resume_from": "graph_rag",
-                }
-            updated = {**in_state, **output, "last_agent": "director"}
-            recorder.record_and_update_run("director", dict(in_state), output, updated, latency_ms=elapsed_ms(start))
-            return output | {"last_agent": "director", "resume_from": output.get("resume_from", "director")}
-
-        return _run_with_timeout("director", _inner, state)
+        start = timed()
+        output = run_director(state, context)
+        # Cooldown enforcement: if director picks a b_story_type contained in the recent pool,
+        # pause for manual correction (HITL).
+        forbidden = {str(x).strip() for x in (state.get("recent_b_story_types") or []) if str(x).strip()}
+        chosen = output.get("b_story_type") or output.get("b_story_type_selected")
+        bdir = output.get("b_story_directive") or ""
+        chosen_str = str(chosen).strip() if chosen is not None else ""
+        chosen_norm = chosen_str.upper()
+        forbidden_norm = {f.upper() for f in forbidden}
+        req_b = output.get("request_new_b_story")
+        req_type = ""
+        if isinstance(req_b, dict):
+            req_type = str(req_b.get("type") or "").strip().upper()
+        if req_type and req_type in forbidden_norm:
+            output = {
+                **output,
+                "requires_hitl": True,
+                "hitl_reason": HitlReason.B_STORY_COOLDOWN_VIOLATION,
+                "hitl_decision_mode": "MANUAL_EDIT",
+                "workflow_status": WorkflowStatus.WAITING_HITL.value,
+                "pending_hitl_options": [],
+                "resume_from": "graph_rag",
+            }
+        elif chosen_norm and chosen_norm in forbidden_norm:
+            output = {
+                **output,
+                "requires_hitl": True,
+                "hitl_reason": HitlReason.B_STORY_COOLDOWN_VIOLATION,
+                "hitl_decision_mode": "MANUAL_EDIT",
+                "workflow_status": WorkflowStatus.WAITING_HITL.value,
+                "pending_hitl_options": [],
+                "resume_from": "graph_rag",
+            }
+        updated = {**state, **output, "last_agent": "director"}
+        recorder.record_and_update_run("director", dict(state), output, updated, latency_ms=elapsed_ms(start))
+        return output | {"last_agent": "director", "resume_from": output.get("resume_from", "director")}
 
     def graph_rag_node(state: AgentWorkflowState) -> dict:
         start = timed()
@@ -280,103 +269,83 @@ def build_chapter_graph(context: WorkflowContext):
         return merged
 
     def planner_node(state: AgentWorkflowState) -> dict:
-        def _inner(in_state: AgentWorkflowState) -> dict:
-            start = timed()
-            output, masked, tokens, latency = run_planner(in_state, context)
-            output["ground_truth_events"] = _canonicalize_planner_events(
-                list(output.get("ground_truth_events") or []),
-                int(in_state["chapter_id"]),
+        start = timed()
+        output, masked, tokens, latency = run_planner(state, context)
+        output["ground_truth_events"] = _canonicalize_planner_events(
+            list(output.get("ground_truth_events") or []),
+            int(state["chapter_id"]),
+        )
+        output = {**output, "manual_plan_force_approve": False}
+        planned_nodes = list(output.get("proposed_new_nodes") or [])
+        merged_planner = {**output, "planned_graph_nodes": planned_nodes}
+        pending_evolutions = list(state.get("pending_cast_evolutions") or [])
+        for row in list(merged_planner.get("character_evolution_requests") or []):
+            if isinstance(row, dict):
+                pending_evolutions.append(row)
+        merged_planner["pending_cast_evolutions"] = pending_evolutions
+        cooldown = state.get("resolution_cooldown_constraint") or {}
+        vibe_cooldown = state.get("ending_vibe_cooldown_constraint") or {}
+        narrative = str(merged_planner.get("narrative_script") or "")
+        boundary = str(merged_planner.get("ending_boundary_rule") or "")
+        if cooldown.get("active") and _semantic_resolution_cooldown_hitl(context, narrative):
+            merged_planner.update(
+                {
+                    "requires_hitl": True,
+                    "hitl_reason": HitlReason.RESOLUTION_TACTIC_COOLDOWN_VIOLATION,
+                    "hitl_decision_mode": "MANUAL_EDIT",
+                    "workflow_status": WorkflowStatus.WAITING_HITL.value,
+                    "resume_from": "planner",
+                }
             )
-            output = {**output, "manual_plan_force_approve": False}
-            planned_nodes = list(output.get("proposed_new_nodes") or [])
-            merged_planner = {**output, "planned_graph_nodes": planned_nodes}
-            pending_evolutions = list(in_state.get("pending_cast_evolutions") or [])
-            for row in list(merged_planner.get("character_evolution_requests") or []):
-                if isinstance(row, dict):
-                    pending_evolutions.append(row)
-            merged_planner["pending_cast_evolutions"] = pending_evolutions
-            adds_raw = merged_planner.get("new_active_b_stories") or []
-            pending_b: list[dict] = []
-            for row in adds_raw[:2]:
-                if not isinstance(row, dict):
-                    continue
-                bid = str(row.get("id") or "").strip()
-                if not bid:
-                    continue
-                pending_b.append(
-                    {
-                        "id": bid,
-                        "desc": str(row.get("desc") or "")[:800],
-                        "type": str(row.get("type") or "UNKNOWN"),
-                        "resolution_condition": str(row.get("resolution_condition") or "")[:800],
-                    }
-                )
-            merged_planner["pending_b_story_additions"] = pending_b
-            cooldown = in_state.get("resolution_cooldown_constraint") or {}
-            vibe_cooldown = in_state.get("ending_vibe_cooldown_constraint") or {}
-            narrative = str(merged_planner.get("narrative_script") or "")
-            boundary = str(merged_planner.get("ending_boundary_rule") or "")
-            if cooldown.get("active") and _semantic_resolution_cooldown_hitl(context, narrative):
-                merged_planner.update(
-                    {
-                        "requires_hitl": True,
-                        "hitl_reason": HitlReason.RESOLUTION_TACTIC_COOLDOWN_VIOLATION,
-                        "hitl_decision_mode": "MANUAL_EDIT",
-                        "workflow_status": WorkflowStatus.WAITING_HITL.value,
-                        "resume_from": "planner",
-                    }
-                )
-            if (
-                vibe_cooldown.get("active")
-                and "SAFE_ROOM_EXPOSITION" in str(vibe_cooldown.get("forbidden_vibes") or [])
-                and _semantic_vibe_cooldown_hitl(context, boundary, narrative)
-            ):
-                merged_planner.update(
-                    {
-                        "requires_hitl": True,
-                        "hitl_reason": HitlReason.ENDING_VIBE_COOLDOWN_VIOLATION,
-                        "hitl_decision_mode": "MANUAL_EDIT",
-                        "workflow_status": WorkflowStatus.WAITING_HITL.value,
-                        "resume_from": "planner",
-                    }
-                )
-            tmp_state = {**in_state, **merged_planner}
-            apply_length_bounds_to_state(tmp_state)
-            merged_planner["normalized_length_min"] = tmp_state["normalized_length_min"]
-            merged_planner["normalized_length_max"] = tmp_state["normalized_length_max"]
-            pw_hint = list(merged_planner.get("plan_warnings") or [])
-            bind = str(in_state.get("outline_binding_mode") or "ABSENT")
-            if str(in_state.get("ai_freedom_level") or "") == "strict" and bind != "FULL":
-                tag = (
-                    "[大綱模式] 作者大綱未達「具體」長度閾值：AI 可主導補齊結構；"
-                    "人類已寫片段仍須遵守；腦補請以 is_ai_invention=true 標記。"
-                )
-                if tag not in pw_hint:
-                    pw_hint.append(tag)
-            elif bind == "FULL":
-                tag2 = "[大綱模式] outline_binding_mode=FULL：strict 下已寫明情節具約束力。"
-                if tag2 not in pw_hint:
-                    pw_hint.append(tag2)
-            merged_planner["plan_warnings"] = pw_hint
-            updated = {**in_state, **merged_planner, "last_agent": "planner"}
-            recorder.record_and_update_run(
-                "planner",
-                dict(in_state),
-                merged_planner,
-                updated,
-                masked_payload=masked,
-                token_usage=tokens,
-                latency_ms=latency or elapsed_ms(start),
+        if (
+            vibe_cooldown.get("active")
+            and "SAFE_ROOM_EXPOSITION" in str(vibe_cooldown.get("forbidden_vibes") or [])
+            and _semantic_vibe_cooldown_hitl(context, boundary, narrative)
+        ):
+            merged_planner.update(
+                {
+                    "requires_hitl": True,
+                    "hitl_reason": HitlReason.ENDING_VIBE_COOLDOWN_VIOLATION,
+                    "hitl_decision_mode": "MANUAL_EDIT",
+                    "workflow_status": WorkflowStatus.WAITING_HITL.value,
+                    "resume_from": "planner",
+                }
             )
-            return merged_planner | {
-                "last_agent": "planner",
-                "resume_from": "planner",
-                "original_draft_narrative_script": str(merged_planner.get("narrative_script") or ""),
-                "original_draft_must_include_beats": list(merged_planner.get("must_include_beats") or []),
-                "original_draft_ground_truth_events": list(merged_planner.get("ground_truth_events") or []),
-            }
-
-        return _run_with_timeout("planner", _inner, state)
+        tmp_state = {**state, **merged_planner}
+        apply_length_bounds_to_state(tmp_state)
+        merged_planner["normalized_length_min"] = tmp_state["normalized_length_min"]
+        merged_planner["normalized_length_max"] = tmp_state["normalized_length_max"]
+        pw_hint = list(merged_planner.get("plan_warnings") or [])
+        bind = str(state.get("outline_binding_mode") or "ABSENT")
+        if str(state.get("ai_freedom_level") or "") == "strict" and bind != "FULL":
+            tag = (
+                "[大綱模式] 作者大綱未達「具體」長度閾值：AI 可主導補齊結構；"
+                "人類已寫片段仍須遵守；腦補請以 is_ai_invention=true 標記。"
+            )
+            if tag not in pw_hint:
+                pw_hint.append(tag)
+        elif bind == "FULL":
+            tag2 = "[大綱模式] outline_binding_mode=FULL：strict 下已寫明情節具約束力。"
+            if tag2 not in pw_hint:
+                pw_hint.append(tag2)
+        merged_planner["plan_warnings"] = pw_hint
+        updated = {**state, **merged_planner, "last_agent": "planner"}
+        recorder.record_and_update_run(
+            "planner",
+            dict(state),
+            merged_planner,
+            updated,
+            masked_payload=masked,
+            token_usage=tokens,
+            latency_ms=latency or elapsed_ms(start),
+        )
+        return merged_planner | {
+            "last_agent": "planner",
+            "resume_from": "planner",
+            "original_draft_narrative_script": str(merged_planner.get("narrative_script") or ""),
+            "original_draft_must_include_beats": list(merged_planner.get("must_include_beats") or []),
+            "original_draft_ground_truth_events": list(merged_planner.get("ground_truth_events") or []),
+        }
 
     def logic_alignment_node(state: AgentWorkflowState) -> dict:
         start = timed()
@@ -513,7 +482,7 @@ def build_chapter_graph(context: WorkflowContext):
                     "resume_from": "planner",
                 }
             else:
-                route = "author" if approved else "planner"
+                route = "logic_alignment" if approved else "planner"
                 updates = {
                     "requires_hitl": False,
                     "hitl_reason": "",
@@ -535,7 +504,7 @@ def build_chapter_graph(context: WorkflowContext):
             "plan_warnings": plan_warnings,
             "last_agent": "plan_supervisor",
             "plan_route": route,
-            "resume_from": "author" if approved else updates.get("resume_from", state.get("resume_from", "planner")),
+            "resume_from": "logic_alignment" if approved else updates.get("resume_from", state.get("resume_from", "planner")),
         }
         recorder.record(
             "plan_supervisor",
@@ -549,35 +518,32 @@ def build_chapter_graph(context: WorkflowContext):
         return merged
 
     def author_node(state: AgentWorkflowState) -> dict:
-        def _inner(in_state: AgentWorkflowState) -> dict:
-            start = timed()
-            output, masked, tokens, latency = run_author(in_state, context)
-            hints = list(output.get("author_extraction_surface_hints") or [])
-            updated = {
-                **in_state,
-                **output,
-                "current_draft": output["chapter_content"],
-                "author_extraction_surface_hints": hints,
-                "last_agent": "author",
-            }
-            recorder.record_and_update_run(
-                "author",
-                masked,
-                output,
-                updated,
-                masked_payload=masked,
-                token_usage=tokens,
-                latency_ms=latency or elapsed_ms(start),
-            )
-            return {
-                "current_draft": output["chapter_content"],
-                "author_extraction_surface_hints": hints,
-                "word_count": output.get("word_count", 0),
-                "last_agent": "author",
-                "resume_from": "author",
-            }
-
-        return _run_with_timeout("author", _inner, state)
+        start = timed()
+        output, masked, tokens, latency = run_author(state, context)
+        hints = list(output.get("author_extraction_surface_hints") or [])
+        updated = {
+            **state,
+            **output,
+            "current_draft": output["chapter_content"],
+            "author_extraction_surface_hints": hints,
+            "last_agent": "author",
+        }
+        recorder.record_and_update_run(
+            "author",
+            masked,
+            output,
+            updated,
+            masked_payload=masked,
+            token_usage=tokens,
+            latency_ms=latency or elapsed_ms(start),
+        )
+        return {
+            "current_draft": output["chapter_content"],
+            "author_extraction_surface_hints": hints,
+            "word_count": output.get("word_count", 0),
+            "last_agent": "author",
+            "resume_from": "author",
+        }
 
     def draft_supervisor_node(state: AgentWorkflowState) -> dict:
         start = timed()
@@ -640,63 +606,60 @@ def build_chapter_graph(context: WorkflowContext):
         return merged
 
     def reader_node(state: AgentWorkflowState) -> dict:
-        def _inner(in_state: AgentWorkflowState) -> dict:
-            start = timed()
-            output = run_reader(in_state, context)
-            retry_count = in_state["reader_retry_count"] + (0 if output["is_approved"] else 1)
-            draft_loop_retry_count = in_state.get("draft_loop_retry_count", 0) + (0 if output["is_approved"] else 1)
-            best_score = in_state["best_draft_score"]
-            best_content = in_state["best_draft_content"]
-            if output["literary_score"] >= best_score:
-                best_score = output["literary_score"]
-                best_content = in_state["current_draft"]
-            if output["is_approved"]:
-                route = "extraction_gate"
-                current_draft = in_state["current_draft"]
-            elif draft_loop_retry_count > in_state.get("draft_loop_retry_limit", 3):
-                route = "extraction_gate"
-                current_draft = best_content or in_state["current_draft"]
-            else:
-                route = "author"
-                current_draft = in_state["current_draft"]
-            reader_feedback = list(in_state["reader_feedback"])
-            if not output["is_approved"]:
-                reader_feedback.append(
-                    {
-                        "score": output["literary_score"],
-                        "message": output["critique"],
-                        "suggestion": output["suggestion_type"],
-                    }
-                )
-            merged = {
-                **output,
-                "draft_loop_retry_count": draft_loop_retry_count,
-                "reader_retry_count": retry_count,
-                "reader_feedback": reader_feedback,
-                "best_draft_score": best_score,
-                "best_draft_content": best_content,
-                "current_draft": current_draft,
-                "last_reader_score": output["literary_score"],
-                "last_agent": "reader",
-                "reader_route": route,
-                "resume_from": "author" if route == "author" else "extraction_gate",
-            }
-            recorder.record_and_update_run(
-                "reader",
-                dict(in_state),
-                merged,
-                {**in_state, **merged},
-                latency_ms=elapsed_ms(start),
-                route_decision=route,
+        start = timed()
+        output = run_reader(state, context)
+        retry_count = state["reader_retry_count"] + (0 if output["is_approved"] else 1)
+        draft_loop_retry_count = state.get("draft_loop_retry_count", 0) + (0 if output["is_approved"] else 1)
+        best_score = state["best_draft_score"]
+        best_content = state["best_draft_content"]
+        if output["literary_score"] >= best_score:
+            best_score = output["literary_score"]
+            best_content = state["current_draft"]
+        if output["is_approved"]:
+            route = "extraction_gate"
+            current_draft = state["current_draft"]
+        elif draft_loop_retry_count > state.get("draft_loop_retry_limit", 3):
+            route = "extraction_gate"
+            current_draft = best_content or state["current_draft"]
+        else:
+            route = "author"
+            current_draft = state["current_draft"]
+        reader_feedback = list(state["reader_feedback"])
+        if not output["is_approved"]:
+            reader_feedback.append(
+                {
+                    "score": output["literary_score"],
+                    "message": output["critique"],
+                    "suggestion": output["suggestion_type"],
+                }
             )
-            return merged
-
-        return _run_with_timeout("reader", _inner, state)
+        merged = {
+            **output,
+            "draft_loop_retry_count": draft_loop_retry_count,
+            "reader_retry_count": retry_count,
+            "reader_feedback": reader_feedback,
+            "best_draft_score": best_score,
+            "best_draft_content": best_content,
+            "current_draft": current_draft,
+            "last_reader_score": output["literary_score"],
+            "last_agent": "reader",
+            "reader_route": route,
+            "resume_from": "author" if route == "author" else "extraction_gate",
+        }
+        recorder.record_and_update_run(
+            "reader",
+            dict(state),
+            merged,
+            {**state, **merged},
+            latency_ms=elapsed_ms(start),
+            route_decision=route,
+        )
+        return merged
 
     def extraction_gate_node(state: AgentWorkflowState) -> dict:
         start = timed()
         gate_out = run_extraction_gate(state, context)
-        route = gate_out.get("post_polish_route") or "anchor_resolve"
+        route = str(gate_out.get("extraction_route") or "continue")
         if route == "author":
             entry = gate_out.get("extraction_gate_feedback_entry") or {}
             draft_feedback = list(state["draft_feedback"])
@@ -723,7 +686,7 @@ def build_chapter_graph(context: WorkflowContext):
                     ],
                     "last_agent": "extraction_gate",
                     "resume_from": "extraction_gate",
-                    "post_polish_route": "hitl",
+                    "extraction_route": "hitl",
                 }
             else:
                 merged = {
@@ -734,14 +697,16 @@ def build_chapter_graph(context: WorkflowContext):
                     "hitl_extraction_remap_hints": hints,
                     "last_agent": "extraction_gate",
                     "resume_from": "author",
+                    "extraction_route": "author",
                 }
         else:
-            next_resume = "copyeditor" if get_settings().copyeditor_enabled else "output_language_gate"
+            route = "copyeditor" if get_settings().copyeditor_enabled else "output_language_gate"
             merged = {
                 **gate_out,
                 "extraction_gate_failure_streak": 0,
                 "last_agent": "extraction_gate",
-                "resume_from": next_resume,
+                "resume_from": route,
+                "extraction_route": route,
             }
         recorder.record_and_update_run(
             "extraction_gate",
@@ -849,7 +814,6 @@ def build_chapter_graph(context: WorkflowContext):
             "workflow_status": WorkflowStatus.RUNNING.value,
             "last_agent": "state_updater",
             "commit_executed": False,
-            "pending_b_story_additions": [],
             "pending_cast_updates": [],
             "pending_cast_evolutions": [],
             "resume_from": "commit_to_databases",
@@ -1001,15 +965,15 @@ def build_chapter_graph(context: WorkflowContext):
     def route_reader(state: AgentWorkflowState) -> str:
         return state["reader_route"]
 
-    def route_post_polish(state: AgentWorkflowState) -> str:
-        r = state.get("post_polish_route") or "anchor_resolve"
-        if r == "hitl":
-            return "hitl"
+    def route_extraction_gate(state: AgentWorkflowState) -> str:
+        r = str(state.get("extraction_route") or "")
         if r == "author":
             return "author"
-        if get_settings().copyeditor_enabled:
-            return "copyeditor"
-        return "output_language_gate"
+        if r == "hitl":
+            return "hitl"
+        if r == "output_language_gate":
+            return "output_language_gate"
+        return "copyeditor" if get_settings().copyeditor_enabled else "output_language_gate"
 
     def route_output_language_gate(state: AgentWorkflowState) -> str:
         return str(state.get("language_gate_route") or "chapter_summarizer")
@@ -1090,7 +1054,7 @@ def build_chapter_graph(context: WorkflowContext):
     graph.add_conditional_edges(
         "plan_supervisor",
         route_plan_supervisor,
-        {"planner": "planner", "author": "logic_alignment", "hitl": "hitl"},
+        {"planner": "planner", "logic_alignment": "logic_alignment", "hitl": "hitl"},
     )
     graph.add_conditional_edges(
         "logic_alignment",
@@ -1110,7 +1074,7 @@ def build_chapter_graph(context: WorkflowContext):
     )
     graph.add_conditional_edges(
         "extraction_gate",
-        route_post_polish,
+        route_extraction_gate,
         {
             "author": "author",
             "copyeditor": "copyeditor",

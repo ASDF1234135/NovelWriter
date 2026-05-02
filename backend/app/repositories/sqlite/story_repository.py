@@ -435,66 +435,6 @@ class StoryRepository:
             ).fetchall()
             return list(rows)
 
-    def store_anchors(self, story_id: str, anchors: list[Any]) -> None:
-        with self.db.connection() as conn:
-            conn.execute("DELETE FROM anchors WHERE story_id = ?", (story_id,))
-            for anchor in anchors:
-                if isinstance(anchor, dict):
-                    anchor_id = str(anchor.get("anchor_id") or "").strip()
-                    volume_id = str(anchor.get("volume_id") or "").strip()
-                    title = str(anchor.get("title") or "")
-                    description = str(anchor.get("description") or "")
-                    target_state = anchor.get("target_state") if isinstance(anchor.get("target_state"), dict) else {}
-                    chapter_target = int(anchor.get("chapter_target") or 1)
-                    priority = int(anchor.get("priority") or 1)
-                else:
-                    anchor_id = str(getattr(anchor, "anchor_id", "")).strip()
-                    volume_id = str(getattr(anchor, "volume_id", "")).strip()
-                    title = str(getattr(anchor, "title", ""))
-                    description = str(getattr(anchor, "description", ""))
-                    raw_ts = getattr(anchor, "target_state", {})
-                    target_state = raw_ts if isinstance(raw_ts, dict) else {}
-                    chapter_target = int(getattr(anchor, "chapter_target", 1) or 1)
-                    priority = int(getattr(anchor, "priority", 1) or 1)
-                conn.execute(
-                    """
-                    INSERT INTO anchors (anchor_id, story_id, volume_id, title, description, target_state_json, chapter_target, priority)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        anchor_id,
-                        story_id,
-                        volume_id,
-                        title,
-                        description,
-                        self.db.dumps(target_state),
-                        chapter_target,
-                        priority,
-                    ),
-                )
-
-    def list_anchors(self, story_id: str) -> list[dict]:
-        with self.db.connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM anchors WHERE story_id = ? ORDER BY chapter_target, priority",
-                (story_id,),
-            ).fetchall()
-            for row in rows:
-                row["target_state_json"] = self.db.loads(row["target_state_json"])
-            return list(rows)
-
-    def update_anchor_chapter_target(self, story_id: str, anchor_id: str, new_chapter_target: int) -> None:
-        with self.db.connection() as conn:
-            cur = conn.execute(
-                """
-                UPDATE anchors SET chapter_target = ?
-                WHERE story_id = ? AND anchor_id = ?
-                """,
-                (int(new_chapter_target), story_id, anchor_id),
-            )
-            if cur.rowcount == 0:
-                raise KeyError(f"Anchor not found: {story_id}/{anchor_id}")
-
     def upsert_chapter_content(self, story_id: str, chapter_id: int, title: str, content: str, status: str) -> None:
         chapter_key = f"{story_id}:{chapter_id}"
         with self.db.connection() as conn:
@@ -544,56 +484,6 @@ class StoryRepository:
                 (story_id,),
             ).fetchall()
             return list(rows)
-
-    def merge_active_b_stories_seed(self, story_id: str, entries: list[dict[str, Any]]) -> None:
-        """Append macro-planner (or other) b-story seeds into bible_json.active_b_stories (dedupe by id)."""
-        if not entries:
-            return
-        story = self.get_story(story_id)
-        if not story:
-            raise KeyError(f"Story not found: {story_id}")
-        bible = dict(story.get("bible_json") or {})
-        active: list[dict] = list(bible.get("active_b_stories") or [])
-        seen = {str(x.get("id")) for x in active if isinstance(x, dict) and x.get("id")}
-        for raw in entries:
-            bid = str(raw.get("id") or "").strip()
-            if not bid or bid in seen:
-                continue
-            seen.add(bid)
-            active.append(
-                {
-                    "id": bid,
-                    "desc": str(raw.get("desc") or "")[:800],
-                    # Optional typology label (for cooldown). Backward compatible: missing => "UNKNOWN".
-                    "type": str(raw.get("type") or "UNKNOWN"),
-                    "resolution_condition": str(raw.get("resolution_condition") or "")[:800],
-                }
-            )
-        bible["active_b_stories"] = active
-        with self.db.connection() as conn:
-            conn.execute(
-                "UPDATE stories SET bible_json = ? WHERE story_id = ?",
-                (self.db.dumps(bible), story_id),
-            )
-
-    def remove_resolved_b_stories_from_bible(self, story_id: str, resolved_ids: list[str]) -> None:
-        """Remove completed b-story ids from bible_json.active_b_stories (same transaction context as caller)."""
-        if not resolved_ids:
-            return
-        story = self.get_story(story_id)
-        if not story:
-            raise KeyError(f"Story not found: {story_id}")
-        rid_set = {str(x).strip() for x in resolved_ids if str(x).strip()}
-        if not rid_set:
-            return
-        bible = dict(story.get("bible_json") or {})
-        active = [x for x in (bible.get("active_b_stories") or []) if str(x.get("id", "")) not in rid_set]
-        bible["active_b_stories"] = active
-        with self.db.connection() as conn:
-            conn.execute(
-                "UPDATE stories SET bible_json = ? WHERE story_id = ?",
-                (self.db.dumps(bible), story_id),
-            )
 
     def upsert_chapter_summary(
         self,
@@ -751,7 +641,6 @@ class StoryRepository:
         with self.db.connection() as conn:
             conn.execute("DELETE FROM chapters WHERE story_id = ?", (story_id,))
             conn.execute("DELETE FROM volumes WHERE story_id = ?", (story_id,))
-            conn.execute("DELETE FROM anchors WHERE story_id = ?", (story_id,))
             conn.execute("DELETE FROM chapter_summaries WHERE story_id = ?", (story_id,))
             conn.execute("DELETE FROM milestone_summaries WHERE story_id = ?", (story_id,))
             conn.execute("DELETE FROM stories WHERE story_id = ?", (story_id,))

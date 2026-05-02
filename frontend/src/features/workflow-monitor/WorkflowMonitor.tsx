@@ -26,7 +26,7 @@ function asStringArray(v: unknown): string[] {
 }
 
 export function WorkflowMonitor({ workflow, variant = "default" }: Props) {
-  const { locale } = useI18n();
+  const { locale, t } = useI18n();
   const [alignmentOpen, setAlignmentOpen] = useState(false);
   const compact = variant === "compact";
   const shell = compact
@@ -105,10 +105,18 @@ export function WorkflowMonitor({ workflow, variant = "default" }: Props) {
           <span>{locale === "en" ? "Resume From" : locale === "zh-Hans" ? "接续位置" : "接續位置"}：{resumeDisplay(String(state.resume_from ?? ""))}</span>
           {String(state.workflow_status ?? "") === "FAILED" ? (
             <>
-              <span>失敗類型：{failureType || "ERROR"}</span>
-              <span>Timeout 分級：{timeoutBucket || "—"}</span>
-              <span>資料提交：{commitExecuted ? "已提交" : "未提交"}</span>
-              <span>Thread Reset：{threadResetDone ? "完成" : "未完成"}</span>
+              <span>
+                {t("workflow.monitor.failureType")}：{failureType || "ERROR"}
+              </span>
+              <span>
+                {t("workflow.monitor.timeoutTier")}：{timeoutBucket || "—"}
+              </span>
+              <span>
+                {t("workflow.monitor.dataCommit")}：{commitExecuted ? t("workflow.monitor.committedYes") : t("workflow.monitor.committedNo")}
+              </span>
+              <span>
+                {t("workflow.monitor.threadReset")}：{threadResetDone ? t("workflow.monitor.resetDone") : t("workflow.monitor.resetPending")}
+              </span>
             </>
           ) : null}
         </div>
@@ -123,7 +131,9 @@ export function WorkflowMonitor({ workflow, variant = "default" }: Props) {
       ) : null}
       {!compact && planWarnings.length > 0 ? (
         <div className="mt-3 rounded-lg border border-secondary/20 bg-secondary/5 px-3 py-2">
-          <p className="font-label text-[10px] uppercase tracking-wider text-secondary">規劃提醒 / plan_warnings</p>
+          <p className="font-label text-[10px] uppercase tracking-wider text-secondary">
+            {t("workflow.monitor.planWarningsLabel")} / plan_warnings
+          </p>
           <ul className="mt-1 list-inside list-disc font-body text-xs text-on-surface">
             {planWarnings.slice(0, 12).map((w, i) => (
               <li key={i}>{w}</li>
@@ -133,7 +143,9 @@ export function WorkflowMonitor({ workflow, variant = "default" }: Props) {
       ) : null}
       {!compact && conflictNotes.length > 0 ? (
         <div className="mt-3 rounded-lg border border-tertiary/25 bg-tertiary/5 px-3 py-2">
-          <p className="font-label text-[10px] uppercase tracking-wider text-tertiary">設定衝突（human_outline_conflict_notes）</p>
+          <p className="font-label text-[10px] uppercase tracking-wider text-tertiary">
+            {t("workflow.monitor.conflictNotesLabel")}（human_outline_conflict_notes）
+          </p>
           <ul className="mt-1 list-inside list-disc font-body text-xs text-on-surface">
             {conflictNotes.map((w, i) => (
               <li key={i}>{w}</li>
@@ -148,7 +160,8 @@ export function WorkflowMonitor({ workflow, variant = "default" }: Props) {
             className="font-label text-xs text-primary underline-offset-2 hover:underline"
             onClick={() => setAlignmentOpen((o) => !o)}
           >
-            {alignmentOpen ? "收合" : "展開"} logic_alignment 日誌
+            {alignmentOpen ? t("workflow.monitor.alignmentToggleCollapse") : t("workflow.monitor.alignmentToggleExpand")}{" "}
+            {t("workflow.monitor.alignmentLogAria")}
           </button>
           {alignmentOpen ? (
             <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded-lg border border-outline-variant/15 bg-surface-container-highest/50 p-2 font-mono text-[11px] text-on-surface">

@@ -31,13 +31,10 @@ def test_plan_supervisor_allows_partial_convergence_before_anchor_chapter(tmp_pa
     state = {
         "chapter_id": 1,
         "active_epoch_id": "epoch_present",
-        "target_anchor_id": "anchor_06",
-        "unachieved_anchors": [
-            {
-                "anchor_id": "anchor_06",
-                "chapter_target": 6,
-            }
-        ],
+        "selected_anchor_ids": ["anchor_06"],
+        "anchor_nodes": [{"id": "anchor_06", "title": "A6", "depends_on": []}],
+        "anchor_candidates": ["anchor_06"],
+        "resolved_anchors": [],
         "ground_truth_events": [
             {
                 "event_id": "e001",
@@ -45,7 +42,7 @@ def test_plan_supervisor_allows_partial_convergence_before_anchor_chapter(tmp_pa
                 "caused_by_event_id": None,
             }
         ],
-        "narrative_script": "本章建立穩定日常與微小異常，章末以召喚令迫使主角離開熟悉環境。",
+        "narrative_script": "本章建立穩定日常與微小異常，並沿著 anchor_06 的方向鋪墊，章末以召喚令迫使主角離開熟悉環境。",
         "chapter_start_location": "舊城區住處",
         "chapter_end_location_hint": "王都西門",
         "must_include_beats": ["發現異常", "離開住處"],
@@ -60,9 +57,9 @@ def test_plan_supervisor_allows_partial_convergence_before_anchor_chapter(tmp_pa
 
     output, payload = run_plan_supervisor(state, context)
 
-    assert payload["partial_convergence_allowed"] is True
+    assert payload["selected_anchor_ids"] == ["anchor_06"]
     assert output["is_approved"] is True
-    assert output["anchor_achieved"] is False
+    assert output["anchor_achieved"] is True
 
 
 def test_plan_supervisor_requires_anchor_completion_on_target_chapter(tmp_path) -> None:
@@ -70,13 +67,10 @@ def test_plan_supervisor_requires_anchor_completion_on_target_chapter(tmp_path) 
     state = {
         "chapter_id": 6,
         "active_epoch_id": "epoch_present",
-        "target_anchor_id": "anchor_06",
-        "unachieved_anchors": [
-            {
-                "anchor_id": "anchor_06",
-                "chapter_target": 6,
-            }
-        ],
+        "selected_anchor_ids": ["anchor_06"],
+        "anchor_nodes": [{"id": "anchor_06", "title": "A6", "depends_on": []}],
+        "anchor_candidates": ["anchor_06"],
+        "resolved_anchors": [],
         "ground_truth_events": [
             {
                 "event_id": "e006",
@@ -99,7 +93,7 @@ def test_plan_supervisor_requires_anchor_completion_on_target_chapter(tmp_path) 
 
     output, payload = run_plan_supervisor(state, context)
 
-    assert payload["partial_convergence_allowed"] is False
+    assert payload["selected_anchor_ids"] == ["anchor_06"]
     assert output["is_approved"] is False
     assert "ANCHOR_DIVERGENCE" in output["violation_type"]
 
@@ -109,8 +103,10 @@ def test_plan_supervisor_rejects_word_count_below_beat_floor(tmp_path) -> None:
     state = {
         "chapter_id": 1,
         "active_epoch_id": "epoch_present",
-        "target_anchor_id": "anchor_06",
-        "unachieved_anchors": [{"anchor_id": "anchor_06", "chapter_target": 6}],
+        "selected_anchor_ids": ["anchor_06"],
+        "anchor_nodes": [{"id": "anchor_06", "title": "A6", "depends_on": []}],
+        "anchor_candidates": ["anchor_06"],
+        "resolved_anchors": [],
         "ground_truth_events": [
             {"event_id": "e1", "description": "新事件。", "caused_by_event_id": None},
         ],

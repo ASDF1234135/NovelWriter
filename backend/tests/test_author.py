@@ -243,12 +243,12 @@ def test_author_prompt_includes_writing_note_block() -> None:
             recent_entity_names=[],
             draft_feedback=[],
             reader_feedback=[],
-            writing_note=["短句優先", "避免過度抒情"],
+            general_world_lore="短句優先\n避免過度抒情",
             safe_chapter_rules="遊戲規則：每回合只能行動一次；不可瞬間破局。",
             length_adjustment="NONE",
         )
     )
-    assert "## Author writing_note (hard)" in prompt
+    assert "## Author world / craft lore (hard)" in prompt
     assert "## Absolute chapter laws" in prompt
     assert "每回合只能行動一次" in prompt
     assert "短句優先" in prompt

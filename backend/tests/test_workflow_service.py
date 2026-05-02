@@ -5,6 +5,7 @@ from app.domain.schema import (
     CharacterEvolutionRequest,
     EventOutline,
     HitlAnchorDelayRequest,
+    HitlAnchorResolutionRequest,
     HitlContextPruneRequest,
     HitlDecisionRequest,
     HitlExtractionHintsRequest,
@@ -285,9 +286,9 @@ def test_resume_from_reader_does_not_crash_keyerror(tmp_path, monkeypatch) -> No
         }
 
     def fake_run_extraction_gate(state, context):
-        # Skip heavy extraction; drive the graph into b_story_resolve and then state_updater.
+        # Skip heavy extraction and continue through the fixed post-draft chain.
         return {
-            "post_polish_route": "resolve_subplots",
+            "extraction_route": "continue",
             "pending_chapter_extraction": {"entities": [], "relations": []},
             "extraction_gate_error": "",
         }
@@ -315,7 +316,7 @@ def test_hitl_outline_edit_auto_resumes(tmp_path) -> None:
         )
     )
     service.macro_compile(story["story_id"])
-    anchors = service.story_repository.list_anchors(story["story_id"])
+    anchors: list[dict] = []
     story_row = service.story_repository.get_story(story["story_id"])
     state = build_initial_state(
         story["story_id"],
@@ -357,7 +358,7 @@ def test_hitl_decision_resets_counters_after_draft_loop(monkeypatch, tmp_path) -
         )
     )
     service.macro_compile(story["story_id"])
-    anchors = service.story_repository.list_anchors(story["story_id"])
+    anchors: list[dict] = []
     story_row = service.story_repository.get_story(story["story_id"])
     state = build_initial_state(
         story["story_id"],
@@ -394,7 +395,7 @@ def test_hitl_outline_sets_resume_from_by_reason(monkeypatch, tmp_path) -> None:
         )
     )
     service.macro_compile(story["story_id"])
-    anchors = service.story_repository.list_anchors(story["story_id"])
+    anchors: list[dict] = []
     story_row = service.story_repository.get_story(story["story_id"])
     base = build_initial_state(
         story["story_id"],
@@ -573,7 +574,7 @@ def test_hitl_force_approve_plan_sets_resume_author(monkeypatch, tmp_path) -> No
         )
     )
     service.macro_compile(story["story_id"])
-    anchors = service.story_repository.list_anchors(story["story_id"])
+    anchors: list[dict] = []
     story_row = service.story_repository.get_story(story["story_id"])
     state = build_initial_state(
         story["story_id"],
@@ -606,10 +607,11 @@ def test_hitl_anchor_delay_updates_anchor_row(monkeypatch, tmp_path) -> None:
         )
     )
     service.macro_compile(story["story_id"])
-    anchors = service.story_repository.list_anchors(story["story_id"])
-    story_row = service.story_repository.get_story(story["story_id"])
-    aid = str(anchors[0]["anchor_id"])
-    old_ct = int(anchors[0]["chapter_target"])
+    story_row = service.story_repository.get_story(story["story_id"]) or {}
+    nodes = [dict(n) for n in (story_row.get("anchor_nodes_json") or []) if isinstance(n, dict)]
+    assert nodes
+    aid = str((nodes[0] or {}).get("id") or "")
+    anchors: list[dict] = []
     state = build_initial_state(
         story["story_id"],
         1,
@@ -625,11 +627,13 @@ def test_hitl_anchor_delay_updates_anchor_row(monkeypatch, tmp_path) -> None:
 
     service.handle_hitl_anchor_delay(
         run.run_id,
-        HitlAnchorDelayRequest(anchor_id=aid, new_chapter_target=old_ct + 4),
+        HitlAnchorDelayRequest(anchor_id=aid, action="defer"),
     )
-    rows = service.story_repository.list_anchors(story["story_id"])
-    match = next(r for r in rows if str(r["anchor_id"]) == aid)
-    assert int(match["chapter_target"]) == old_ct + 4
+    story_after = service.story_repository.get_story(story["story_id"]) or {}
+    nodes_after = [dict(n) for n in (story_after.get("anchor_nodes_json") or []) if isinstance(n, dict)]
+    match = next(r for r in nodes_after if str(r.get("id") or "") == aid)
+    props = dict(match.get("properties") or {})
+    assert props.get("hitl_deferred") is True
 
 
 def test_hitl_decision_raises_when_not_paused(tmp_path) -> None:
@@ -783,7 +787,7 @@ def test_start_run_bootstraps_lore_and_cooldown_constraints(tmp_path) -> None:
     assert st["resolution_cooldown_constraint"].get("active") is True
 
 
-def test_start_run_bootstraps_writing_note_from_bible(tmp_path) -> None:
+def test_start_run_bootstraps_general_world_lore_from_bible(tmp_path) -> None:
     service = build_service(str(tmp_path / "workflow_writing_note.sqlite3"))
     story = service.create_story(
         StoryInput(
@@ -795,10 +799,11 @@ def test_start_run_bootstraps_writing_note_from_bible(tmp_path) -> None:
     )
     wf = service.start_run_chapter(story["story_id"], 1)
     st = wf["state"]
-    assert "短句優先" in st["writing_note"]
-    assert "避免過度抒情" in st["writing_note"]
-    assert any("命名節制" in line for line in st["writing_note"])
-    assert any("去標籤化" in line for line in st["writing_note"])
+    lore = st["general_world_lore"]
+    assert "短句優先" in lore
+    assert "避免過度抒情" in lore
+    assert "命名節制" in lore
+    assert "去標籤化" in lore
 
 
 def test_hitl_extraction_hints_disabled(tmp_path) -> None:
@@ -976,6 +981,175 @@ def test_start_run_chapter_sets_target_word_count_from_output_language_en(tmp_pa
     wf = service.start_run_chapter(story["story_id"], 1)
     assert wf["state"]["story_output_language"] == "en"
     assert wf["state"]["target_word_count"] == 360
+
+
+def test_start_run_chapter_keeps_outline_aliases_in_sync(tmp_path) -> None:
+    service = build_service(str(tmp_path / "workflow_outline_alias.sqlite3"))
+    story = service.create_story(StoryInput(title="T", premise="p", bible={}, target_total_words=12000))
+    wf = service.start_run_chapter(story["story_id"], 1, chapter_outline="  人類大綱  ")
+    state = wf["state"]
+    assert state["chapter_outline"] == "人類大綱"
+    assert state["author_chapter_plan"] == "人類大綱"
+
+
+def test_start_run_chapter_normalizes_legacy_target_anchor_id_to_selected_list(tmp_path) -> None:
+    service = build_service(str(tmp_path / "workflow_anchor_alias.sqlite3"))
+    story = service.create_story(StoryInput(title="T", premise="p", bible={}, target_total_words=12000))
+    wf = service.start_run_chapter(story["story_id"], 1)
+    state = wf["state"]
+    selected = list(state.get("selected_anchor_ids") or [])
+    if selected:
+        assert state["target_anchor_id"] == selected[0]
+
+
+def test_start_run_chapter_rejects_next_anchor_checkpoint_even_when_selected_is_valid(tmp_path) -> None:
+    service = build_service(str(tmp_path / "workflow_next_checkpoint_guardrail.sqlite3"))
+    story = service.create_story(StoryInput(title="T", premise="p", bible={}, target_total_words=12000))
+    service.macro_compile(story["story_id"])
+    story_row = service.story_repository.get_story(story["story_id"]) or {}
+    nodes = list(story_row.get("anchor_nodes_json") or [])
+    selected = next(
+        (
+            str(n.get("id"))
+            for n in nodes
+            if str(n.get("node_kind") or "").upper() == "NORMAL" and str(n.get("status") or "").upper() == "UNLOCKED"
+        ),
+        "",
+    )
+    checkpoint = next((str(n.get("id")) for n in nodes if str(n.get("node_kind") or "").upper() == "CHECKPOINT"), "")
+    assert selected and checkpoint
+    with pytest.raises(ValueError, match="has unmet dependencies|cannot directly target checkpoint/ending"):
+        service.start_run_chapter(
+            story["story_id"],
+            1,
+            selected_anchor_ids=[selected],
+            next_anchor_ids=[checkpoint],
+        )
+
+
+def test_resume_reader_legacy_post_polish_route_still_completes(tmp_path, monkeypatch) -> None:
+    service = build_service(str(tmp_path / "workflow_legacy_post_polish.sqlite3"))
+    story = service.create_story(StoryInput(title="T", premise="p", bible={}, target_total_words=12000))
+    initial_state = build_initial_state(story["story_id"], 1, [], "trace-legacy-post-polish")
+    initial_state["resume_from"] = "reader"
+    run = service.workflow_repository.create_run(story["story_id"], 1, initial_state)
+
+    def fake_run_reader(state, context):
+        return {"is_approved": True, "literary_score": 80, "suggestion_type": "NONE", "critique": ""}
+
+    def fake_run_extraction_gate(state, context):
+        return {
+            # Legacy token should be ignored safely after polish-route removal.
+            "post_polish_route": "anchor_resolve",
+            "pending_chapter_extraction": {"entities": [], "relations": []},
+            "extraction_gate_error": "",
+        }
+
+    def fake_run_state_updater(state, context):
+        return {"mutations": [], "vector_documents": []}
+
+    monkeypatch.setattr("app.services.workflow.graph.run_reader", fake_run_reader)
+    monkeypatch.setattr("app.services.workflow.graph.run_extraction_gate", fake_run_extraction_gate)
+    monkeypatch.setattr("app.services.workflow.graph.run_state_updater", fake_run_state_updater)
+
+    final_state = build_chapter_graph(service._build_context(run.run_id)).invoke(initial_state)
+    assert final_state["workflow_status"] == "COMPLETED"
+
+
+def test_hitl_anchor_force_resolve_resumes_profile_expander(tmp_path) -> None:
+    service = build_service(str(tmp_path / "workflow_hitl_anchor_force_resolve.sqlite3"))
+    story = service.create_story(StoryInput(title="T", premise="p", bible={}, target_total_words=12000))
+    base = build_initial_state(story["story_id"], 1, [], "trace-anchor-force")
+    base["requires_hitl"] = True
+    base["workflow_status"] = "WAITING_HITL"
+    base["hitl_reason"] = HitlReason.ANCHOR_RESOLUTION_FAILED
+    base["resume_from"] = "anchor_resolve"
+    run = service.workflow_repository.create_run(story["story_id"], 1, base)
+    service.apply_hitl_anchor_resolution(
+        run.run_id,
+        request=HitlAnchorResolutionRequest(action="force_resolve", resolved_anchor_ids=["a1"]),
+    )
+    st = service.workflow_repository.get_run_state(run.run_id)
+    assert st["resume_from"] == "profile_expander"
+
+
+def test_plan_supervisor_approved_route_token_is_logic_alignment(tmp_path, monkeypatch) -> None:
+    service = build_service(str(tmp_path / "workflow_plan_route_logic_alignment.sqlite3"))
+    story = service.create_story(StoryInput(title="T", premise="p", bible={}, target_total_words=12000))
+    initial_state = build_initial_state(story["story_id"], 1, [], "trace-plan-route")
+    initial_state["resume_from"] = "planner"
+    run = service.workflow_repository.create_run(story["story_id"], 1, initial_state)
+
+    def fake_run_planner(state, context):
+        return (
+            {
+                "ground_truth_events": [{"event_id": "e1", "description": "事件", "caused_by_event_id": None, "links": []}],
+                "narrative_script": "草稿大綱",
+                "must_include_beats": ["beat1"],
+                "proposed_new_nodes": [],
+                "plan_warnings": [],
+            },
+            {"safe": True},
+            0,
+            0,
+        )
+
+    def fake_run_plan_supervisor(state, context):
+        return (
+            {
+                "is_approved": True,
+                "violation_type": ["NONE"],
+                "suggestion_type": "NONE",
+                "feedback_to_agent": "",
+                "anchor_achieved": False,
+                "soft_warnings": [],
+            },
+            {"safe": True},
+        )
+
+    def fake_run_logic_alignment(state, context):
+        return (
+            {"safe_chapter_rules": "", "alignment_log": "", "human_outline_conflict_notes": []},
+            {"safe": True},
+            0,
+            0,
+        )
+
+    def fake_run_author(state, context):
+        return (
+            {"chapter_content": "第1章\n\n內容", "author_extraction_surface_hints": [], "word_count": 10},
+            {"safe": True},
+            0,
+            0,
+        )
+
+    def fake_run_draft_supervisor(state, context):
+        return (
+            {"is_approved": True, "violation_type": ["NONE"], "suggestion_type": "NONE", "feedback_to_agent": ""},
+            {"safe": True},
+        )
+
+    def fake_run_reader(state, context):
+        return {"is_approved": True, "literary_score": 80, "suggestion_type": "NONE", "critique": ""}
+
+    def fake_run_extraction_gate(state, context):
+        return {"extraction_route": "continue", "pending_chapter_extraction": {"entities": [], "relations": []}, "extraction_gate_error": ""}
+
+    def fake_run_state_updater(state, context):
+        return {"mutations": [], "vector_documents": []}
+
+    monkeypatch.setattr("app.services.workflow.graph.run_planner", fake_run_planner)
+    monkeypatch.setattr("app.services.workflow.graph.run_plan_supervisor", fake_run_plan_supervisor)
+    monkeypatch.setattr("app.services.workflow.graph.run_logic_alignment", fake_run_logic_alignment)
+    monkeypatch.setattr("app.services.workflow.graph.run_author", fake_run_author)
+    monkeypatch.setattr("app.services.workflow.graph.run_draft_supervisor", fake_run_draft_supervisor)
+    monkeypatch.setattr("app.services.workflow.graph.run_reader", fake_run_reader)
+    monkeypatch.setattr("app.services.workflow.graph.run_extraction_gate", fake_run_extraction_gate)
+    monkeypatch.setattr("app.services.workflow.graph.run_state_updater", fake_run_state_updater)
+
+    final_state = build_chapter_graph(service._build_context(run.run_id)).invoke(initial_state)
+    assert final_state["workflow_status"] == "COMPLETED"
+    assert final_state["plan_route"] == "logic_alignment"
 
 
 def test_macro_compile_normalizes_zh_cn_alias_before_compile(tmp_path, monkeypatch) -> None:

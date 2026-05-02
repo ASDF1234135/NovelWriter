@@ -6,7 +6,10 @@ from __future__ import annotations
 def chapter_distance_to_anchor(chapter_id: int, unachieved_anchors: list[dict]) -> int | None:
     if not unachieved_anchors:
         return None
-    ct = unachieved_anchors[0].get("chapter_target")
+    anchor = unachieved_anchors[0]
+    ct = anchor.get("estimated_chapter")
+    if ct is None:
+        ct = anchor.get("chapter_target")
     if ct is None:
         return None
     try:

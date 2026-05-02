@@ -156,24 +156,27 @@ def test_anchor_distance_and_writing_notes(tmp_path) -> None:
     sid = svc.create_story(StoryInput(title="T", premise="p", bible={}, target_total_words=30_000))["story_id"]
     svc.macro_compile(sid)
     repo = svc.story_repository
-    anchors = repo.list_anchors(sid)
-    assert anchors
-    target_ct = int(anchors[0]["chapter_target"])
+    story_nodes = [dict(n) for n in ((repo.get_story(sid) or {}).get("anchor_nodes_json") or []) if isinstance(n, dict)]
+    assert story_nodes
+    first = story_nodes[0]
+    target_ct = int(first.get("estimated_chapter") or 1)
 
     story_row = repo.get_story(sid)
     assert story_row
     bible = dict(story_row.get("bible_json") or {})
+    # macro compile may set general_world_lore; use legacy writing_note only if lore is cleared
+    bible.pop("general_world_lore", None)
     bible["writing_note"] = ["自訂筆記 A"]
     repo.update_story_bible_json(sid, bible)
 
     at_anchor = build_writing_preamble(repo, sid, chapter_id=target_ct)
-    assert at_anchor["writing_hints"]["chapters_until_next_anchor"] == 0
+    assert "chapters_until_next_anchor" not in at_anchor["writing_hints"]
     assert at_anchor["writing_hints"]["next_focus_anchor"] is not None
-    assert at_anchor["writing_hints"]["next_focus_anchor"]["chapter_target"] == target_ct
+    assert at_anchor["writing_hints"]["next_focus_anchor"]["anchor_id"] == str(first.get("id") or "")
 
     one_before = build_writing_preamble(repo, sid, chapter_id=max(1, target_ct - 1))
     if target_ct > 1:
         assert one_before["writing_hints"]["chapters_until_next_anchor"] == 1
 
     notes = at_anchor["writing_hints"]["writing_notes"]
-    assert "自訂筆記 A" in notes
+    assert any("自訂筆記 A" in line for line in notes)

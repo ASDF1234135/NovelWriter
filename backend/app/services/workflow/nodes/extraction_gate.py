@@ -152,7 +152,7 @@ def run_extraction_gate(state: dict, context: WorkflowContext) -> dict:
         msg = prefix + msg
         hints = build_extraction_remap_hints(list(extracted.entities), missing, planned)
         return {
-            "post_polish_route": "author",
+            "extraction_route": "author",
             "pending_chapter_extraction": {},
             "extraction_gate_feedback_entry": {
                 "attempt": state.get("draft_retry_count", 0) + 1,
@@ -167,7 +167,8 @@ def run_extraction_gate(state: dict, context: WorkflowContext) -> dict:
         }
 
     return {
-        "post_polish_route": "anchor_resolve",
+        # Success continues to post-draft fixed chain (copyeditor/output-language/summarizer).
+        "extraction_route": "continue",
         "pending_chapter_extraction": extracted.model_dump(mode="json"),
         "extraction_gate_error": "",
     }

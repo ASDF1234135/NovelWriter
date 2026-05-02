@@ -1,168 +1,193 @@
-# Agent Workflow（繁體中文）
+# Agent Workflow（使用者操作版）
 
 > 英文版請見 [agent_workflow.en.md](./agent_workflow.en.md)。
 
-## 文件目的
+## 這份文件在講什麼
 
-說明 NovelBuilder 在「生成單一章節小說」時，各 agent 如何接力、傳遞哪些資料、何處審核、何時進入 HITL，以及 **B 線核銷、實體綁定與定稿後抽取閘門** 等較新行為。以技術人員可讀的流程為主，不逐行對應程式碼。
+這份文件用「你要怎麼操作系統」的角度，說明 NovelBuilder 目前的章節工作流：
 
-## 系統分成兩個層級
+- 你在開跑前要準備什麼
+- agent 會怎麼接力
+- 什麼情況會停在 HITL（人工介入）
+- 最後哪些資料會被寫入
 
-### 1. Macro Planning
+本文以目前程式實作為準（`backend/app/services/workflow/graph.py` 與 `service.py`）。
 
-負責把整體故事拆成：
+---
 
-- **Volumes**：卷級規劃（LLM 輸出為每卷內嵌 `anchors`），正規化後展平寫入 SQLite `anchors` 表（含 `volume_id`）。
+## 0) 開跑前你要知道的事
 
-**契約**：每卷 **3–5** 個錨點；`chapter_target` 須落在該卷章節範圍內。過少後端補位，過多截斷。
+### 必要前提
 
-**輸入**：標題、premise、bible、目標總字數。
+1. 先有 `story`（標題、premise、目標字數等）
+2. 建議先完成 macro 規劃（卷、錨點、初始 cast）
+3. 再執行章節 run
 
-**輸出**：
+### 啟動章節 run 時可帶的關鍵參數
 
-- 各卷標題、摘要、章節範圍、字數預算
-- 各 anchor 的標題、描述、目標狀態、預計章節
-- **Cast**：至少一名 protagonist 與可選 supporting；後端指派穩定 `node_id`（`{story_id}_mc_01`…），寫入 `stories.cast_json` 與 `protagonist_character_id`
-- **圖譜**：macro compile 時清除舊 `{story_id}_mc_*` 角色節點，再為每位 cast 建立 CHARACTER 節點
-- **副線種子（可選）**：macro 規劃若產出 `initial_b_stories`，成功 compile 後會 **merge** 進 `stories.bible_json.active_b_stories`（依 id 去重）
+- `chapter_outline`：你的人類大綱
+- `chapter_hard_rules`：本章硬規則（不能違反）
+- `ai_freedom_level`：`strict` / `balanced` / `wild`
+- `selected_anchor_ids`、`next_anchor_ids`：若你要指定錨點路線
+- `extraction_surface_hints`：你想提示抽取器的字面線索（可選）
 
-資料寫入 SQLite 與 GraphStore，作為章節級導航與 POV 基礎。
+### 重要限制
 
-**章節入口**：`start_run_chapter` 會從 bible 載入 **`active_b_stories`**，計算 **`distance_to_anchor`**（相對當前錨點章距），並對 **`target_word_count`** 套用 **`normalized_length_min/max`**（字數 SSOT 下限／上限）。
+- 若該章已是 `completed`，不能再跑完整 agent pipeline
+- 若故事已經有 workflow run，部分 story 設定與 macro 拓樸不可再改
 
-**章內導航**：director / planner prompt 僅帶「最近數個」未完成錨點；state 仍保留完整未完成列表與 `target_anchor_id`。
+---
 
-### 2. Chapter Workflow
+## 1) 你看到的主流程（章節）
 
-從 `director` 起，經審核與定稿後進入 **抽取閘門（extraction_gate）**、**副線核銷（b_story_resolve）**，最後 **`state_updater`** 原子落盤。
+目前主路徑如下：
 
-## 單章 workflow 全流程（總覽）
+1. `director`
+2. `graph_rag`
+3. `planner`
+4. `plan_supervisor`
+5. `logic_alignment`
+6. `author`
+7. `draft_supervisor`
+8. `reader`
+9. `extraction_gate`
+10. `copyeditor`（若啟用）
+11. `output_language_gate`
+12. `chapter_summarizer`
+13. `anchor_resolve`
+14. `profile_expander`
+15. `state_updater`
+16. `commit_to_databases`
 
-節點順序（主路徑）：
+若任一節點判定需要人工介入，流程會轉到 `hitl` 並暫停。
 
-1. `director` — 章節類型、副線指令、POV、epoch、基調、敘事方向等  
-2. `graph_rag` — bible / graph / vector / 近章正文組上下文；依 **`graph_rag_context_tier`** 自動縮減 Neo4j hop 與 JSON 截斷；若組裝後字元仍超過預算 → **`WAITING_HITL`**（`Context_Length_Exceeded`）  
-3. `planner` — 底層事件 + 表層劇本 + **`proposed_new_nodes`（≤3）** + **`new_active_b_stories`（≤2，可選）** + `target_word_count`（並寫入字數 SSOT）  
-4. `plan_supervisor` — 大綱審核（**Hard / Soft** 分野；創世／B 線核心缺漏為 **Hard**）  
-5. **`logic_alignment`** — 硬性規則／聖經圖譜對齊、**`human_outline_conflict_notes`**、必要時 **HITL**  
-6. `author` — 依安全任務卡寫正文；定稿後第二段 LLM 產出 **`author_extraction_surface_hints`**（`node_id` + 正文精確子字串）  
-7. `draft_supervisor` — 字數 SSOT；**必選實體**改由 **`author_extraction_surface_hints`**（正文精確子字串）決定性檢查  
-8. `reader` — 文學可讀性  
-9. **`extraction_gate`** — **抽取 + `apply_manual_entity_remap`（HITL）+ `remap_planned_entities`（R1/R5）+ `validate_mandatory_planned_nodes`（R6，支援 `mandatory_extraction_skips`）**（併用 Author 登記的 surface hints）  
-   - 失敗 → 退回 **`author`**，並累積 **`extraction_gate_failure_streak`**；超過 **`extraction_hitl_limit`** → **`WAITING_HITL`**（`Extraction_Gate_Failed`），附 **`hitl_extraction_remap_hints`**  
-   - 成功 → 寫入 **`pending_chapter_extraction`**，**streak 歸零**，前往副線核銷  
-10. **`b_story_resolve`** — LLM 輸出 `resolution_analysis`、`resolution_evidence_event_ids`、`resolved_b_stories`；證據 event id 須在 **抽取結果中可佐證**（R2c）。若模型意圖核銷但證據不成立 → **`WAITING_HITL`**（`B_Story_Resolution_Failed`），保留 **`b_story_resolution_hitl_candidate`**  
-11. **`state_updater`** — 以 `pending_chapter_extraction` 為主做 mutations + vector；SQLite 章節寫入後更新 bible：**剔除核銷副線**、**merge 本章新增副線種子**
+---
 
-`plan_supervisor`、`draft_supervisor`、`reader` 可將流程打回前一層；重試過多進入 HITL。`extraction_gate` 退回 author 亦會累積 `draft_feedback`。
+## 2) 每個 agent 在做什麼（使用者可理解版）
 
-## Chapter State 重點欄位
+### `director`（定調與導演指令）
 
-除既有章節定位、上下文、大綱與草稿欄位外，尚包含：
+- 產出本章方向：章節類型、敘事指令、副線意圖、新元素引入等
+- 若踩到副線冷卻規則（最近用過的類型又被選中），會直接進 HITL
 
-- **敘事策略**：`chapter_type`、`b_story_directive`、`new_elements_to_introduce`  
-- **副線池**：`active_b_stories`（來自 bible）、**`pending_b_story_additions`**（planner 本輪擬新增，commit 時寫回）  
-- **距離與創世**：`distance_to_anchor`、`planned_graph_nodes`（通過 plan 後與 `proposed_new_nodes` 對齊）  
-- **字數 SSOT**：`target_word_count`、`normalized_length_min`、`normalized_length_max`  
-- **審核軌跡**：`plan_warnings`（含 plan_supervisor 的 soft_warnings 合併；以及 logic_alignment 匯入的 **`[設定衝突]`** 前綴列）  
-- **人類核心模式**：`ai_freedom_level`（`strict`／`balanced`／`wild`，由 `POST .../chapters/{n}/run` body 寫入）、**`outline_binding_mode`**（`FULL`／`PARTIAL`／`ABSENT`，依大綱字數閾值後端啟發式）  
-- **導演簡報**：`director_state_brief`（來自 Director 的 `state_operational_brief`）  
-- **對齊稽核**：`human_outline_conflict_notes`（Logic alignment 輸出；與聖經／圖譜牴觸條列）  
-- **定稿後抽取**：`author_extraction_surface_hints`、`pending_chapter_extraction`、`b_story_resolution`、`post_polish_route`、`extraction_gate_*` 回饋（失敗時）
+### `graph_rag`（組上下文，不寫文）
 
-### 前端（章節開跑）
+- 整合 bible / graph / vector / 章節連續性上下文
+- 若上下文長度超預算，觸發 HITL（`CONTEXT_LENGTH_EXCEEDED`）
 
-- 同一請求可帶 **`chapter_outline`**、**`chapter_hard_rules`**、**`ai_freedom_level`**。  
-- **WorkflowMonitor** 顯示自由度、綁定模式、`plan_warnings`、`human_outline_conflict_notes`、可摺疊 **`alignment_log`**、**`director_state_brief`**。  
-- **HITL**（`Alignment_Rules_Required`）面板會摘要 **`alignment_log`**、衝突條列與大綱節錄。
+### `planner`（生成可執行劇情計畫）
 
-## 各 agent 角色與 I/O（精要）
+- 輸出事件、敘事腳本、必帶節點、字數目標
+- 會寫入 `planned_graph_nodes` 與 `pending_b_story_additions`
+- 可加入 `pending_cast_evolutions`（角色演化請求）
 
-### Director
+### `plan_supervisor`（審核 planner）
 
-**情報官／狀態編譯器**：輸出 **`state_operational_brief`**（寫入 state 為 **`director_state_brief`**），供 Planner 參考錨點距離、副線與連續性。  
-當 **`outline_binding_mode=FULL`** 時，`narrative_directive` 應重述人類大綱而非發明對立主線；大綱缺失／過短時可提出建議並在簡報標註「大綱資訊不足」。  
-仍輸出 **`chapter_type`**、**`b_story_directive`**、**`new_elements_to_introduce`** 等。  
-**`normalize_director_output`**：當離錨點較遠且副線池無有效 id 或副線指令為空時，降級為 **WORLD_BUILDING** 並補預設探索向副線描述。
+- 判斷通過/不通過
+- 不通過會回 `planner` 重試；超過上限進 HITL（`PLAN_LOOP_EXCEEDED`）
 
-### Graph RAG
+### `logic_alignment`（規則與設定對齊）
 
-組裝 `bible_context`、`graph_context`、`vector_context`、前情與連續性欄位；不創作。
+- 檢查大綱、規則、設定是否衝突
+- 會把衝突寫入 `human_outline_conflict_notes` / `plan_warnings`
+- 無法安全放行時進 HITL（`ALIGNMENT_RULES_REQUIRED`）
 
-### Planner
+### `author`（產正文）
 
-依 **`ai_freedom_level`** 與 **`outline_binding_mode`**：strict+FULL 時人類大綱已寫明處不可篡改；留白與 AI 腦補以 **`[AI_INVENTION]`** 標於 beats／事件描述。  
-將導演方向與簡報轉成可執行大綱：**`ground_truth_events`**、**`narrative_script`**、作者任務卡欄位、**`proposed_new_nodes`**、**`new_active_b_stories`**、**`target_word_count`**。  
-後端在 `planner` 節點將 **`planned_graph_nodes`** 與字數 SSOT 寫回 state，並可附加 **`plan_warnings`**（大綱模式提示）。
+- 依規劃寫出章節草稿（`current_draft`）
+- 同時產出 `author_extraction_surface_hints` 供後續抽取 gate 使用
 
-### Plan Supervisor
+### `draft_supervisor`（草稿硬檢）
 
-審核大綱；**Hard** 包含：創世節點與 director 交代不一致、**B 線核心動作缺失**、時序／空間硬傷等。  
-當 **strict + FULL** 且人類大綱具體時，表層／底層**明顯背離**大綱已寫情節可判 **INCONSISTENCY**（大綱極短時改 soft）。  
-**Soft**（寫入 `soft_warnings` 再進 **`plan_warnings`**）：idle 節奏、超前解錨疑慮、字數微偏等——**不得**掩蓋會導致下游缺欄的 Hard 問題。
+- 檢查字數、規格與必要條件
+- 不通過退回 `author`
+- 連續失敗超限進 HITL（`DRAFT_LOOP_EXCEEDED`）
 
-### Logic alignment（`plan_supervisor` 與 `author` 之間）
+### `reader`（可讀性審核）
 
-比對 **人類大綱 + Planner 草稿** 與 **`bible_context`／`graph_context`／`vector_context`**；輸出 **`human_outline_conflict_notes`**，並合併至 **`plan_warnings`**（`[設定衝突]`）。  
-有 **`chapter_hard_rules`** 時對齊規則與 POV 安全；無硬規則時若具大綱或足夠 RAG 上下文仍跑 **LLM 稽核**；否則僅保留智鬥 heuristic 短路。  
-不可修補衝突或紅線 → **`requires_hitl`**（`Alignment_Rules_Required`）。
+- 做文學分數與評論
+- 通過就進 `extraction_gate`
+- 未通過則回 `author`；若迴圈太多次，會採用最佳草稿直接往下
 
-### Author
+### `extraction_gate`（定稿抽取與實體對齊閘門）
 
-幽靈代筆：依表層劇本與 beats；**`ai_freedom_level`／`outline_binding_mode`** 影響 LLM **temperature**（strict 且 FULL 時較低）。  
-payload 含 **`mandatory_new_entities`**（由 `planned_graph_nodes` 衍生），提示須寫出可對齊 **role / canonical_name** 的辨識特徵。
+- 對定稿文本做抽取與對齊
+- 失敗會退回 `author`，累積 `extraction_gate_failure_streak`
+- 連續失敗達門檻進 HITL（`EXTRACTION_GATE_FAILED`）
+- 成功後才會進入後續收尾節點
 
-### Draft Supervisor
+### `copyeditor`（可選）
 
-**字數**以 state 的 **normalized_length_min/max** 為準。  
-**R4**：若 `mandatory_new_entities` 非空，正文須能以關鍵字／別名等 **可檢測方式** 對齊每一項，否則 **Hard** 退回 author。
+- 若系統啟用 copyeditor，就在這裡做文稿潤修
 
-### Reader
+### `output_language_gate`（語言一致性閘門）
 
-文學評分與評論；不負責字數硬審。
+- 檢查章節語言是否符合故事設定的輸出語言
+- 可能要求你在 HITL 決定「強制繼續」或「退回重寫」
 
-### Prose polish
+### `chapter_summarizer`（章節摘要）
 
-定稿輕修飾；完成後 **`resume_from`** 指向 **`extraction_gate`**。
+- 產出並保存章節摘要相關資訊，供後續連續性使用
 
-### Extraction gate（非 LLM「角色名」但為圖中節點）
+### `anchor_resolve`（錨點達成判定）
 
-對 **已定稿正文** 跑抽取，**`remap_planned_entities`**（無法對齊時可保留新 id 並 log **R5**），再跑 **R6**：每個 **mandatory** 的 `planned_graph_nodes.node_id` 必須出現在抽取實體集合中，否則退回 author。  
-成功則 **`pending_chapter_extraction`** 供後續 resolve 與 state_updater 共用。
+- 判斷錨點是否已達成、如何更新候選與已解決集合
+- 判定不穩定時會進 HITL（`ANCHOR_RESOLUTION_FAILED`）
 
-### B story resolve
+### `profile_expander`（角色資料補齊與演化）
 
-輸入含 **remap 後結構化抽取** 摘要；輸出 **CoT** + **`resolution_evidence_event_ids`** + **`resolved_b_stories`**。後端只接受 **在抽取結構中可佐證** 的 event id，避免 SQLite 核銷與圖譜狀態脫節（R2c）。
+- 將新角色/抽取角色補成 cast profile
+- 套用角色演化（如個性、語氣變化）並寫 arc 里程碑
+- 產生 `pending_cast_updates` 給後續落盤
 
-### State updater
+### `state_updater`（組提交封包）
 
-優先使用 **`pending_chapter_extraction`** 產生 graph / vector；與 SQLite 章節寫入同一 try 區塊內：依核銷結果 **更新 bible**（移除 resolved、merge 本章 `pending_b_story_additions`），並記錄 **state_transaction**。
+- 把本章變更整理為 graph/vector/sqlite 的提交 payload
+- 不直接寫 DB，先放進 `pending_db_commit`
 
-## HITL
+### `commit_to_databases`（真正提交）
 
-暫停原因（`hitl_reason`）與主要 API（FastAPI `/api/workflows/{run_id}/hitl/...`）：
+- 依序寫入 Graph、Vector、SQLite
+- 更新章節為 `completed`
+- 更新 bible / anchor 狀態、cast 變更等
+- 寫入 state transaction，確保可追蹤與重放
 
-| 原因 | 情境 | 主要端點 |
-|------|------|----------|
-| **Plan_Loop_Exceeded** | 企劃卡關 | `decision`（含 **force_approve_plan**、重寫大綱等）、`outline`、`director-patch`、`anchor-delay`（寫入 SQLite **`anchors.chapter_target`** 並刷新 **`unachieved_anchors`**） |
-| **Draft_Loop_Exceeded** | 草稿卡關 | `decision`、`draft-edit`（可 **`merge_extraction_hints`**）、`extraction-hints`（合併 surface hints／**waive_mandatory_node_ids**） |
-| **Extraction_Gate_Failed** | 抽取對齊卡關 | `decision`（**extraction_return_author**）、`extraction-remap`（**manual_entity_remap** 累加）、`extraction-hints` |
-| **B_Story_Resolution_Failed** | 副線證據斷鏈 | `b-story-judgement`（**force_resolve**／**reject** + `reject_resume_from`） |
-| **Context_Length_Exceeded** | 上下文過長 | `context-prune`（覆寫各 context 字串與可選 **`graph_rag_context_tier`**） |
+---
 
-共用：**state-injection**。`resume_from` 允許集合含 **`graph_rag`**、**`extraction_gate`**、**`b_story_resolve`**、**`state_updater`** 等（見 `WorkflowService`）。
+## 3) 你何時需要 HITL（人工介入）
 
-**Reader**：超過 `draft_loop_retry_limit` 時改走 **`extraction_gate`** 並採用 **`best_draft_content`**（自動妥協，無需 HITL）。
+常見原因（`hitl_reason`）：
 
-## 每章最終產物
+- `CONTEXT_LENGTH_EXCEEDED`：上下文太大
+- `PLAN_LOOP_EXCEEDED`：企劃反覆不過
+- `DRAFT_LOOP_EXCEEDED`：草稿反覆不過
+- `ALIGNMENT_RULES_REQUIRED`：規則/設定需要人工裁決
+- `EXTRACTION_GATE_FAILED`：抽取/實體對齊連續失敗
+- `ANCHOR_RESOLUTION_FAILED`：錨點判定需要人工裁決
+- 其他冷卻規則違規（例如副線策略）
 
-- SQLite：章節正文、workflow 狀態、步驟 log、HITL、transaction、**更新後的 `bible_json.active_b_stories`**  
-- Graph / Vector：由定稿抽取與事件一致寫入  
-- Workflow state：供下一章連續性使用  
+你在 HITL 常做的事：
 
-## 技術人員應記住的原則
+- 選擇決策（繼續、退回、放寬限制）
+- 直接編修大綱、草稿或 director 指令
+- 注入狀態（規則、cast 演化、graph mutation）
+- 指定 `resume_from` 從某節點繼續
 
-- **Director / Planner** 定方向與可執行大綱；**Author** 僅看表層任務卡。  
-- **R4（draft）** 與 **R6（extraction_gate）** 分工：前者偏「正文可讀的對齊」，後者偏「抽取結果是否落到 planned `node_id`」。  
-- **R5** 允許非 mandatory 實體以新 id 落圖並打 log；**mandatory** 不得在未對齊情況下通過 R6。  
-- **副線核銷** 必須綁 **抽取可佐證的 event id**，再與 graph 寫入同次 commit 更新 bible。  
+---
+
+## 4) 一次 run 結束後你會拿到什麼
+
+- 章節正文（SQLite，狀態 `completed`）
+- 該 run 的完整 steps、審核回饋、HITL 操作紀錄
+- 更新後的圖譜與向量文件（供下一章檢索）
+- 更新後的 bible 與 anchor/cast 狀態（供連載延續）
+
+---
+
+## 5) 建議的使用方式（實務）
+
+1. 先給 `chapter_outline`，再補 `chapter_hard_rules`（不要混在一起寫）
+2. 新專案先用 `balanced`，只有高控制需求再改 `strict`
+3. 若常卡在 `extraction_gate`，優先補可辨識的人名/稱呼與實體描述
+4. 真的卡住就用 HITL 明確指定 `resume_from`，不要盲目重跑整條鏈
+5. 觀察 `plan_warnings` 與 `human_outline_conflict_notes`，那是最早期風險訊號

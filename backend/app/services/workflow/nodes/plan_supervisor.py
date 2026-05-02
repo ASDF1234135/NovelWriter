@@ -87,31 +87,16 @@ def run_plan_supervisor(state: dict, context: WorkflowContext) -> tuple[dict, di
         violations.append(ViolationType.INCONSISTENCY)
         feedback.append("Missing ground_truth_events.")
 
-    if payload.target_anchor_chapter is not None and payload.target_anchor_chapter < payload.current_chapter_id:
-        violations.append(ViolationType.INCONSISTENCY)
-        feedback.append(
-            "Target anchor chapter is earlier than the current chapter; anchor state may be stale or workflow state inconsistent."
-        )
-
-    requires_anchor_completion = (
-        payload.target_anchor_chapter is not None
-        and payload.current_chapter_id >= payload.target_anchor_chapter
-    )
     ct = str(payload.chapter_type or "PLOT_DRIVEN")
-    dist = payload.distance_to_anchor
-    strict_anchor = ct == "PLOT_DRIVEN" or (dist is not None and int(dist) <= 1)
+    strict_anchor = ct == "PLOT_DRIVEN"
+    selected_anchor_id = (payload.selected_anchor_ids or [None])[0]
     if (
         strict_anchor
-        and requires_anchor_completion
-        and payload.target_anchor_id
-        and payload.target_anchor_id not in payload.narrative_script
+        and selected_anchor_id
+        and selected_anchor_id not in payload.narrative_script
     ):
         violations.append(ViolationType.ANCHOR_DIVERGENCE)
         feedback.append("narrative_script does not clearly converge toward the target anchor.")
-    elif payload.partial_convergence_allowed and payload.target_anchor_id and strict_anchor:
-        feedback.append(
-            "Still in early chapters before a distant anchor; partial convergence is allowed—require consistent direction and working foreshadow only."
-        )
 
     directive_violations, directive_feedback = _detect_directive_structural_violations(payload)
     violations.extend(v for v in directive_violations if v not in violations)
@@ -131,8 +116,7 @@ def run_plan_supervisor(state: dict, context: WorkflowContext) -> tuple[dict, di
         feedback_to_agent=" ".join(feedback),
         anchor_achieved=bool(
             not violations
-            and payload.target_anchor_id
-            and requires_anchor_completion
+            and selected_anchor_id
             and strict_anchor
         ),
         soft_warnings=[],
@@ -145,40 +129,39 @@ def _build_plan_supervisor_prompt(payload) -> str:
     compact_json = compact_plan_supervisor_payload_for_prompt(payload)
     return (
         "Audit the JSON payload using the rules below:\n"
-        "1. If target_anchor_chapter > current_chapter_id, partial convergence is allowed.\n"
-        "2. Partial convergence only requires correct direction, working foreshadow, and no hard physics/timeline/causality breaks.\n"
-        "3. anchor_achieved=false is normal while a distant anchor is unfinished—never block solely for that.\n"
-        "4. Only when current_chapter_id >= target_anchor_chapter should explicit anchor completion be the main bar.\n"
-        "5. If chapter_target - current_chapter >= 2, do not reject just because the final anchor is not finished yet.\n"
-        "5b. If chapter_type is CHARACTER_DRIVEN or WORLD_BUILDING, do not reject solely for 'not advancing the main anchor'; "
+        "1. Use DAG semantics only: selected_anchor_ids are current goals; next_anchor_ids are follow-up unresolved goals.\n"
+        "2. Prefer dependency-ready progression and branch balance; do not rely on chapter distance or chapter targets.\n"
+        "3. anchor_achieved=false is normal while anchor remains unresolved—never block solely for that.\n"
+        "4. Reject only when narrative direction clearly diverges from selected anchors or breaks causality.\n"
+        "5. If chapter_type is CHARACTER_DRIVEN or WORLD_BUILDING, do not reject solely for 'not advancing the main anchor'; "
         "still reject for premature anchor reveals or hard causal breaks.\n"
-        "5c. Hard (semantic): each Director new_elements_to_introduce item should have a semantic counterpart in proposed_new_nodes "
+        "6. Hard (semantic): each Director new_elements_to_introduce item should have a semantic counterpart in proposed_new_nodes "
         "(aliases, role compression, org vs person OK); do not demand literal substring matches. Backend only enforces: "
         "when new elements are required, proposed_new_nodes must be non-empty.\n"
-        "5c-b. If b_story_directive is non-empty and not the generic placeholder, judge whether narrative_script substantively weaves "
+        "6b. If b_story_directive is non-empty and not the generic placeholder, judge whether narrative_script substantively weaves "
         "that subplot (motif, image, event, or emotional thread); do not require copying the director sentence. MISSING_DIRECTIVE if absent; pass if covered.\n"
-        "5d. Soft: thin idle beats or early-anchor-solve risk may go to soft_warnings while is_approved=true if no other Hard issues.\n"
-        "6. Chronological consistency (Hard): check previous_chapter_summary/recent_chapter_context vs this chapter's ground_truth_events. "
+        "6d. Soft: thin idle beats or early-anchor-solve risk may go to soft_warnings while is_approved=true if no other Hard issues.\n"
+        "7. Chronological consistency (Hard): check previous_chapter_summary/recent_chapter_context vs this chapter's ground_truth_events. "
         "If the plan replays already-finished beats without a new state change, or implies a time rollback without explicit framing, reject with INCONSISTENCY.\n"
-        "7. Teleportation / Location Paradox (semantic only): compare last_known_location vs chapter_start_location and read ground_truth_events + narrative_script. "
+        "8. Teleportation / Location Paradox (semantic only): compare last_known_location vs chapter_start_location and read ground_truth_events + narrative_script. "
         "If locations clearly disconnect without plausible move/transition/time jump, reject with PHYSICAL_CONFLICT or INCONSISTENCY; "
         "if they are the same place/alias or transition is clear, do not false-positive.\n"
-        "8. POV_LEAK if narrative_script treats secret actions, private discoveries, or impossible POV knowledge as public common knowledge.\n"
-        "9. If the plan involves movement, the chapter-end effective position must be legible; unfalsifiable post-move locations are also issues.\n"
-        "10. Word-count bounds: target_word_count must fall in chapter_word_min..chapter_word_max; else WORD_COUNT_UNMATCH.\n"
-        "11. Beats vs words: if len(must_include_beats) * words_per_beat_floor clearly exceeds target_word_count, mark WORD_COUNT_UNMATCH and ask to raise words or merge beats.\n"
-        "12. Script density vs words: if narrative_script is very short/vague but target_word_count is very high (or the reverse), WORD_COUNT_UNMATCH with guidance to rebalance.\n"
-        "12b. Event granularity (Hard): ground_truth_events should be macro events; do not split continuous dialogue/fights into micro-actions. "
+        "9. POV_LEAK if narrative_script treats secret actions, private discoveries, or impossible POV knowledge as public common knowledge.\n"
+        "10. If the plan involves movement, the chapter-end effective position must be legible; unfalsifiable post-move locations are also issues.\n"
+        "11. Word-count bounds: target_word_count must fall in chapter_word_min..chapter_word_max; else WORD_COUNT_UNMATCH.\n"
+        "12. Beats vs words: if len(must_include_beats) * words_per_beat_floor clearly exceeds target_word_count, mark WORD_COUNT_UNMATCH and ask to raise words or merge beats.\n"
+        "13. Script density vs words: if narrative_script is very short/vague but target_word_count is very high (or the reverse), WORD_COUNT_UNMATCH with guidance to rebalance.\n"
+        "13b. Event granularity (Hard): ground_truth_events should be macro events; do not split continuous dialogue/fights into micro-actions. "
         "If the plan is over-fragmented, reject with INCONSISTENCY and instruct merging by goal/scene/outcome phase.\n"
         "(Backend already runs some deterministic checks; you cover edge cases.)\n"
-        "13. Boundary / mandatory-entity conflict (Hard, reject only on clear conflict): think as the Author. "
+        "14. Boundary / mandatory-entity conflict (Hard, reject only on clear conflict): think as the Author. "
         "Cross-check ending_boundary_rule, forbidden_next_scene_actions, chapter_end_location_hint with proposed_new_nodes "
         "(planned_graph_nodes for this chapter, mandatory: true) plus must_include_beats, narrative_script, ground_truth_events. "
         "If a mandatory entity can only naturally appear/interact AFTER this chapter's boundary so the Author cannot write it without overshooting, "
         "reject (is_approved=false), suggestion_type=MODIFY, violation_type INCONSISTENCY (self-contradictory outline) or PHYSICAL_CONFLICT (cannot land before boundary). "
         "feedback_to_agent must name node_id or beat, cite the conflicting boundary, and tell Planner to defer the entity, or relax/move ending_boundary_rule. "
         "If proposed_new_nodes is absent or there are no mandatory rows, do not invent checks.\n"
-        "14. When ai_freedom_level=strict, outline_binding_mode=FULL, and chapter_outline is substantive: "
+        "15. When ai_freedom_level=strict, outline_binding_mode=FULL, and chapter_outline is substantive: "
         "if narrative_script/ground_truth_events clearly contradict the human outline, mark Hard INCONSISTENCY; "
         "if the outline is tiny/keyword-only, prefer soft_warnings to avoid over-rejecting.\n"
         f"\nPayload:\n{compact_json}"
@@ -282,13 +265,6 @@ def _detect_directive_structural_violations(payload) -> tuple[list[ViolationType
         if not str(prof.get("speech_style") or "").strip():
             violations.append(ViolationType.MISSING_DIRECTIVE)
             feedback.append("CHARACTER.character_profile.speech_style must be non-empty.")
-    seeds = getattr(payload, "new_active_b_stories", None) or []
-    for seed in seeds:
-        if not isinstance(seed, dict):
-            continue
-        if str(seed.get("id") or "").strip() and not str(seed.get("resolution_condition") or "").strip():
-            violations.append(ViolationType.MISSING_DIRECTIVE)
-            feedback.append(f"B-story {seed.get('id')} is missing resolution_condition; add an objective completion criterion.")
     return violations, feedback
 
 

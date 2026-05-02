@@ -110,23 +110,10 @@ export function buildHitlPrimaryHeadline(
 }
 
 function pickBStoryCooldownName(state: Record<string, unknown>): string {
-  const chosen = String(state.b_story_type ?? "").trim().toUpperCase();
-  const stories = state.active_b_stories;
-  if (Array.isArray(stories) && chosen) {
-    for (const row of stories) {
-      const r = asRecord(row);
-      if (!r) continue;
-      const typ = String(r.type ?? "").trim().toUpperCase();
-      if (typ === chosen) {
-        const id = String(r.id ?? "").trim();
-        const desc = String(r.desc ?? "").trim();
-        if (desc) return desc.slice(0, 80);
-        if (id) return id;
-      }
-    }
-  }
   const dir = String(state.b_story_directive ?? "").trim();
   if (dir) return dir.slice(0, 80);
+  const typ = String(state.b_story_type ?? "").trim();
+  if (typ) return typ.slice(0, 80);
   return "";
 }
 

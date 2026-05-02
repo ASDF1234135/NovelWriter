@@ -58,17 +58,6 @@ class SQLiteDatabase:
                     target_volume_words INTEGER NOT NULL DEFAULT 0
                 );
 
-                CREATE TABLE IF NOT EXISTS anchors (
-                    anchor_id TEXT PRIMARY KEY,
-                    story_id TEXT NOT NULL,
-                    volume_id TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    description TEXT NOT NULL,
-                    target_state_json TEXT NOT NULL,
-                    chapter_target INTEGER NOT NULL,
-                    priority INTEGER NOT NULL
-                );
-
                 CREATE TABLE IF NOT EXISTS chapters (
                     chapter_key TEXT PRIMARY KEY,
                     story_id TEXT NOT NULL,
@@ -182,6 +171,8 @@ class SQLiteDatabase:
                 "plot_summary_source",
                 "TEXT NOT NULL DEFAULT 'UNKNOWN'",
             )
+            # Legacy table removed: runtime/navigation now reads storylines + anchor_nodes_json.
+            conn.execute("DROP TABLE IF EXISTS anchors")
             conn.execute("PRAGMA journal_mode=WAL")
 
     @staticmethod

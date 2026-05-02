@@ -4,7 +4,6 @@ import json
 
 from app.core.config import get_settings
 from app.domain.schema import (
-    BStorySeed,
     BStoryType,
     EventLink,
     EventLinkOrigin,
@@ -119,12 +118,8 @@ def run_planner(state: dict, context: WorkflowContext) -> tuple[dict, dict, int,
             settings.chapter_word_max,
         )
         nodes = list(structured_output.proposed_new_nodes)[:2]
-        seeds = list(structured_output.new_active_b_stories)[:2]
         out = structured_output.model_dump(mode="json")
         out["proposed_new_nodes"] = [n.model_dump(mode="json") if isinstance(n, ProposedGraphNode) else n for n in nodes]
-        out["new_active_b_stories"] = [
-            s.model_dump(mode="json") if isinstance(s, BStorySeed) else s for s in seeds
-        ]
         out["target_word_count"] = clamped
         out["selected_anchor_ids"] = [str(x).strip() for x in (state.get("selected_anchor_ids") or []) if str(x).strip()][
             :2
@@ -136,7 +131,8 @@ def run_planner(state: dict, context: WorkflowContext) -> tuple[dict, dict, int,
         return out, payload.model_dump(mode="json"), llm_result.token_usage, llm_result.latency_ms
 
     llm_result = context.llm_client.invoke(prompt)
-    anchor_hint = payload.target_anchor_id or "no specific anchor"
+    selected_anchors = [str(x).strip() for x in (payload.selected_anchor_ids or []) if str(x).strip()]
+    anchor_hint = selected_anchors[0] if selected_anchors else "no specific anchor"
     continuity_hint = f"Picking up from the prior chapter: {payload.previous_chapter_summary}." if payload.previous_chapter_summary else ""
     continuity_notes = " ".join(payload.continuity_notes[:2])
     start_location = payload.last_known_location or "continue prior scene"
@@ -176,21 +172,6 @@ def run_planner(state: dict, context: WorkflowContext) -> tuple[dict, dict, int,
                     quirks_and_habits="Avoids eye contact or slows speech when tense.",
                     short_bio=(need or label)[:500],
                 ),
-            )
-        )
-    mock_b_stories: list[BStorySeed] = []
-    req = payload.request_new_b_story
-    if isinstance(req, dict) and str(req.get("type") or "").strip():
-        raw_t = str(req.get("type")).strip().upper().replace("BSTORYTYPE.", "")
-        bt = BStoryType.UNKNOWN
-        if raw_t in BStoryType.__members__:
-            bt = BStoryType[raw_t]
-        mock_b_stories.append(
-            BStorySeed(
-                id=f"b_req_{state['chapter_id']}_01",
-                desc=str(req.get("purpose") or "New B-story opened per Director request.")[:800],
-                type=bt,
-                resolution_condition="Verifiable forward motion or irreversible consequence, with a trackable next-step hook by chapter end.",
             )
         )
     output = PlannerOutput(
@@ -259,17 +240,15 @@ def run_planner(state: dict, context: WorkflowContext) -> tuple[dict, dict, int,
         ],
         author_safe_continuity_notes=_mock_author_safe_continuity_notes(payload.continuity_notes),
         proposed_new_nodes=mock_nodes,
-        new_active_b_stories=mock_b_stories,
     )
     dumped = output.model_dump(mode="json")
     dumped["proposed_new_nodes"] = [n.model_dump(mode="json") for n in mock_nodes[:2]]
-    dumped["new_active_b_stories"] = [s.model_dump(mode="json") for s in mock_b_stories[:2]]
     return dumped, payload.model_dump(mode="json"), llm_result.token_usage, llm_result.latency_ms
 
 
 def _build_planner_prompt(payload: SafePlannerPayload) -> str:
-    upcoming_json = json.dumps(payload.upcoming_unachieved_anchors, ensure_ascii=False)
-    upcoming_json = _clip(upcoming_json, PLANNER_UPCOMING_ANCHORS_JSON_CAP)
+    ready_json = _clip(json.dumps(payload.ready_anchor_candidates, ensure_ascii=False), PLANNER_UPCOMING_ANCHORS_JSON_CAP)
+    blocked_json = _clip(json.dumps(payload.blocked_anchor_candidates, ensure_ascii=False), PLANNER_UPCOMING_ANCHORS_JSON_CAP)
     prior_fb = (payload.prior_feedback or [])[-PLANNER_PRIOR_FEEDBACK_MAX_ITEMS:]
     prev_events = [event.model_dump(mode="json") for event in payload.previous_attempt_ground_truth_events]
     tail_line = (
@@ -349,13 +328,15 @@ def _build_planner_prompt(payload: SafePlannerPayload) -> str:
         f"- pov_character: {payload.pov_character_id}\n"
         f"- current_volume_title: {payload.current_volume_title}\n"
         f"- current_volume_summary: {_clip(payload.current_volume_summary, PLANNER_VOLUME_SUMMARY_CAP)}\n"
-        f"- current_anchor_id: {payload.target_anchor_id}\n"
+        f"- current_anchor_id: {(payload.selected_anchor_ids or [None])[0]}\n"
         f"- current_anchor_title: {payload.current_anchor_title}\n"
         f"- current_anchor_description: {payload.current_anchor_description}\n"
-        f"- selected_anchor_ids: {json.dumps(payload.target_anchor_id and [payload.target_anchor_id] or [], ensure_ascii=False)}\n"
-        "- upcoming_unachieved_anchors: sliding window of nearest unfinished anchors (id/title/chapter_target); "
-        "**treat current_anchor as this chapter's primary target**—others are pacing only; do not script concrete bridges or endings for far future anchors.\n"
-        f"- upcoming_unachieved_anchors: {upcoming_json}\n\n"
+        f"- selected_anchor_ids: {json.dumps(payload.selected_anchor_ids, ensure_ascii=False)}\n"
+        f"- next_anchor_ids: {json.dumps(payload.next_anchor_ids, ensure_ascii=False)}\n"
+        "- ready_anchor_candidates: dependency-ready unresolved anchors for immediate progression.\n"
+        f"- ready_anchor_candidates: {ready_json}\n"
+        "- blocked_anchor_candidates: unresolved anchors that still have unmet dependencies.\n"
+        f"- blocked_anchor_candidates: {blocked_json}\n\n"
         "## World and retrieval context\n"
         f"- story_premise: {payload.story_premise}\n"
         f"- bible_context: {_clip(payload.bible_context, PLANNER_BIBLE_CONTEXT_CAP)}\n"
@@ -371,24 +352,18 @@ def _build_planner_prompt(payload: SafePlannerPayload) -> str:
         f"- b_story_directive: {payload.b_story_directive or ''}\n"
         f"- new_elements_to_introduce: {payload.new_elements_to_introduce}\n"
         f"- request_new_b_story: {payload.request_new_b_story}\n"
-        f"- distance_to_anchor: {payload.distance_to_anchor}\n"
-        f"- active_b_stories: {json.dumps(payload.active_b_stories, ensure_ascii=False)[:800]}\n"
         f"- lore_mysteries_progression: {json.dumps(payload.lore_mysteries_progression, ensure_ascii=False)[:1000]}\n"
         f"- ending_vibe_cooldown_constraint: {json.dumps(payload.ending_vibe_cooldown_constraint, ensure_ascii=False)}\n"
-        f"- writing_note_rules: {json.dumps(payload.writing_note, ensure_ascii=False)[:800]}\n"
+        f"- general_world_lore (craft / world; hard): {str(payload.general_world_lore or '')[:1200]}\n"
         "- If b_story_directive is non-empty, weave it into narrative_script; include at least one must_include_beat that is mundane/sensory detail unrelated to mainline puzzle-solving.\n"
-        "- writing_note_rules are fixed craft constraints for this project—follow them and do not contradict them.\n"
+        "- general_world_lore is fixed for this project—follow it and do not contradict it.\n"
         "- If this chapter uses memory acquisition / flashback, take the next pending stage from lore_mysteries_progression and materialize it in the matching "
         "proposed_new_nodes / must_include_beats for new_elements_to_introduce—do not replay an old stage.\n"
         "- If ending_vibe_cooldown_constraint.active=true, end-of-chapter planning must honor required_vibe and avoid forbidden_vibes.\n"
         "- New important-entity quota: 0 by default; if you must add new important entities, at most 2 and only with clear plot necessity. Otherwise reuse existing cast/locations/props.\n"
         "- For each new_elements_to_introduce item, emit a proposed_new_nodes row (node_id, node_type, role, canonical_name, writing_brief); "
         "if node_type is CHARACTER, also emit character_profile (core_motivation, core_value, fatal_flaw, speech_style, quirks_and_habits, short_bio, age) "
-        "with semantics aligned to macro-compiled cast. At most 2 nodes, and schedule interaction in ground_truth_events.\n"
-        "- If request_new_b_story is non-empty: instantiate it in new_active_b_stories (aligned type, concrete desc) or explain why existing active_b_stories absorbs it instead.\n"
-        "- new_active_b_stories: if opening a **new** independent B-story this chapter (stable id), at most 2 rows each with id, desc, type, **resolution_condition** (objective completion test); "
-        "type is a BStoryType among FETCH_QUEST / RELATIONSHIP_DRAMA / ENVIRONMENTAL_HAZARD / LORE_DISCOVERY / INTERNAL_CONFLICT. "
-        "Otherwise output []. After approval it merges into bible—do not duplicate existing active_b_stories ids.\n\n"
+        "with semantics aligned to macro-compiled cast. At most 2 nodes, and schedule interaction in ground_truth_events.\n\n"
         "## Output requirements\n"
         "- If previous_attempt_ground_truth_events or previous_attempt_narrative_script is present, this is a revision pass—not a blank-slate rewrite.\n"
         "- When only part of the prior plan failed, keep sound event chains and chapter direction; fix only the feedback-flagged segments, events, or location fields.\n"

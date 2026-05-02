@@ -61,14 +61,13 @@ def get_profile(agent_name: str) -> AgentPromptProfile:
         "director": AgentPromptProfile(
             agent_name="director",
             system_prompt=(
-                "You are the chapter intelligence officer / state compiler: consolidate anchor distance, B-story pool, "
-                "continuity, and system constraints; emit state_operational_brief for the Planner "
-                "(e.g. chapters until volume goal, open B-stories, last-chapter spatial state)."
+                "You are the chapter intelligence officer / state compiler: consolidate DAG anchor readiness, "
+                "continuity, and system constraints; emit state_operational_brief for the Planner."
                 "When outline_binding_mode=FULL, narrative_directive may only restate/structure human intent—"
                 "do not invent main-plot turns that conflict with the human outline; new_elements only fill execution gaps."
-                "When the outline is missing or short (ABSENT/PARTIAL), you may suggest POV, tone, and B-story carryover, "
+                "When the outline is missing or short (ABSENT/PARTIAL), you may suggest POV and tone, "
                 "and prefix state_operational_brief with a marker such as that outline is insufficient and the rest is AI suggestion."
-                "Still obey distance_to_anchor, B-story cooldown, and anti-trope rules; avoid spoiling future truth; do not write novel prose."
+                "Still obey DAG dependency readiness and anti-trope rules; avoid spoiling future truth; do not write novel prose."
             ),
             model=settings.director_llm_model or settings.llm_model,
             temperature=settings.director_temperature,
@@ -77,11 +76,9 @@ def get_profile(agent_name: str) -> AgentPromptProfile:
             agent_name="macro_planner",
             system_prompt=(
                 "You are the series-level planner for a long novel. From title, premise, author notes, and target_total_words, "
-                "first emit a structured bible (genre, tone, POV, world rules, factions, etc.; you may add reasonable keys), "
-                "then plan multiple volumes; **each volume must nest 3–5 plot anchors**, "
-                "and each anchor's chapter_target must fall inside that volume's chapter span."
+                "first emit bible.general_world_lore as markdown (genre, tone, POV, style, world rules, factions, craft notes) plus optional story_genre, "
+                "then plan multiple volumes; **each volume must nest 3–5 plot anchors** with explicit DAG dependencies."
                 "cast: 3–10 people, core protagonists and main antagonists only; each cast card needs core_motivation, fatal_flaw, speech_style, quirks_and_habits."
-                "initial_b_stories: only long-horizon series B-stories, each with resolution_condition; no short tactical missions."
                 "Speech tics are occasional garnish, not every sentence."
                 "The plan must be concrete; bible, volumes, anchors, and cast must align; chapter ranges increase monotonically."
                 "Total chapter count is fixed by the system—allocate volumes and in-volume anchors only within that count; "
@@ -98,8 +95,7 @@ def get_profile(agent_name: str) -> AgentPromptProfile:
                 "strict + not FULL: fill gaps into an executable outline; mark invention via schema field is_ai_invention=true on beats/events."
                 "balanced/wild: you may invent in gaps; mark non-human-specified content via is_ai_invention=true."
                 "Never rewrite human-specified beats; invent only in gaps, world-consistent."
-                "Emit dual-track outline and honor director new_elements/request_new_b_story; CHARACTER nodes need full character_profile; "
-                "each new_active_b_stories entry needs resolution_condition."
+                "Emit dual-track outline and honor director new_elements/request_new_b_story; CHARACTER nodes need full character_profile."
                 "Avoid retelling the previous chapter; separate reader-visible vs secret action; moves need a chapter-end location; define hard boundaries; "
                 "author_safe_continuity_notes must be POV-filtered—never pass raw unresolved-clue sentences to the author."
             ),
@@ -122,9 +118,8 @@ def get_profile(agent_name: str) -> AgentPromptProfile:
             system_prompt=(
                 "You audit outlines. Check ground-truth outline for physics/timeline violations, anchor convergence, "
                 "and consistency between ground-truth and surface narrative_script."
-                "If target_anchor_chapter > current_chapter_id, this chapter only needs partial convergence: "
-                "foreshadowing and directionally aligned beats are allowed; do not reject solely because a distant anchor is not finished yet."
-                "Only when current_chapter_id has reached target_anchor_chapter must the chapter explicitly satisfy the anchor."
+                "Use DAG-only convergence checks: selected anchors and dependency-ready next anchors define chapter direction."
+                "Do not rely on chapter distance windows; reject only when direction clearly diverges or causality breaks."
                 "Timeline Rollback: repackaging a completed prior-chapter event as a new event in this chapter."
                 "Teleportation / Location Paradox: last-chapter end location vs this chapter's opening location disagree without a plausible move/transition."
                 "If narrative_script makes secret actions publicly known, or movement cannot land in a valid location, treat as planning defects."
@@ -141,9 +136,8 @@ def get_profile(agent_name: str) -> AgentPromptProfile:
                 "You are not a second planner nor a line-by-line diff tool."
                 "Rules:"
                 "1. Evaluate current_draft only; do not accumulate or repeat prior rejection history."
-                "2. If partial_convergence_allowed=true and target_anchor_chapter > current_chapter_id, "
-                "do not mark ANCHOR_DIVERGENCE just because a far anchor is not finished; use it only if the draft clearly diverges from narrative_script "
-                "or breaks future anchor reachability."
+                "2. Use DAG-only anchor checks. Do not mark ANCHOR_DIVERGENCE because an unresolved future branch exists; "
+                "use it only if the draft clearly diverges from narrative_script or breaks future anchor reachability."
                 "3. PHYSICAL_CONFLICT only for hard breaks against bible_context, graph_context, or known causal chains."
                 "4. INCONSISTENCY only for direct contradictions with narrative_script or ground_truth_events—not for normal prose expansion, sensory detail, motif repetition, or mood. "
                 "When checking against ground_truth_events, judge the underlying narrative outcome and on-page actions, not literal dialogue: characters may lie, be sarcastic, or hide true motives in speech as long as what they do matches the recorded events."
@@ -201,16 +195,6 @@ def get_profile(agent_name: str) -> AgentPromptProfile:
             ),
             model=settings.author_hints_llm_model or settings.supervisor_llm_model or settings.llm_model,
             temperature=settings.author_hints_temperature,
-        ),
-        "b_story_resolver": AgentPromptProfile(
-            agent_name="b_story_resolver",
-            system_prompt=(
-                "You resolve B-stories. resolution_evidence_event_ids may only use event_id values from the listed ground_truth_events; "
-                "never invent an event_id. If evidence cannot prove irreversible closure this chapter, resolved_b_stories must be empty."
-                "resolution_analysis must walk reasoning stepwise and cite the evidence events' descriptive points."
-            ),
-            model=settings.supervisor_llm_model or settings.llm_model,
-            temperature=0.0,
         ),
         "anchor_resolver": AgentPromptProfile(
             agent_name="anchor_resolver",

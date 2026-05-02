@@ -1,6 +1,7 @@
 from functools import lru_cache
 
 from app.core.config import get_settings
+from app.core.logging import get_logger
 from app.repositories.sqlite.database import SQLiteDatabase
 from app.repositories.sqlite.story_repository import StoryRepository
 from app.repositories.sqlite.workflow_repository import WorkflowRepository
@@ -10,6 +11,8 @@ from app.services.graph_store import GraphStore, InMemoryGraphStore, Neo4jGraphS
 from app.services.llm import EmbeddingClient, LLMClient, MockLLMClient, OpenAICompatibleEmbeddingClient, OpenAICompatibleLLMClient
 from app.services.vector_store import DeterministicEmbeddingClient, InMemoryVectorStore, QdrantVectorStore, VectorStore
 from app.services.workflow.service import WorkflowService
+
+logger = get_logger(__name__)
 
 
 @lru_cache
@@ -57,8 +60,18 @@ def get_vector_store() -> VectorStore:
 @lru_cache
 def get_llm_client() -> LLMClient:
     settings = get_settings()
-    if settings.use_mock_llm or settings.llm_provider == "mock":
+    if settings.effective_use_mock_generation or settings.llm_provider == "mock":
+        logger.info("Using mock generation client")
         return MockLLMClient()
+    logger.info(
+        "Using openai-compatible generation client",
+        extra={
+            "extra_payload": {
+                "provider": settings.openai_base_url,
+                "model": settings.llm_model,
+            }
+        },
+    )
     return OpenAICompatibleLLMClient(
         base_url=settings.openai_base_url,
         api_key=settings.openai_api_key,
@@ -69,19 +82,32 @@ def get_llm_client() -> LLMClient:
         stream_include_usage=settings.openai_stream_include_usage,
         connect_timeout=settings.openai_connect_timeout_seconds,
         stream_read_timeout=settings.openai_stream_read_timeout_seconds,
+        json_response_format_enabled=settings.llm_json_response_format,
+        json_repair_max_attempts=settings.llm_json_repair_attempts,
+        json_repair_plain_on_retry=settings.llm_json_repair_plain_on_retry,
     )
 
 
 @lru_cache
 def get_embedding_client() -> EmbeddingClient:
     settings = get_settings()
-    if settings.use_mock_llm or settings.llm_provider == "mock":
+    if settings.effective_use_mock_embeddings or settings.effective_embedding_provider == "mock":
+        logger.info("Using deterministic embedding client")
         return DeterministicEmbeddingClient(settings.qdrant_vector_size)
+    logger.info(
+        "Using openai-compatible embedding client",
+        extra={
+            "extra_payload": {
+                "provider": settings.effective_embedding_base_url,
+                "model": settings.openai_embedding_model,
+            }
+        },
+    )
     return OpenAICompatibleEmbeddingClient(
-        base_url=settings.openai_base_url,
-        api_key=settings.openai_api_key,
+        base_url=settings.effective_embedding_base_url,
+        api_key=settings.effective_embedding_api_key,
         model=settings.openai_embedding_model,
-        timeout=settings.openai_timeout_seconds,
+        timeout=settings.effective_embedding_timeout_seconds,
     )
 
 

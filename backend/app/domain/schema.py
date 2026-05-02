@@ -318,7 +318,7 @@ class MacroNestedAnchorDraft(BaseModel):
     title: str
     description: str
     target_state: dict[str, Any] = Field(default_factory=dict)
-    chapter_target: int
+    chapter_target: int = 0
     priority: int = 1
     # Selected keypoint IDs (e.g. ["KP1"]) referencing `macro_author_notes` for enforcement.
     notes_links: list[str] = Field(default_factory=list)
@@ -431,7 +431,7 @@ class StateAnchor(BaseModel):
     title: str
     description: str
     target_state: dict[str, Any]
-    chapter_target: int
+    chapter_target: int = 0
     priority: int = 1
 
 
@@ -444,17 +444,6 @@ class MacroPlanPut(BaseModel):
     anchor_nodes: list["AnchorNode"] = Field(..., min_length=1)
     cast: list[StoryCastMemberStored] = Field(default_factory=list)
     protagonist_character_id: str | None = None
-
-
-class MacroAnchorDraft(BaseModel):
-    """Legacy flat macro anchor; prefer nested anchors under MacroVolumePlanDraft."""
-
-    title: str
-    description: str
-    target_state: dict[str, Any] = Field(default_factory=dict)
-    chapter_target: int
-    volume_index: int = 1
-    priority: int = 1
 
 
 class ChapterType(str, Enum):
@@ -557,31 +546,14 @@ class BStoryType(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
-class MacroInitialBStory(BaseModel):
-    """Long-horizon subplot seeds at macro compile (merged into bible_json.active_b_stories)."""
-
-    id: str = Field(..., min_length=1, max_length=80)
-    desc: str = Field(default="", max_length=800)
-    type: BStoryType = BStoryType.UNKNOWN
-    resolution_condition: str = Field(
-        default="",
-        max_length=800,
-        description="Objective completion criteria for downstream resolution checks.",
-    )
-
-
 class MacroPlanOutput(BaseModel):
     total_chapters: int = 12
     bible: dict[str, Any] = Field(
         default_factory=dict,
-        description="Generated story bible (genre, tone, world_rules, factions, etc.).",
+        description="Generated story bible (general_world_lore markdown, story_genre, etc.).",
     )
     volumes: list[MacroVolumePlanDraft] = Field(default_factory=list)
     cast: list[MacroCastMember] = Field(default_factory=list)
-    initial_b_stories: list[MacroInitialBStory] = Field(
-        default_factory=list,
-        description="Long-horizon b-story seeds merged into bible_json.active_b_stories at macro compile.",
-    )
 
 
 class DirectorNewElement(BaseModel):
@@ -761,19 +733,6 @@ class MandatoryNewEntity(BaseModel):
     search_keywords: list[str] = Field(default_factory=list)
 
 
-class BStorySeed(BaseModel):
-    """New subplot thread to merge into bible active_b_stories on successful chapter commit."""
-
-    id: str = Field(..., min_length=1, max_length=80)
-    desc: str = Field(default="", max_length=800)
-    type: BStoryType = BStoryType.UNKNOWN
-    resolution_condition: str = Field(
-        default="",
-        max_length=800,
-        description="Objective criteria for when this subplot is considered complete.",
-    )
-
-
 class PlannerOutput(BaseModel):
     ground_truth_events: list[EventOutline]
     narrative_script: str
@@ -804,10 +763,6 @@ class PlannerOutput(BaseModel):
         ),
     )
     proposed_new_nodes: list[ProposedGraphNode] = Field(default_factory=list)
-    new_active_b_stories: list[BStorySeed] = Field(
-        default_factory=list,
-        description="本章若開啟全新副線（有獨立 id），最多 2 條；成功定稿後併入 bible。",
-    )
     character_evolution_requests: list[CharacterEvolutionRequest] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -1338,7 +1293,7 @@ class HitlAnchorResolutionRequest(BaseModel):
 
 class HitlAnchorDelayRequest(BaseModel):
     anchor_id: str
-    new_chapter_target: int = Field(..., ge=1)
+    action: Literal["defer"] = "defer"
     reason: str = ""
 
 

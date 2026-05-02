@@ -1,22 +1,22 @@
-/** Pure helpers for macro plan bible shape (extra + active_b_stories) and validation copy. */
+/** Pure helpers for macro plan bible shape (extra + general_world_lore markdown). */
 
-export const BIBLE_LINE_KEYS = [
+export const BIBLE_LINE_KEYS = ["genre", "general_world_lore"] as const;
+export const BIBLE_ALIAS_KEYS = new Set(["story_genre", "story_tone"]);
+/** Keys duplicated in primary bible fields — skip when merging from `extra` to avoid dup rows. */
+export const BIBLE_OPTIONAL_TOP_KEYS = new Set<string>(["theme", "narrative_pov", "writing_style"]);
+
+export const BIBLE_RESERVED_TOP_KEYS = new Set<string>([
   "genre",
+  "story_genre",
+  "general_world_lore",
   "tone",
   "theme",
+  "themes",
   "narrative_pov",
   "writing_style",
   "world_rules",
   "factions",
   "writing_note",
-] as const;
-export const BIBLE_ALIAS_KEYS = new Set(["story_genre", "story_tone"]);
-export const BIBLE_OPTIONAL_TOP_KEYS = new Set(["theme", "themes", "narrative_pov", "writing_style"]);
-
-export const BIBLE_RESERVED_TOP_KEYS = new Set<string>([
-  ...BIBLE_LINE_KEYS,
-  "themes",
-  "story_genre",
   "story_tone",
   "extra",
   "active_b_stories",
@@ -25,13 +25,6 @@ export const BIBLE_RESERVED_TOP_KEYS = new Set<string>([
 ]);
 
 export type ExtraRow = { key: string; value: string; isList: boolean };
-
-export type BStoryRow = {
-  id: string;
-  desc: string;
-  type: string;
-  resolution_condition: string;
-};
 
 export function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -62,25 +55,47 @@ export function serializeExtraValue(v: unknown): { text: string; isList: boolean
   return { text: String(v ?? ""), isList: false };
 }
 
-export function parseBStories(raw: unknown): BStoryRow[] {
-  if (!Array.isArray(raw)) return [];
-  return raw.map((item) => {
-    if (!isObjectRecord(item)) return { id: "", desc: "", type: "UNKNOWN", resolution_condition: "" };
-    return {
-      id: String(item.id ?? "").trim(),
-      desc: String(item.desc ?? "").trim(),
-      type: String(item.type ?? "UNKNOWN").trim() || "UNKNOWN",
-      resolution_condition: String(item.resolution_condition ?? "").trim(),
-    };
-  });
+/** Build markdown from legacy scattered bible keys (when general_world_lore missing). */
+export function stitchLegacyLoreToMarkdown(bible: Record<string, unknown>): string {
+  const parts: string[] = [];
+  const genre = String(bible.story_genre ?? bible.genre ?? "").trim();
+  if (genre) {
+    parts.push("## Genre", "", genre);
+  }
+  const tone = asLines(bible.tone);
+  if (tone) {
+    parts.push("## Tone", "", tone);
+  }
+  const themes = asLines(bible.theme ?? bible.themes);
+  if (themes) {
+    parts.push("## Themes", "", ...parseNonEmptyLines(themes).map((t) => `- ${t}`));
+  }
+  const np = asLines(bible.narrative_pov);
+  if (np) {
+    parts.push("## Narrative POV", "", np);
+  }
+  const ws = asLines(bible.writing_style);
+  if (ws) {
+    parts.push("## Writing style", "", ws);
+  }
+  if (Array.isArray(bible.world_rules) && bible.world_rules.length) {
+    parts.push("## World rules", "", ...bible.world_rules.map((x) => `- ${String(x)}`));
+  }
+  if (Array.isArray(bible.factions) && bible.factions.length) {
+    parts.push("## Factions", "", ...bible.factions.map((x) => `- ${String(x)}`));
+  }
+  if (Array.isArray(bible.writing_note) && bible.writing_note.length) {
+    parts.push("## Writing notes", "", ...bible.writing_note.map((x) => `- ${String(x)}`));
+  }
+  return parts.join("\n").trim();
 }
 
 export type LegacySplit = {
   extraRows: ExtraRow[];
-  activeBStories: BStoryRow[];
+  generalWorldLore: string;
 };
 
-/** Load bible into extra rows + active b-stories; migrate flat keys into extra. */
+/** Load bible into extra rows + general_world_lore; migrate flat keys into extra. */
 export function splitBibleForForm(bible: Record<string, unknown>): LegacySplit {
   const extraRows: ExtraRow[] = [];
   const extraObj = bible.extra;
@@ -96,7 +111,10 @@ export function splitBibleForForm(bible: Record<string, unknown>): LegacySplit {
     const ser = serializeExtraValue(v);
     extraRows.push({ key: k, value: ser.text, isList: ser.isList });
   }
-  return { extraRows, activeBStories: parseBStories(bible.active_b_stories) };
+  const raw = bible.general_world_lore;
+  const generalWorldLore =
+    typeof raw === "string" && raw.trim() ? raw : stitchLegacyLoreToMarkdown(bible);
+  return { extraRows, generalWorldLore };
 }
 
 export function buildExtraObject(rows: ExtraRow[]): Record<string, unknown> {
@@ -114,17 +132,6 @@ export function buildExtraObject(rows: ExtraRow[]): Record<string, unknown> {
   return out;
 }
 
-export function bStoriesToPayload(rows: BStoryRow[]): Array<Record<string, unknown>> {
-  return rows
-    .filter((r) => r.id.trim())
-    .map((r) => ({
-      id: r.id.trim(),
-      desc: r.desc,
-      type: r.type || "UNKNOWN",
-      resolution_condition: r.resolution_condition,
-    }));
-}
-
 export function newLocalId(prefix: string): string {
   const id =
     typeof crypto !== "undefined" && crypto.randomUUID
@@ -140,16 +147,9 @@ export function mergeMacroBibles(current: Record<string, unknown>, incoming: Rec
   if (Object.keys(curExtra).length || Object.keys(incExtra).length) {
     out.extra = { ...incExtra, ...curExtra };
   }
-  const curStories = Array.isArray(current.active_b_stories) ? current.active_b_stories : [];
-  const incStories = Array.isArray(incoming.active_b_stories) ? incoming.active_b_stories : [];
-  const byId = new Map<string, unknown>();
-  for (const s of incStories) {
-    if (isObjectRecord(s) && s.id != null) byId.set(String(s.id), s);
-  }
-  for (const s of curStories) {
-    if (isObjectRecord(s) && s.id != null) byId.set(String(s.id), s);
-  }
-  if (byId.size) out.active_b_stories = [...byId.values()];
+  const incLore = String(incoming.general_world_lore ?? "").trim();
+  const curLore = String(current.general_world_lore ?? "").trim();
+  out.general_world_lore = curLore || incLore;
   return out;
 }
 

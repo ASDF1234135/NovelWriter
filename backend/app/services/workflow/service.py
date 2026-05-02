@@ -35,7 +35,12 @@ from app.domain.schema import (
     VolumePlan,
     WorkflowStatus,
 )
-from app.domain.state import apply_length_bounds_to_state, build_initial_state, normalize_workflow_state
+from app.domain.state import (
+    apply_length_bounds_to_state,
+    build_initial_state,
+    canonicalize_workflow_state_contract,
+    normalize_workflow_state,
+)
 from app.services.workflow.constants import AUTHOR_CHAPTER_PLAN_MAX_CHARS, CHAPTER_HARD_RULES_MAX_CHARS
 from app.repositories.sqlite.story_repository import StoryRepository
 from app.repositories.sqlite.workflow_repository import WorkflowRepository
@@ -44,11 +49,10 @@ from app.services.bible_service import BibleService
 from app.services.graph_store import GraphStore
 from app.services.llm import LLMClient
 from app.services.vector_store import VectorStore
-from app.services.workflow.bible_writing_notes import normalize_writing_note
+from app.services.workflow.bible_general_lore import effective_general_world_lore
 from app.services.workflow.chapter_pacing import (
     build_ending_vibe_cooldown_constraint,
     build_resolution_cooldown_constraint,
-    chapter_distance_to_anchor,
 )
 from app.services.workflow.context import WorkflowContext
 from app.services.workflow.nodes.chapter_summarizer import (
@@ -84,14 +88,82 @@ _ALLOWED_HITL_RESUME_NODES = frozenset(
 )
 
 
-def _refresh_unachieved_anchors(story_repository: StoryRepository, state: dict) -> None:
-    chapter_id = int(state["chapter_id"])
+def _refresh_anchor_runtime_state(story_repository: StoryRepository, state: dict) -> None:
     story_id = str(state["story_id"])
     story = story_repository.get_story(story_id) or {}
-    unachieved = _unachieved_from_anchor_nodes(story, chapter_id)
-    state["unachieved_anchors"] = unachieved
-    state["target_anchor_id"] = str(unachieved[0].get("anchor_id") or "") if unachieved else None
-    state["distance_to_anchor"] = chapter_distance_to_anchor(chapter_id, unachieved)
+    nodes = [dict(n) for n in (story.get("anchor_nodes_json") or []) if isinstance(n, dict)]
+    state["anchor_nodes"] = nodes
+    node_ids = {str(n.get("id") or "").strip() for n in nodes if str(n.get("id") or "").strip()}
+    bible = story.get("bible_json") if isinstance(story.get("bible_json"), dict) else {}
+    resolved_raw = state.get("resolved_anchors")
+    if resolved_raw is None:
+        resolved_raw = bible.get("resolved_anchors") or []
+    resolved = [str(x).strip() for x in resolved_raw if str(x).strip() in node_ids]
+    state["resolved_anchors"] = sorted(dict.fromkeys(resolved))
+    candidates_raw = state.get("anchor_candidates")
+    if not candidates_raw:
+        candidates_raw = bible.get("anchor_candidates") or []
+    if not candidates_raw and nodes:
+        candidates_raw = [
+            str(n.get("id") or "").strip()
+            for n in nodes
+            if str(n.get("status") or "").upper() == "UNLOCKED"
+        ]
+    resolved_set = set(state["resolved_anchors"])
+    state["anchor_candidates"] = [
+        str(x).strip()
+        for x in candidates_raw
+        if str(x).strip() in node_ids and str(x).strip() not in resolved_set
+    ]
+    canonicalize_workflow_state_contract(state)
+
+
+def _topo_sort_unresolved_anchor_dicts(nodes: list[dict]) -> list[dict]:
+    pending = [n for n in nodes if isinstance(n, dict) and str(n.get("status") or "").upper() != "RESOLVED"]
+    id_set = {str(n.get("id") or "").strip() for n in pending if str(n.get("id") or "").strip()}
+    if not id_set:
+        return []
+    by_id = {str(n.get("id") or "").strip(): n for n in pending if str(n.get("id") or "").strip()}
+    indeg: dict[str, int] = {nid: 0 for nid in id_set}
+    children: dict[str, list[str]] = {nid: [] for nid in id_set}
+    for n in pending:
+        nid = str(n.get("id") or "").strip()
+        if not nid:
+            continue
+        for dep in n.get("depends_on") or []:
+            ds = str(dep).strip()
+            if ds in id_set:
+                indeg[nid] += 1
+                children[ds].append(nid)
+    q = sorted([nid for nid in id_set if indeg[nid] == 0])
+    order_ids: list[str] = []
+    while q:
+        cur = q.pop(0)
+        order_ids.append(cur)
+        for nxt in children.get(cur, []):
+            indeg[nxt] -= 1
+            if indeg[nxt] == 0:
+                q.append(nxt)
+        q.sort()
+    if len(order_ids) != len(id_set):
+        return pending
+    return [by_id[i] for i in order_ids]
+
+
+def _unachieved_from_anchor_nodes(story_row: dict, chapter_id: int) -> list[dict]:
+    nodes = [n for n in (story_row.get("anchor_nodes_json") or []) if isinstance(n, dict)]
+    if not nodes:
+        bible = story_row.get("bible_json") if isinstance(story_row.get("bible_json"), dict) else {}
+        nodes = [n for n in (bible.get("anchor_nodes") or []) if isinstance(n, dict)]
+    ordered = _topo_sort_unresolved_anchor_dicts(nodes)
+    return [
+        {
+            "anchor_id": str(n.get("id") or ""),
+            "title": str(n.get("title") or ""),
+            "description": str(n.get("description") or ""),
+        }
+        for n in ordered
+    ]
 
 
 def _merge_surface_hints(state: dict, entries: list) -> None:
@@ -197,46 +269,36 @@ def _merge_hitl_future_anchor(
     if not (title or "").strip() and not (description or "").strip():
         return
     delay = 0 if chapters_to_delay is None else int(chapters_to_delay)
-    target_chapter = chapter_id + delay
     t = (title or "").strip() or (description or "").strip()[:120] or "未命名錨點"
     d = (description or "").strip()
     anchor_id = f"{story_id}_hitl_anchor_{uuid4().hex[:10]}"
     volume_id = _pick_volume_id_for_chapter(story_repository, story_id, chapter_id)
-    rows = story_repository.list_anchors(story_id)
-    anchors: list[dict] = []
-    for row in rows:
-        ts = row.get("target_state_json")
-        if not isinstance(ts, dict):
-            ts = {}
-        vid = str(row.get("volume_id") or volume_id).strip() or volume_id
-        anchors.append(
-            {
-                "anchor_id": str(row["anchor_id"]),
-                "volume_id": vid,
-                "title": str(row.get("title") or ""),
-                "description": str(row.get("description") or ""),
-                "target_state": ts,
-                "chapter_target": int(row["chapter_target"]),
-                "priority": int(row.get("priority") or 1),
-            }
-        )
-    anchors.append(
+    story = story_repository.get_story(story_id) or {}
+    storylines = list(story.get("storylines_json") or [])
+    nodes = [dict(n) for n in (story.get("anchor_nodes_json") or []) if isinstance(n, dict)]
+    nodes.append(
         {
-            "anchor_id": anchor_id,
+            "id": anchor_id,
+            "storyline_ids": [],
             "volume_id": volume_id,
+            "node_kind": "NORMAL",
             "title": t,
             "description": d,
-            "target_state": {"source": "hitl_future_anchor"},
-            "chapter_target": target_chapter,
-            "priority": 1,
+            "depends_on": [],
+            "status": "UNLOCKED",
+            "properties": {"source": "hitl_future_anchor", "deferred_chapters": delay},
         }
     )
-    story_repository.store_anchors(story_id, anchors)
+    story_repository.update_story_macro_topology(
+        story_id,
+        storylines=[dict(x) for x in storylines if isinstance(x, dict)],
+        anchor_nodes=nodes,
+    )
 
 
 def _apply_abort_and_restart_chapter_state(story_repository: StoryRepository, state: dict) -> None:
     """Discard AI chapter progress and restart planning; keep human outline/hard rules."""
-    outline = str(state.get("chapter_outline") or state.get("author_chapter_plan") or "").strip()
+    outline = str(state.get("chapter_outline") or "").strip()
     hard = str(state.get("chapter_hard_rules") or "").strip()
     freedom = str(state.get("ai_freedom_level") or "balanced").strip().lower()
     if freedom not in ("strict", "balanced", "wild"):
@@ -250,12 +312,9 @@ def _apply_abort_and_restart_chapter_state(story_repository: StoryRepository, st
     pov_raw = (story.get("protagonist_character_id") or "").strip()
     pov_character_id = pov_raw if pov_raw else "char_public_observer"
 
-    story_row = story_repository.get_story(story_id) or {}
-    unachieved = _unachieved_from_anchor_nodes(story_row, chapter_id)
     fresh = build_initial_state(
         story_id=story_id,
         chapter_id=chapter_id,
-        unachieved_anchors=unachieved,
         trace_id=trace_id,
         plan_retry_limit=int(story.get("plan_retry_limit", 3)),
         draft_loop_retry_limit=int(story.get("draft_loop_retry_limit", 3)),
@@ -284,11 +343,11 @@ def _apply_abort_and_restart_chapter_state(story_repository: StoryRepository, st
             fresh[key] = deepcopy(state[key]) if isinstance(state[key], (dict, list)) else state[key]
 
     bible = story.get("bible_json") or {}
-    fresh["active_b_stories"] = list(bible.get("active_b_stories") or [])
     fresh["lore_mysteries_progression"] = list(bible.get("lore_mysteries_progression") or [])
-    fresh["writing_note"] = normalize_writing_note(bible.get("writing_note"))
-    fresh["distance_to_anchor"] = chapter_distance_to_anchor(chapter_id, unachieved)
+    fresh["general_world_lore"] = effective_general_world_lore(bible)
+    _refresh_anchor_runtime_state(story_repository, fresh)
     normalize_workflow_state(fresh)
+    canonicalize_workflow_state_contract(fresh)
     fresh["story_output_language"] = normalize_output_language(str(story.get("output_language") or ""))
     apply_length_bounds_to_state(fresh)
     state.clear()
@@ -324,71 +383,6 @@ class ChapterSummaryRegenerateFailed(RuntimeError):
 
 
 logger = logging.getLogger(__name__)
-
-
-def _safe_int_chapter_target(raw: object) -> int | None:
-    if raw is None:
-        return None
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return None
-
-
-def _topo_sort_unresolved_anchor_dicts(nodes: list[dict]) -> list[dict]:
-    """Order non-RESOLVED anchor dicts with Kahn topological sort over depends_on edges inside the set."""
-    pending = [n for n in nodes if isinstance(n, dict) and str(n.get("status") or "").upper() != "RESOLVED"]
-    if not pending:
-        return []
-    id_set = {str(n.get("id") or "").strip() for n in pending if str(n.get("id") or "").strip()}
-    if not id_set:
-        return []
-    by_id = {str(n.get("id") or "").strip(): n for n in pending if str(n.get("id") or "").strip()}
-    indeg: dict[str, int] = {nid: 0 for nid in id_set}
-    children: dict[str, list[str]] = {nid: [] for nid in id_set}
-    for n in pending:
-        nid = str(n.get("id") or "").strip()
-        if not nid:
-            continue
-        for dep in n.get("depends_on") or []:
-            ds = str(dep).strip()
-            if ds in id_set:
-                indeg[nid] += 1
-                children[ds].append(nid)
-    q = [nid for nid in id_set if indeg[nid] == 0]
-    order_ids: list[str] = []
-    while q:
-        q.sort(key=lambda i: (_safe_int_chapter_target(by_id[i].get("estimated_chapter")) or 10**9, i))
-        cur = q.pop(0)
-        order_ids.append(cur)
-        for nxt in children.get(cur, []):
-            indeg[nxt] -= 1
-            if indeg[nxt] == 0:
-                q.append(nxt)
-    if len(order_ids) != len(id_set):
-        return pending
-    return [by_id[i] for i in order_ids]
-
-
-def _unachieved_from_anchor_nodes(story_row: dict, chapter_id: int) -> list[dict]:
-    nodes = [n for n in (story_row.get("anchor_nodes_json") or []) if isinstance(n, dict)]
-    if not nodes:
-        bible = story_row.get("bible_json") if isinstance(story_row.get("bible_json"), dict) else {}
-        nodes = [n for n in (bible.get("anchor_nodes") or []) if isinstance(n, dict)]
-    ordered = _topo_sort_unresolved_anchor_dicts(nodes)
-    rows: list[dict] = []
-    for idx, n in enumerate(ordered, start=1):
-        ec = _safe_int_chapter_target(n.get("estimated_chapter"))
-        chapter_target = ec if ec is not None else max(chapter_id, idx)
-        rows.append(
-            {
-                "anchor_id": str(n.get("id") or ""),
-                "title": str(n.get("title") or ""),
-                "description": str(n.get("description") or ""),
-                "chapter_target": chapter_target,
-            }
-        )
-    return rows
 
 
 def _main_storyline_id(body: MacroPlanPut) -> str | None:
@@ -668,10 +662,9 @@ class WorkflowService:
         )
         compile_out = self.anchor_service.compile_macro_plan(story_id, story_input, self.llm_client)
         if len(compile_out) == 5:
-            volumes, anchors, cast, b_seed, bible_generated = compile_out
+            volumes, _anchors_legacy, cast, _b_seed_unused, bible_generated = compile_out
         else:
-            volumes, cast, b_seed, bible_generated = compile_out
-            anchors = []
+            volumes, cast, _b_seed_unused, bible_generated = compile_out
         storylines = list((bible_generated or {}).get("storylines") or [])
         anchor_nodes = list((bible_generated or {}).get("anchor_nodes") or [])
         self.story_repository.update_story_bible_json(story_id, bible_generated)
@@ -688,10 +681,7 @@ class WorkflowService:
                 if isinstance(n, dict) or hasattr(n, "model_dump")
             ],
         )
-        self.story_repository.merge_active_b_stories_seed(story_id, b_seed)
         self.story_repository.store_volumes(story_id, volumes)
-        if anchors:
-            self.story_repository.store_anchors(story_id, anchors)
         protagonist_id = next((c.node_id for c in cast if c.role == "protagonist"), "")
         self.story_repository.update_story_cast(story_id, cast, protagonist_id)
         self.graph_store.replace_cast_characters(
@@ -724,7 +714,6 @@ class WorkflowService:
                 s.model_dump(mode="json") for s in (story_after.get("cast_seed") or [])
             ],
             "volumes": [volume.model_dump(mode="json") for volume in volumes],
-            "anchors": anchors,
             "cast": [member.model_dump(mode="json") for member in cast],
             "protagonist_character_id": protagonist_id,
             "storylines": storylines,
@@ -734,12 +723,11 @@ class WorkflowService:
         }
 
     def get_macro_snapshot(self, story_id: str) -> dict:
-        """Read macro plan (volumes, anchors, cast) from SQLite without calling the LLM."""
+        """Read macro plan (volumes, anchor_nodes, cast) from SQLite without calling the LLM."""
         story = self.story_repository.get_story(story_id)
         if not story:
             raise KeyError(f"Story not found: {story_id}")
         vol_rows = self.story_repository.list_volumes(story_id)
-        anc_rows = self.story_repository.list_anchors(story_id)
         volumes = [
             VolumePlan(
                 volume_id=str(row["volume_id"]),
@@ -759,20 +747,6 @@ class WorkflowService:
                 cast_out.append(StoryCastMemberStored.model_validate(raw).model_dump(mode="json"))
             except Exception:
                 continue
-        anchors: list[dict] = []
-        for row in anc_rows:
-            anchors.append(
-                {
-                    "anchor_id": str(row.get("anchor_id") or ""),
-                    "story_id": str(row.get("story_id") or ""),
-                    "volume_id": str(row.get("volume_id") or ""),
-                    "title": str(row.get("title") or ""),
-                    "description": str(row.get("description") or ""),
-                    "target_state": row.get("target_state_json") if isinstance(row.get("target_state_json"), dict) else {},
-                    "chapter_target": int(row.get("chapter_target") or 1),
-                    "priority": int(row.get("priority") or 1),
-                }
-            )
         protagonist_id = str(story.get("protagonist_character_id") or "").strip()
         bible_out = story.get("bible_json") if isinstance(story.get("bible_json"), dict) else {}
         return {
@@ -781,7 +755,6 @@ class WorkflowService:
             "macro_author_notes": str(story.get("macro_author_notes") or ""),
             "cast_seed": [s.model_dump(mode="json") for s in (story.get("cast_seed") or [])],
             "volumes": volumes,
-            "anchors": anchors,
             "cast": cast_out,
             "protagonist_character_id": protagonist_id,
             "storylines": list(story.get("storylines_json") or []),
@@ -917,7 +890,6 @@ class WorkflowService:
                 f"Chapter {chapter_id} is already generated and stored (status=completed); "
                 "full agent run is not allowed for this chapter."
             )
-        unachieved_anchors = _unachieved_from_anchor_nodes(story, chapter_id)
         pov_raw = (story.get("protagonist_character_id") or "").strip()
         pov_character_id = pov_raw if pov_raw else "char_public_observer"
         # Backward compatible:
@@ -932,7 +904,6 @@ class WorkflowService:
         initial_state = build_initial_state(
             story_id=story_id,
             chapter_id=chapter_id,
-            unachieved_anchors=unachieved_anchors,
             trace_id=str(uuid4()),
             plan_retry_limit=int(story.get("plan_retry_limit", 3)),
             draft_loop_retry_limit=int(story.get("draft_loop_retry_limit", 3)),
@@ -991,7 +962,6 @@ class WorkflowService:
             initial_state["ending_vibe_cooldown_constraint"] = {"active": False}
 
         bible = story.get("bible_json") or {}
-        initial_state["active_b_stories"] = []
         initial_state["storyline_metadata"] = list(story.get("storylines_json") or [])
         initial_state["anchor_nodes"] = list(story.get("anchor_nodes_json") or [])
         initial_state["resolved_anchors"] = list(bible.get("resolved_anchors") or [])
@@ -1012,9 +982,10 @@ class WorkflowService:
         initial_state["active_anchors"] = []
         initial_state["state_version"] = 2
         initial_state["lore_mysteries_progression"] = list(bible.get("lore_mysteries_progression") or [])
-        initial_state["writing_note"] = normalize_writing_note(bible.get("writing_note"))
-        initial_state["distance_to_anchor"] = chapter_distance_to_anchor(chapter_id, unachieved_anchors)
+        initial_state["general_world_lore"] = effective_general_world_lore(bible)
+        _refresh_anchor_runtime_state(self.story_repository, initial_state)
         normalize_workflow_state(initial_state)
+        canonicalize_workflow_state_contract(initial_state)
         apply_length_bounds_to_state(initial_state)
         if extraction_surface_hints:
             _merge_surface_hints(initial_state, extraction_surface_hints)
@@ -1281,7 +1252,7 @@ class WorkflowService:
                 request.future_anchor_description,
                 request.chapters_to_delay,
             )
-            _refresh_unachieved_anchors(self.story_repository, state)
+            _refresh_anchor_runtime_state(self.story_repository, state)
         patched_rules = (request.chapter_hard_rules or "").strip()
         if patched_rules:
             state["chapter_hard_rules"] = patched_rules[:8000]
@@ -1396,7 +1367,6 @@ class WorkflowService:
         state["pending_hitl_options"] = []
         state["workflow_status"] = WorkflowStatus.RUNNING.value
         state["resume_from"] = "extraction_gate"
-        state["post_polish_route"] = "anchor_resolve"
         self.workflow_repository.append_hitl_action(run_id, "extraction_remap", request.model_dump(mode="json"))
         self.workflow_repository.update_run(run_id, state)
 
@@ -1426,7 +1396,8 @@ class WorkflowService:
         if request.action == "force_resolve":
             resolved.update(str(x).strip() for x in request.resolved_anchor_ids if str(x).strip())
             state["resolved_anchors"] = sorted(resolved)
-            state["resume_from"] = "state_updater"
+            # Keep standard graph handoff to ensure pending cast evolution materializes.
+            state["resume_from"] = "profile_expander"
         elif request.action == "delay_anchor":
             delayed = {str(x).strip() for x in request.delayed_anchor_ids if str(x).strip()}
             state["anchor_candidates"] = [x for x in (state.get("anchor_candidates") or []) if str(x) not in delayed]
@@ -1465,10 +1436,23 @@ class WorkflowService:
     def apply_hitl_anchor_delay(self, run_id: str, request: HitlAnchorDelayRequest) -> None:
         state = normalize_workflow_state(self.workflow_repository.get_run_state(run_id))
         _ensure_hitl_waiting(state)
-        self.story_repository.update_anchor_chapter_target(
-            state["story_id"], request.anchor_id, request.new_chapter_target
-        )
-        _refresh_unachieved_anchors(self.story_repository, state)
+        story_id = str(state["story_id"])
+        story = self.story_repository.get_story(story_id) or {}
+        storylines = [dict(x) for x in (story.get("storylines_json") or []) if isinstance(x, dict)]
+        nodes = [dict(n) for n in (story.get("anchor_nodes_json") or []) if isinstance(n, dict)]
+        updated = False
+        for node in nodes:
+            if str(node.get("id") or "").strip() != str(request.anchor_id).strip():
+                continue
+            props = dict(node.get("properties") or {})
+            props["hitl_deferred"] = True
+            node["properties"] = props
+            updated = True
+            break
+        if not updated:
+            raise KeyError(f"Anchor not found: {story_id}/{request.anchor_id}")
+        self.story_repository.update_story_macro_topology(story_id, storylines=storylines, anchor_nodes=nodes)
+        _refresh_anchor_runtime_state(self.story_repository, state)
         state["plan_retry_count"] = 0
         state["plan_feedback"] = []
         state["requires_hitl"] = False

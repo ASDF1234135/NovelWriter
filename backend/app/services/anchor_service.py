@@ -348,7 +348,7 @@ class AnchorService:
     ) -> list[AnchorNode]:
         rng = random.Random(f"fishbone:nodes:{story_id}:{len(anchors)}")
         by_volume: dict[str, list[StateAnchor]] = {}
-        for a in sorted(anchors, key=lambda x: (x.chapter_target, x.priority)):
+        for a in sorted(anchors, key=lambda x: (x.priority, x.anchor_id)):
             by_volume.setdefault(a.volume_id, []).append(a)
         main_id = next((s.id for s in storylines if s.type == StorylineTier.MAIN), "")
         s_ids = [s.id for s in storylines if s.type == StorylineTier.S_TIER]
@@ -395,7 +395,6 @@ class AnchorService:
             if not start_main or not last_main:
                 continue
             s_tail_ids: list[str] = []
-            s_all_ids: list[str] = []
             for s_idx, sid in enumerate(s_ids, start=1):
                 count = rng.randint(1, 3)
                 prev = prev_s_tail.get(sid, start_main)
@@ -416,13 +415,11 @@ class AnchorService:
                             status=AnchorStatus.UNLOCKED if not deps else AnchorStatus.LOCKED,
                         )
                     )
-                    s_all_ids.append(nid)
                     prev = nid
                 prev_s_tail[sid] = prev
                 s_tail_ids.append(prev)
 
             a_tail_ids: list[str] = []
-            a_all_ids: list[str] = []
             main_rows = by_volume.get(vol.volume_id, [])
             for a_idx, sid in enumerate(a_lines_per_volume.get(vol.volume_id, []), start=1):
                 count = rng.randint(2, 4)
@@ -446,11 +443,10 @@ class AnchorService:
                             status=AnchorStatus.UNLOCKED if not deps else AnchorStatus.LOCKED,
                         )
                     )
-                    a_all_ids.append(nid)
                     prev = nid
                 a_tail_ids.append(prev)
 
-            cp_deps = [last_main] + s_all_ids + a_all_ids
+            cp_deps = [last_main] + s_tail_ids + a_tail_ids
             cp = f"{vol.volume_id}_checkpoint"
             nodes.append(
                 AnchorNode(
@@ -466,7 +462,7 @@ class AnchorService:
             )
 
         if b_ids:
-            main_all = [a.anchor_id for a in sorted(anchors, key=lambda x: (x.chapter_target, x.priority))]
+            main_all = [a.anchor_id for a in sorted(anchors, key=lambda x: (x.priority, x.anchor_id))]
             rng.shuffle(main_all)
             used_mounts: set[str] = set()
             for idx, sid in enumerate(b_ids, start=1):
@@ -536,7 +532,7 @@ class AnchorService:
                         "volume_id": a.volume_id,
                         "title": a.title,
                         "description": a.description,
-                        "chapter_target": a.chapter_target,
+                        "dag_order": a.priority,
                         "priority": a.priority,
                         "storyline_ids": [],
                         "node_kind": "NORMAL",
@@ -551,7 +547,7 @@ class AnchorService:
                         "volume_id": a.volume_id,
                         "title": a.title,
                         "description": a.description,
-                        "chapter_target": None,
+                        "dag_order": None,
                         "priority": None,
                         "storyline_ids": list(a.storyline_ids or []),
                         "node_kind": a.node_kind,
@@ -873,7 +869,7 @@ class AnchorService:
             )
             volume_main = sorted(
                 [a for a in anchors if a.volume_id == volume.volume_id],
-                key=lambda x: (x.chapter_target, x.priority),
+                key=lambda x: (x.priority, x.anchor_id),
             )
             first_main = volume_main[0].anchor_id if volume_main else ""
             n1_id = f"{volume.volume_id}_a_fallback_01"
@@ -924,7 +920,7 @@ class AnchorService:
             )
             volume_main = sorted(
                 [a for a in anchors if a.volume_id == volume.volume_id],
-                key=lambda x: (x.chapter_target, x.priority),
+                key=lambda x: (x.priority, x.anchor_id),
             )
             first_main = volume_main[0].anchor_id if volume_main else ""
             s1 = f"{volume.volume_id}_s_fallback_01"
@@ -1324,21 +1320,54 @@ class AnchorService:
 
     def _validate_strict_join(self, nodes: list[AnchorNode], storylines: list[Storyline]) -> None:
         by_id = {n.id: n for n in nodes}
-        a_or_s_storylines = {s.id for s in storylines if s.type in (StorylineTier.S_TIER, StorylineTier.A_TIER)}
+        main_storylines = [s.id for s in storylines if s.type == StorylineTier.MAIN]
+        side_storylines = [s.id for s in storylines if s.type in (StorylineTier.S_TIER, StorylineTier.A_TIER)]
+        children: dict[str, list[str]] = {n.id: [] for n in nodes}
+        for node in nodes:
+            for dep in node.depends_on:
+                if dep in children:
+                    children[dep].append(node.id)
+
+        def _tail_for_storyline(volume_id: str, storyline_id: str) -> str | None:
+            scoped = [
+                n
+                for n in nodes
+                if n.volume_id == volume_id
+                and storyline_id in (n.storyline_ids or [])
+                and n.node_kind not in ("CHECKPOINT", "ENDING")
+            ]
+            if not scoped:
+                return None
+            scoped_ids = {n.id for n in scoped}
+            tails = [
+                n.id
+                for n in scoped
+                if not any(
+                    child_id in scoped_ids
+                    and storyline_id in (by_id[child_id].storyline_ids or [])
+                    for child_id in children.get(n.id, [])
+                )
+            ]
+            return sorted(tails or [n.id for n in scoped])[-1]
+
         checkpoints = [n for n in nodes if n.node_kind in ("CHECKPOINT", "ENDING")]
         for cp in checkpoints:
             if cp.node_kind == "ENDING":
                 continue
             if len(cp.depends_on) < 2:
                 raise ValueError(f"strict join failed: checkpoint {cp.id} must depend on >=2 upstream nodes")
-            required_side_nodes = [
-                n.id
-                for n in nodes
-                if n.id != cp.id and n.volume_id == cp.volume_id and any(sid in a_or_s_storylines for sid in n.storyline_ids)
-            ]
-            missing = [nid for nid in required_side_nodes if nid not in cp.depends_on]
+            required_nodes: list[str] = []
+            if main_storylines:
+                main_tail = _tail_for_storyline(cp.volume_id, main_storylines[0])
+                if main_tail:
+                    required_nodes.append(main_tail)
+            for sid in side_storylines:
+                tail = _tail_for_storyline(cp.volume_id, sid)
+                if tail:
+                    required_nodes.append(tail)
+            missing = [nid for nid in sorted(set(required_nodes)) if nid not in cp.depends_on]
             if missing:
-                raise ValueError(f"strict join failed: {cp.id} missing side-thread deps {missing[:5]}")
+                raise ValueError(f"strict join failed: {cp.id} missing storyline-tail deps {missing[:5]}")
 
     def _validate_fork_merge(self, nodes: list[AnchorNode]) -> None:
         children: dict[str, list[str]] = {n.id: [] for n in nodes}
@@ -1424,7 +1453,7 @@ class AnchorService:
         volume_thread_desc: dict[str, dict[str, str]] | None = None,
     ) -> list[AnchorNode]:
         main_id = next((s.id for s in storylines if s.type == StorylineTier.MAIN), "")
-        ordered = sorted(anchors, key=lambda a: (a.chapter_target, a.priority))
+        ordered = sorted(anchors, key=lambda a: (a.priority, a.anchor_id))
         nodes: list[AnchorNode] = []
         s_tier_id = next((s.id for s in storylines if s.type == StorylineTier.S_TIER), "")
         a_tier_ids = [s.id for s in storylines if s.type == StorylineTier.A_TIER]
@@ -2131,17 +2160,23 @@ class AnchorService:
         )
 
     def _fallback_bible_from_premise(self, story_input: StoryInput) -> dict[str, Any]:
+        premise = (story_input.premise or "")[:800]
+        lore = (
+            f"## Premise seed\n\n{premise}\n\n"
+            "## Defaults\n\n"
+            "- Clear narration, steady pacing\n"
+            "- Third-person limited\n"
+            "- Tone derives naturally from premise\n"
+            "- World rules and factions emerge as chapters progress\n"
+        )
         return {
             "story_genre": "unspecified",
-            "writing_style": "clear narration, steady pacing",
-            "narrative_pov": "third-person limited",
-            "tone": "derive naturally from premise",
-            "world_rules": ["Rules will be refined as chapters progress"],
-            "factions": ["Factions emerge naturally from the story"],
-            "premise_seed": (story_input.premise or "")[:800],
+            "general_world_lore": lore.strip(),
         }
 
     def _normalize_generated_bible(self, story_input: StoryInput, output: MacroPlanOutput) -> dict[str, Any]:
+        from app.services.workflow.bible_general_lore import synthesize_general_world_lore_from_legacy
+
         raw = output.bible
         if isinstance(raw, dict) and raw:
             out = dict(raw)
@@ -2152,6 +2187,10 @@ class AnchorService:
             if isinstance(extra_raw, dict):
                 extra_clean = {k: v for k, v in extra_raw.items() if k not in _BIBLE_PRIMARY_OPTIONAL_KEYS}
                 out["extra"] = extra_clean
+            if not str(out.get("general_world_lore") or "").strip():
+                out["general_world_lore"] = synthesize_general_world_lore_from_legacy(out)
+            for k in ("tone", "theme", "narrative_pov", "writing_style", "world_rules", "factions", "writing_note"):
+                out.pop(k, None)
             return out
         return self._fallback_bible_from_premise(story_input)
 
@@ -2188,7 +2227,7 @@ class AnchorService:
                 title=templates[i][0],
                 description=templates[i][1],
                 target_state=dict(templates[i][2]),
-                chapter_target=positions[i],
+                chapter_target=0,
                 priority=i + 1,
             )
             for i in range(3)
@@ -2267,13 +2306,8 @@ class AnchorService:
                 "output_shape": {
                     "bible": {
                         "story_genre": "string",
-                        "writing_style": "string",
-                        "narrative_pov": "string",
-                        "tone": "string",
-                        "writing_note": "string[]",
-                        "world_rules": "string[]",
-                        "factions": "string[]",
-                        "extra": "optional object - custom world metadata only; do not duplicate theme / narrative_pov / writing_style here",
+                        "general_world_lore": "string (markdown; genre, tone, POV, style, rules, factions, craft notes)",
+                        "extra": "optional object - custom world metadata only; do not duplicate general_world_lore here",
                     },
                     "cast": [
                         {
@@ -2291,14 +2325,6 @@ class AnchorService:
                             "quirks_and_habits": "string optional - observable habits, sparing",
                         }
                     ],
-                    "initial_b_stories": [
-                        {
-                            "id": "string",
-                            "desc": "string",
-                            "type": "BStoryType enum string",
-                            "resolution_condition": "string - objective completion criteria",
-                        }
-                    ],
                     "volumes": [
                         {
                             "title": "string",
@@ -2311,7 +2337,7 @@ class AnchorService:
                                     "title": "string",
                                     "description": "string",
                                     "target_state": "object",
-                                    "chapter_target": "int",
+                                    "dag_order": "int optional",
                                     "priority": "int optional",
                                     "notes_links": "string[] optional - select from notes_keypoints ids (e.g. KP1, KP2) when macro_author_notes is non-empty",
                                 }
@@ -2326,10 +2352,10 @@ class AnchorService:
                     "Each volume must have contiguous, non-overlapping chapter_start/chapter_end ranges covering 1 through total chapters.",
                     f"Each volume must include target_volume_words, and the sum across volumes should approximate {story_input.target_total_words}.",
                     f"**Each volume anchors array must contain {MIN_ANCHORS_PER_VOLUME}-{MAX_ANCHORS_PER_VOLUME} items**; "
-                    "each anchor.chapter_target must fall between that volume's chapter_start and chapter_end (inclusive).",
+                    "anchor order is defined by DAG dependency and priority, not chapter target.",
                     "You must output bible: concrete, executable, and consistent with volumes, anchors, and cast; you may add reasonable extra keys inside bible.",
-                    "theme / narrative_pov / writing_style are optional bible top-level fields - if present, place them at bible root, not inside extra.",
-                    "extra may only hold other supplemental keys; do not duplicate theme / narrative_pov / writing_style (backend will drop duplicate keys from extra).",
+                    "Put narrative craft and world tone in bible.general_world_lore as markdown; optional bible.story_genre for classification.",
+                    "extra may only hold other supplemental keys; do not duplicate general_world_lore (backend will drop duplicate keys from extra).",
                     "When macro_author_notes is non-empty, bible and plot planning must respect it.",
                     "When macro_author_notes is non-empty: each cast member notes_links must be a non-empty array whose entries are only ids from notes_keypoints (e.g. KP1, KP2); "
                     "each volume anchor notes_links must likewise be non-empty and drawn only from notes_keypoints ids.",
@@ -2337,7 +2363,6 @@ class AnchorService:
                     "Do not place anchors outside volumes; nest anchors only inside their owning volume.",
                     *script_shape_req,
                     *cast_req,
-                    "initial_b_stories (optional): only series-long obsessions or terminal-goal decompositions - no short tactical errands (single-chapter fetch, lockpick, etc.). Each row needs resolution_condition.",
                     "speech_style / quirks_and_habits are occasional flavor - do not design them as every-line catchphrases.",
                     *tri_language_rules,
                 ],
@@ -2499,10 +2524,9 @@ class AnchorService:
             for anchor_draft in coerced:
                 staged.append((volume, anchor_draft))
 
-        staged.sort(key=lambda row: (row[1].chapter_target, row[1].priority))
+        staged.sort(key=lambda row: (row[1].priority, row[1].title))
         anchors: list[StateAnchor] = []
         for index, (volume, draft) in enumerate(staged, start=1):
-            chapter_target = min(max(draft.chapter_target, volume.chapter_start), volume.chapter_end)
             anchors.append(
                 StateAnchor(
                     anchor_id=f"{story_id}_anchor_{index:02d}",
@@ -2511,7 +2535,7 @@ class AnchorService:
                     title=draft.title,
                     description=draft.description,
                     target_state=dict(draft.target_state or {}),
-                    chapter_target=chapter_target,
+                    chapter_target=0,
                     priority=draft.priority,
                 )
             )
@@ -2563,35 +2587,12 @@ class AnchorService:
         bible_out["llm_weave_debug"] = weave_meta
         if compile_warnings:
             bible_out["compile_warnings"] = compile_warnings
-        b_seed: list[dict[str, Any]] = []
-        for item in output.initial_b_stories or []:
-            bid = str(getattr(item, "id", None) or (item.get("id") if isinstance(item, dict) else "") or "").strip()
-            if not bid:
-                continue
-            if isinstance(item, dict):
-                desc = str(item.get("desc") or "")[:800]
-                typ = str(item.get("type") or "UNKNOWN")
-                res = str(item.get("resolution_condition") or "")[:800]
-            else:
-                desc = str(getattr(item, "desc", "") or "")[:800]
-                typ = getattr(item, "type", None)
-                typ = typ.value if hasattr(typ, "value") else str(typ or "UNKNOWN")
-                res = str(getattr(item, "resolution_condition", "") or "")[:800]
-            b_seed.append(
-                {
-                    "id": bid,
-                    "desc": desc,
-                    "type": typ,
-                    "resolution_condition": res,
-                }
-            )
-        return volumes, anchors, cast_stored, b_seed, bible_out
+        return volumes, anchors, cast_stored, [], bible_out
 
     def _coerce_volume_anchors(self, volume: VolumePlan, raw: list[MacroNestedAnchorDraft]) -> list[MacroNestedAnchorDraft]:
         clamped: list[MacroNestedAnchorDraft] = []
-        for a in sorted(raw, key=lambda x: (x.chapter_target, x.priority)):
-            ct = min(max(a.chapter_target, volume.chapter_start), volume.chapter_end)
-            clamped.append(a.model_copy(update={"chapter_target": ct}))
+        for a in sorted(raw, key=lambda x: (x.priority, x.title)):
+            clamped.append(a.model_copy(update={"chapter_target": 0}))
 
         if len(clamped) > MAX_ANCHORS_PER_VOLUME:
             clamped = clamped[:MAX_ANCHORS_PER_VOLUME]
@@ -2600,14 +2601,12 @@ class AnchorService:
         while len(clamped) < MIN_ANCHORS_PER_VOLUME:
             span = volume.chapter_end - volume.chapter_start + 1
             step = max(1, span // (MIN_ANCHORS_PER_VOLUME + 1))
-            ch = volume.chapter_start + (len(clamped) + 1) * step
-            ch = min(max(ch, volume.chapter_start), volume.chapter_end)
             clamped.append(
                 MacroNestedAnchorDraft(
                     title=f"{volume.title} padding beat {pad_i + 1}",
-                    description=f"Plot beat to land around chapter {ch} inside this volume (system-padded).",
+                    description=f"Plot beat placeholder inside {volume.title} (system-padded).",
                     target_state={"volume.placeholder": pad_i + 1},
-                    chapter_target=ch,
+                    chapter_target=0,
                     priority=90 + pad_i,
                 )
             )

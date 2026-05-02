@@ -1,3 +1,10 @@
+---
+name: ""
+overview: ""
+todos: []
+isProject: false
+---
+
 # English agent prompts + story output language (revised)
 
 ## Scope lock: supported languages (v1)
@@ -6,7 +13,7 @@ Implement **three** story output modes only:
 
 - `en` — English  
 - `zh-Hant` — Traditional Chinese  
-- `zh-Hans` — Simplified Chinese  
+- `zh-Hans` — Simplified Chinese
 
 No `ja` / `ko` in v1. UI dropdown lists exactly these three.
 
@@ -16,16 +23,16 @@ No `ja` / `ko` in v1. UI dropdown lists exactly these three.
 
 ### 1. JSON keys and enums are immutable
 
-When translating [`profiles.py`](backend/app/services/workflow/profiles.py) and [`extraction.py`](backend/app/services/workflow/extraction.py) (and any user prompt that references the schema):
+When translating `[profiles.py](backend/app/services/workflow/profiles.py)` and `[extraction.py](backend/app/services/workflow/extraction.py)` (and any user prompt that references the schema):
 
 - **Never** rename JSON keys in instructions (e.g. keep `node_type`, not “node category”).
-- **Never** rename or paraphrase **enum values** or **relation_type** literals in prose. Example: translate the *sentence* around `LOCATED_IN`, but the token **`LOCATED_IN`** must appear exactly as today (all caps, unchanged).
+- **Never** rename or paraphrase **enum values** or **relation_type** literals in prose. Example: translate the *sentence* around `LOCATED_IN`, but the token `**LOCATED_IN`** must appear exactly as today (all caps, unchanged).
 
 Prompts should explicitly say things like: *You must return JSON using the exact key names and enum strings required by the schema.*
 
 ### 2. Internal vs external natural language (no “English brain” leakage)
 
-Blind spot: not every agent writes **story prose**. The same `output_language` must govern **chapter outlines**, **supervisor / reader feedback and critiques**, **alignment notes**, **extractor summaries and `context_details`**, and any other **human-readable string values** returned to the app — otherwise HITL and graph UIs fill with English while the novel stays Chinese.
+Blind spot: not every agent writes **story prose**. The same `output_language` must govern **chapter outlines**, **supervisor / reader feedback and critiques**, **alignment notes**, **extractor summaries and `context_details*`*, and any other **human-readable string values** returned to the app — otherwise HITL and graph UIs fill with English while the novel stays Chinese.
 
 **Canonical contract block** (append via `augment_profile_system_prompt`; English wording, `{label}` interpolated):
 
@@ -53,8 +60,8 @@ Enum fields and structural tokens stay English as today.
 
 ### 5. `StoryPatch` optional + repository must not null out
 
-- In [`schema.py`](backend/app/domain/schema.py): `StoryPatch.output_language` must be **`Optional[Literal["en", "zh-Hant", "zh-Hans"]] = None`** (or equivalent). Partial PATCH bodies from older clients may omit the field.
-- In [`story_repository.py`](backend/app/repositories/sqlite/story_repository.py) `patch_story`: if `output_language` is **`None`**, **do not** emit `output_language = ?` in the UPDATE — leave the DB row unchanged. Never write SQL `NULL` into `output_language` from a missing PATCH key.
+- In `[schema.py](backend/app/domain/schema.py)`: `StoryPatch.output_language` must be `**Optional[Literal["en", "zh-Hant", "zh-Hans"]] = None`** (or equivalent). Partial PATCH bodies from older clients may omit the field.
+- In `[story_repository.py](backend/app/repositories/sqlite/story_repository.py)` `patch_story`: if `output_language` is `**None**`, **do not** emit `output_language = ?` in the UPDATE — leave the DB row unchanged. Never write SQL `NULL` into `output_language` from a missing PATCH key.
 
 ---
 
@@ -64,17 +71,17 @@ Large blast radius, low logic complexity — follow this order to avoid getting 
 
 ### Step 1 — Data + API + UI only (no prompt translation)
 
-- SQLite: `output_language` column (`TEXT NOT NULL DEFAULT 'zh-Hant'`) via [`database.py`](backend/app/repositories/sqlite/database.py) `_ensure_column`.
-- [`schema.py`](backend/app/domain/schema.py): `StoryInput.output_language` required with default `zh-Hant` and `Literal["en","zh-Hant","zh-Hans"]`; **`StoryPatch.output_language` optional (`None` = omit)** per §5.
-- [`story_repository.py`](backend/app/repositories/sqlite/story_repository.py): create / patch / get + `get_story` setdefault for safety; **patch skips `output_language` when `None`**.
-- [`service.py`](backend/app/services/workflow/service.py): `macro_compile` rebuilt `StoryInput` includes `output_language`.
-- Frontend: [`types.ts`](frontend/src/types.ts), [`StorySetupForm.tsx`](frontend/src/features/story-setup/StorySetupForm.tsx), [`api.ts`](frontend/src/api.ts) — dropdown only.
+- SQLite: `output_language` column (`TEXT NOT NULL DEFAULT 'zh-Hant'`) via `[database.py](backend/app/repositories/sqlite/database.py)` `_ensure_column`.
+- `[schema.py](backend/app/domain/schema.py)`: `StoryInput.output_language` required with default `zh-Hant` and `Literal["en","zh-Hant","zh-Hans"]`; `**StoryPatch.output_language` optional (`None` = omit)** per §5.
+- `[story_repository.py](backend/app/repositories/sqlite/story_repository.py)`: create / patch / get + `get_story` setdefault for safety; **patch skips `output_language` when `None`**.
+- `[service.py](backend/app/services/workflow/service.py)`: `macro_compile` rebuilt `StoryInput` includes `output_language`.
+- Frontend: `[types.ts](frontend/src/types.ts)`, `[StorySetupForm.tsx](frontend/src/features/story-setup/StorySetupForm.tsx)`, `[api.ts](frontend/src/api.ts)` — dropdown only.
 - **Do not** change any LLM prompt strings in this step. Run tests; behavior should match pre-change defaults (`zh-Hant`).
 
 ### Step 2 — Language interceptor only
 
-- Add [`output_language.py`](backend/app/services/workflow/output_language.py) (or equivalent): `augment_profile_system_prompt` appends the **canonical contract** from §2–§3 (CRITICAL LANGUAGE REQUIREMENT + proper-noun rule).
-- Extend [`WorkflowContext`](backend/app/services/workflow/context.py) with `output_language`; populate in [`WorkflowService._build_context`](backend/app/services/workflow/service.py) from run → story.
+- Add `[output_language.py](backend/app/services/workflow/output_language.py)` (or equivalent): `augment_profile_system_prompt` appends the **canonical contract** from §2–§3 (CRITICAL LANGUAGE REQUIREMENT + proper-noun rule).
+- Extend `[WorkflowContext](backend/app/services/workflow/context.py)` with `output_language`; populate in `[WorkflowService._build_context](backend/app/services/workflow/service.py)` from run → story.
 - Wire **augmentation** at every `invoke_text` / `invoke_json` / profile-using `invoke` path **and** macro compile’s `macro_planner` profile — **without** yet translating existing Chinese prompts to English (profiles may still be Chinese briefly; the appended English contract is still valid).
 - Small unit test: augmented `system_prompt` ends with / contains expected English fragments for a given code.
 
