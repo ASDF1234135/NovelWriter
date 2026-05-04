@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { deleteStory, fetchStories } from "../../api";
+import { ConfirmModal } from "../../components/ConfirmModal";
 import type { StoryListItem } from "../../types";
 import { useI18n } from "../../i18n/useI18n";
 
@@ -48,6 +49,7 @@ export function StoryLibrary({
 }: Props) {
   const { t, locale } = useI18n();
   const queryClient = useQueryClient();
+  const [deleteTarget, setDeleteTarget] = useState<StoryListItem | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState("");
 
@@ -141,22 +143,9 @@ export function StoryLibrary({
                 <button
                   type="button"
                   disabled={busy || deletingId !== null || blockSelectingStories}
-                  onClick={async (e) => {
+                  onClick={(e) => {
                     e.stopPropagation();
-                    if (!window.confirm(t("library.deleteConfirm", undefined, { title: s.title }))) return;
-                    setDeletingId(s.story_id);
-                    setDeleteError("");
-                    try {
-                      await deleteStory(s.story_id);
-                      queryClient.setQueryData<StoryListItem[]>(["stories-list"], (prev) =>
-                        (prev ?? []).filter((x) => x.story_id !== s.story_id),
-                      );
-                      onStoryDeleted?.(s.story_id);
-                    } catch (err) {
-                      setDeleteError(err instanceof Error ? err.message : t("library.deleteFailed"));
-                    } finally {
-                      setDeletingId(null);
-                    }
+                    setDeleteTarget(s);
                   }}
                   className="absolute right-4 top-4 rounded-lg border border-error/30 bg-error/10 px-2 py-1 font-label text-[10px] font-bold uppercase tracking-wider text-error opacity-100 transition-opacity hover:bg-error/20 sm:opacity-0 sm:group-hover:opacity-100"
                 >
@@ -167,6 +156,38 @@ export function StoryLibrary({
           ))}
         </ul>
       )}
+      <ConfirmModal
+        mount={typeof document !== "undefined" ? document.body : null}
+        open={deleteTarget !== null}
+        danger
+        title={t("library.deleteModalTitle")}
+        message={
+          deleteTarget ? t("library.deleteConfirm", undefined, { title: deleteTarget.title }) : ""
+        }
+        cancelLabel={t("common.cancel")}
+        confirmLabel={t("library.delete")}
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={() => {
+          const s = deleteTarget;
+          if (!s) return;
+          setDeleteTarget(null);
+          void (async () => {
+            setDeletingId(s.story_id);
+            setDeleteError("");
+            try {
+              await deleteStory(s.story_id);
+              queryClient.setQueryData<StoryListItem[]>(["stories-list"], (prev) =>
+                (prev ?? []).filter((x) => x.story_id !== s.story_id),
+              );
+              onStoryDeleted?.(s.story_id);
+            } catch (err) {
+              setDeleteError(err instanceof Error ? err.message : t("library.deleteFailed"));
+            } finally {
+              setDeletingId(null);
+            }
+          })();
+        }}
+      />
     </div>
   );
 }

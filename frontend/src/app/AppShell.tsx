@@ -79,7 +79,7 @@ export function AppShell({
       </div>
 
       <header className="sticky top-0 z-50 flex h-16 w-full items-center justify-between border-b border-outline-variant/10 bg-[#161d2f] px-6 font-headline text-sm tracking-tight md:px-8">
-        <div className="text-xl font-bold uppercase tracking-widest text-primary">The Digital Auteur</div>
+        <div className="text-xl font-bold uppercase tracking-widest text-primary">{t("app.brand.wordmark")}</div>
         <nav className="hidden items-center gap-8 md:flex">
           <button
             type="button"
@@ -117,7 +117,6 @@ export function AppShell({
             <option value="zh-Hans">{t("lang.zhHans")}</option>
             <option value="en">{t("lang.en")}</option>
           </select>
-          <span className="material-symbols-outlined text-primary">auto_fix_high</span>
         </div>
       </header>
       <div className="border-b border-outline-variant/10 bg-surface-container-low/70 px-4 py-3 md:px-8">
@@ -131,8 +130,8 @@ export function AppShell({
       <div className="flex min-h-[calc(100vh-8.5rem)]">
         <aside className="sticky top-[7.5rem] hidden h-[calc(100vh-7.5rem)] w-64 shrink-0 flex-col gap-1 self-start border-r border-outline-variant/10 bg-[#161d2f] py-8 font-headline text-sm font-medium text-primary shadow-glowSm lg:flex">
           <div className="mb-8 px-6">
-            <div className="text-lg font-bold text-secondary">Auteur AI</div>
-            <div className="text-[10px] uppercase tracking-[0.2em] text-on-surface/50">Creative Engine</div>
+            <div className="text-lg font-bold text-secondary">{t("app.brand.wordmark")}</div>
+            <div className="text-[10px] uppercase tracking-[0.2em] text-on-surface/50">{t("app.brand.subtitle")}</div>
           </div>
 
           <button

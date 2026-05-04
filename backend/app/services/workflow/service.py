@@ -9,6 +9,7 @@ from uuid import uuid4
 from app.domain.schema import (
     AnchorNode,
     AnchorStatus,
+    Storyline,
     AuthorExtractionSurfaceHintEntry,
     HitlAnchorDelayRequest,
     HitlBStoryJudgementRequest,
@@ -432,6 +433,73 @@ def _repair_macro_plan_mainline_cross_volume(body: MacroPlanPut) -> MacroPlanPut
     return body.model_copy(update={"anchor_nodes": new_nodes})
 
 
+def _macro_anchor_graph_has_cycle(nodes: list[AnchorNode]) -> bool:
+    ids = {str(n.id).strip() for n in nodes}
+    adj: dict[str, list[str]] = {i: [] for i in ids}
+    for n in nodes:
+        nid = str(n.id).strip()
+        for d in n.depends_on:
+            ds = str(d).strip()
+            if ds in ids and nid in ids:
+                adj[ds].append(nid)
+    WHITE, GREY, BLACK = 0, 1, 2
+    color = {i: WHITE for i in ids}
+
+    def dfs(u: str) -> bool:
+        color[u] = GREY
+        for v in adj.get(u, []):
+            c = color.get(v, WHITE)
+            if c == GREY:
+                return True
+            if c == WHITE and dfs(v):
+                return True
+        color[u] = BLACK
+        return False
+
+    for i in ids:
+        if color[i] == WHITE and dfs(i):
+            return True
+    return False
+
+
+def _macro_anchor_graph_weakly_connected(nodes: list[AnchorNode]) -> bool:
+    """All anchor nodes must lie in one undirected connected component (no stranded islands)."""
+    ids = [str(n.id).strip() for n in nodes]
+    id_set = set(ids)
+    if len(id_set) <= 1:
+        return True
+    adj: dict[str, set[str]] = {i: set() for i in id_set}
+    for n in nodes:
+        nid = str(n.id).strip()
+        for d in n.depends_on:
+            ds = str(d).strip()
+            if ds in id_set:
+                adj[nid].add(ds)
+                adj[ds].add(nid)
+    start = next(iter(id_set))
+    seen: set[str] = set()
+    stack = [start]
+    while stack:
+        u = stack.pop()
+        if u in seen:
+            continue
+        seen.add(u)
+        for v in adj[u]:
+            if v not in seen:
+                stack.append(v)
+    return len(seen) == len(id_set)
+
+
+def _macro_storyline_refs_ok(body: MacroPlanPut) -> None:
+    allowed = {str(s.id).strip() for s in body.storylines}
+    for n in body.anchor_nodes:
+        nid = str(n.id).strip()
+        for sid in n.storyline_ids:
+            s = str(sid).strip()
+            if s not in allowed:
+                raise MacroPlanValidationError(f"Anchor node {nid}: unknown storyline id {s}")
+
+
 def _validate_macro_plan_put(body: MacroPlanPut) -> None:
     vol_by_id = {v.volume_id: v for v in body.volumes}
     if len(vol_by_id) != len(body.volumes):
@@ -466,6 +534,13 @@ def _validate_macro_plan_put(body: MacroPlanPut) -> None:
         cast_ids = {c.node_id for c in body.cast}
         if prot not in cast_ids:
             raise MacroPlanValidationError("protagonist_character_id must match a cast member node_id")
+    if _macro_anchor_graph_has_cycle(list(body.anchor_nodes)):
+        raise MacroPlanValidationError("anchor_nodes depends_on contains a cycle")
+    _macro_storyline_refs_ok(body)
+    if not _macro_anchor_graph_weakly_connected(list(body.anchor_nodes)):
+        raise MacroPlanValidationError(
+            "anchor_nodes form disconnected subgraphs (multiple weakly connected components)"
+        )
 
 
 def _cast_graph_description(member: StoryCastMemberStored) -> str:
@@ -627,10 +702,6 @@ class WorkflowService:
         return story
 
     def patch_story(self, story_id: str, patch: StoryPatch) -> dict:
-        if self.workflow_repository.count_workflow_runs_for_story(story_id) > 0:
-            raise StoryConfigurationLockedError(
-                "故事已有章節工作流程紀錄，無法再修改專案設定；請在未執行 run_chapter 前調整。"
-            )
         return self.story_repository.patch_story(story_id, patch)
 
     def delete_story(self, story_id: str) -> None:
@@ -771,12 +842,8 @@ class WorkflowService:
         story = self.story_repository.get_story(story_id)
         if not story:
             raise KeyError(f"Story not found: {story_id}")
-        if self.workflow_repository.count_workflow_runs_for_story(story_id) > 0:
-            raise StoryConfigurationLockedError(
-                "故事已有章節工作流程紀錄，無法再修改宏觀規劃；請在未執行 run_chapter 前調整。"
-            )
-        _validate_macro_plan_put(body)
         body = _repair_macro_plan_mainline_cross_volume(body)
+        _validate_macro_plan_put(body)
         try:
             bible_out = dict(body.bible or {})
             self.story_repository.update_story_bible_json(story_id, bible_out)

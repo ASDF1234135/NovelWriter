@@ -23,18 +23,24 @@ export const HITL_REASON = {
 
 export type HitlReasonValue = (typeof HITL_REASON)[keyof typeof HITL_REASON];
 
+/** Matches backend `graph.py` chapter pipeline order (copyeditor may be skipped when disabled). */
 export const FLOW_STEPS = [
-  { id: "director", userLabel: pick("章節方向", "章节方向", "Chapter Direction") },
-  { id: "graph_rag", userLabel: pick("背景整理", "背景整理", "Context Prep") },
-  { id: "planner", userLabel: pick("劇情規劃", "剧情规划", "Story Planning") },
-  { id: "plan_supervisor", userLabel: pick("大綱審核", "大纲审核", "Outline Review") },
-  { id: "logic_alignment", userLabel: pick("規則對齊", "规则对齐", "Logic Alignment") },
-  { id: "author", userLabel: pick("撰寫內文", "撰写正文", "Write Draft") },
-  { id: "draft_supervisor", userLabel: pick("內文審核", "正文审核", "Draft Review") },
-  { id: "reader", userLabel: pick("閱讀檢查", "阅读检查", "Reader Check") },
-  { id: "extraction_gate", userLabel: pick("設定歸檔", "设定归档", "Extraction Gate") },
-  { id: "anchor_resolve", userLabel: pick("錨點結算", "锚点结算", "Anchor Resolve") },
-  { id: "state_updater", userLabel: pick("完稿更新", "完稿更新", "State Update") },
+  { id: "director", userLabel: pick("章節方向", "章节方向", "Chapter direction") },
+  { id: "graph_rag", userLabel: pick("背景整理", "背景整理", "Context prep") },
+  { id: "planner", userLabel: pick("劇情規劃", "剧情规划", "Story planning") },
+  { id: "plan_supervisor", userLabel: pick("大綱審核", "大纲审核", "Outline review") },
+  { id: "logic_alignment", userLabel: pick("規則對齊", "规则对齐", "Rules alignment") },
+  { id: "author", userLabel: pick("撰寫內文", "撰写正文", "Writing draft") },
+  { id: "draft_supervisor", userLabel: pick("內文審核", "正文审核", "Draft review") },
+  { id: "reader", userLabel: pick("閱讀檢查", "阅读检查", "Reader check") },
+  { id: "extraction_gate", userLabel: pick("章末設定整理", "章末设定整理", "Chapter settings wrap-up") },
+  { id: "copyeditor", userLabel: pick("文稿潤飾", "文稿润饰", "Line editing") },
+  { id: "output_language_gate", userLabel: pick("語言一致檢查", "语言一致检查", "Language check") },
+  { id: "chapter_summarizer", userLabel: pick("章節摘要整理", "章节摘要整理", "Chapter summary") },
+  { id: "anchor_resolve", userLabel: pick("里程碑達成確認", "里程碑达成确认", "Milestone check") },
+  { id: "profile_expander", userLabel: pick("角色資料補齊", "角色资料补齐", "Character profiles") },
+  { id: "state_updater", userLabel: pick("章節進度儲存", "章节进度保存", "Preparing save") },
+  { id: "commit_to_databases", userLabel: pick("寫入作品庫", "写入作品库", "Saving to library") },
 ] as const;
 
 const RESUME_TO_STEP_INDEX: Record<string, number> = {
@@ -47,10 +53,13 @@ const RESUME_TO_STEP_INDEX: Record<string, number> = {
   draft_supervisor: 6,
   reader: 7,
   extraction_gate: 8,
-  output_language_gate: 9,
-  chapter_summarizer: 9,
-  anchor_resolve: 9,
-  state_updater: 10,
+  copyeditor: 9,
+  output_language_gate: 10,
+  chapter_summarizer: 11,
+  anchor_resolve: 12,
+  profile_expander: 13,
+  state_updater: 14,
+  commit_to_databases: 15,
 };
 
 const REASON_TO_STEP_INDEX: Partial<Record<string, number>> = {
@@ -61,9 +70,9 @@ const REASON_TO_STEP_INDEX: Partial<Record<string, number>> = {
   [HITL_REASON.CONTEXT]: 1,
   [HITL_REASON.ALIGNMENT_RULES_REQUIRED]: 4,
   [HITL_REASON.DRAFT_LOOP]: 5,
-  [HITL_REASON.EXTRACTION_GATE]: 7,
-  [HITL_REASON.B_STORY]: 8,
-  [HITL_REASON.OUTPUT_LANGUAGE]: 9,
+  [HITL_REASON.EXTRACTION_GATE]: 8,
+  [HITL_REASON.B_STORY]: 12,
+  [HITL_REASON.OUTPUT_LANGUAGE]: 10,
 };
 
 export function getStuckFlowStepIndex(reason: string, resumeFrom: string): number {
@@ -369,9 +378,9 @@ export const HINTS_RESUME_OPTIONS: { value: string; label: string }[] = [
 ];
 
 export const B_STORY_REJECT_RESUME_OPTIONS: { value: string; label: string }[] = [
-  { value: "extraction_gate", label: pick("設定歸檔", "设定归档", "Extraction Gate") },
-  { value: "author", label: pick("撰寫內文", "撰写正文", "Write Draft") },
-  { value: "anchor_resolve", label: pick("錨點結算", "锚点结算", "Anchor Resolve") },
+  { value: "extraction_gate", label: pick("章末設定整理", "章末设定整理", "Chapter settings wrap-up") },
+  { value: "author", label: pick("撰寫內文", "撰写正文", "Writing draft") },
+  { value: "anchor_resolve", label: pick("里程碑達成確認", "里程碑达成确认", "Milestone check") },
 ];
 
 export function isPlanFamilyReason(reason: string): boolean {

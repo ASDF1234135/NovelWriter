@@ -501,6 +501,7 @@ class PlotSummarySource(str, Enum):
 
 class StorylineTier(str, Enum):
     MAIN = "MAIN"
+    USER_EDIT = "USER_EDIT"
     S_TIER = "S_TIER"
     A_TIER = "A_TIER"
     B_TIER = "B_TIER"

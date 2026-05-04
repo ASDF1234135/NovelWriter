@@ -68,12 +68,12 @@ def list_stories(story_repository: StoryRepository = Depends(get_story_repositor
 def get_story_detail(
     story_id: str,
     story_repository: StoryRepository = Depends(get_story_repository),
-    workflow_repository: WorkflowRepository = Depends(get_workflow_repository),
 ) -> dict:
     row = story_repository.get_story(story_id)
     if not row:
         raise HTTPException(status_code=404, detail=f"Story not found: {story_id}")
-    locked = workflow_repository.count_workflow_runs_for_story(story_id) > 0
+    # Workflow runs no longer imply configuration lock (macro/story edits allowed after runs).
+    locked = False
     return {
         "story_id": row["story_id"],
         "title": row["title"],
@@ -102,7 +102,6 @@ def patch_story(
     story_id: str,
     patch: StoryPatch,
     workflow_service: WorkflowService = Depends(get_workflow_service),
-    workflow_repository: WorkflowRepository = Depends(get_workflow_repository),
 ) -> dict:
     try:
         row = workflow_service.patch_story(story_id, patch)
@@ -110,7 +109,7 @@ def patch_story(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except StoryConfigurationLockedError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    locked = workflow_repository.count_workflow_runs_for_story(story_id) > 0
+    locked = False
     return {
         "story_id": row["story_id"],
         "title": row["title"],

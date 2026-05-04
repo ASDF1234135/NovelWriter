@@ -1,4 +1,5 @@
 import { type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useLocation, useNavigate } from "react-router-dom";
 import {
   createStory,
@@ -32,7 +33,16 @@ import { AgentOutputView } from "../features/agent-output/AgentOutputView";
 import { ChapterReader } from "../features/chapter-reader/ChapterReader";
 import { GraphView } from "../features/graph-view/GraphView";
 import { HitlPanel } from "../features/hitl-panel/HitlPanel";
+import { AnchorDagSection } from "../features/macro-plan/AnchorDagSection";
 import { AnchorNodesGraphView } from "../features/macro-plan/AnchorNodesGraphView";
+import {
+  computeDagBlockingHighlights,
+  findAnchorNodesWithEmptyTitleOrDescription,
+  formatAnchorDagValidationIssue,
+  validateAnchorDagComprehensive,
+  type AnchorDagValidationIssue,
+  type DagValidateLocale,
+} from "../features/macro-plan/anchorDagValidate";
 import { MacroPlanPanel } from "../features/macro-plan/MacroPlanPanel";
 import { StoryLibrary } from "../features/story-library/StoryLibrary";
 import { StorySetupForm } from "../features/story-setup/StorySetupForm";
@@ -55,8 +65,16 @@ import type {
   WorkflowPayload,
   WritingPreambleResponse,
 } from "../types";
+import { ConfirmModal } from "../components/ConfirmModal";
+import { SetupAnchorDagDetailPanel } from "./views/SetupAnchorDagDetailPanel";
 import { AppShell, type AppView, type TaskFlowStageId } from "./AppShell";
-import { buildMacroPutBody, mergeMacroPlan, namespaceMacroPlanIdsForStory, parseMacroImportJson } from "./macroPlanBundle";
+import {
+  buildMacroPutBody,
+  idUnderStoryPrefix,
+  mergeMacroPlan,
+  namespaceMacroPlanIdsForStory,
+  parseMacroImportJson,
+} from "./macroPlanBundle";
 import { localizeUserFacingError } from "../i18n/userFacingError";
 import { useI18n } from "../i18n/useI18n";
 
@@ -93,6 +111,37 @@ function pathToView(pathname: string): AppView {
     default:
       return "library";
   }
+}
+
+/** If any dependency parent is LOCKED, the child must be LOCKED too (forced). RESOLVED rows unchanged. */
+function coerceAnchorsLockedWhenParentLocked(
+  nodes: NonNullable<MacroCompileData["anchor_nodes"]>,
+): NonNullable<MacroCompileData["anchor_nodes"]> {
+  const byId = new Map(nodes.map((n) => [String(n.id), n]));
+  return nodes.map((n) => {
+    if (String(n.status ?? "").toUpperCase() === "RESOLVED") return n;
+    const lockedParent = (n.depends_on ?? []).some((pid) => {
+      const p = byId.get(String(pid));
+      if (!p) return false;
+      return String(p.status ?? "LOCKED").toUpperCase() === "LOCKED";
+    });
+    if (lockedParent && String(n.status ?? "LOCKED").toUpperCase() === "UNLOCKED") {
+      return { ...n, status: "LOCKED" as const };
+    }
+    return n;
+  });
+}
+
+function navTargetLabel(target: AppView, tfn: (key: string, fallback?: string, params?: Record<string, string | number>) => string): string {
+  const keys: Record<AppView, string> = {
+    library: "app.navTarget.library",
+    setup: "app.navTarget.setup",
+    write: "app.navTarget.write",
+    review: "app.navTarget.review",
+    graph: "app.navTarget.graph",
+    export: "app.navTarget.export",
+  };
+  return tfn(keys[target]);
 }
 
 /** True when backend persisted a summary row whose text was not produced by the chapter_summarizer LLM path. */
@@ -277,6 +326,18 @@ function downloadJsonFile(filename: string, payload: unknown) {
   window.URL.revokeObjectURL(objectUrl);
 }
 
+/** Next chapter the pipeline should write: first non-completed in order, else max chapter + 1. */
+function computeNextGeneratableChapterId(chapters: ChapterSummary[]): number {
+  if (!chapters.length) return 1;
+  const sorted = [...chapters].sort((a, b) => a.chapter_id - b.chapter_id);
+  for (const c of sorted) {
+    if ((c.status ?? "").trim().toLowerCase() !== "completed") {
+      return c.chapter_id;
+    }
+  }
+  return Math.max(...sorted.map((c) => c.chapter_id)) + 1;
+}
+
 export default function App() {
   const { locale, t } = useI18n();
   const navigate = useNavigate();
@@ -300,7 +361,6 @@ export default function App() {
   const [chapterAlreadyCompleted, setChapterAlreadyCompleted] = useState(false);
   const [storyConfigSnapshot, setStoryConfigSnapshot] = useState<StoryInput | null>(null);
   const [persistedStoryConfig, setPersistedStoryConfig] = useState<StoryInput | null>(null);
-  const [configurationLocked, setConfigurationLocked] = useState(false);
   const [chapterOutline, setChapterOutline] = useState("");
   const [chapterHardRules, setChapterHardRules] = useState("");
   const [aiFreedomLevel, setAiFreedomLevel] = useState<AiFreedomLevel>("balanced");
@@ -309,6 +369,16 @@ export default function App() {
   const [writingPreamble, setWritingPreamble] = useState<WritingPreambleResponse | null>(null);
   const [preamblePanelOpen, setPreamblePanelOpen] = useState(false);
   const [writePanelTab, setWritePanelTab] = useState<"progress" | "logs">("progress");
+  const [reviewPanelTab, setReviewPanelTab] = useState<"progress" | "logs">("progress");
+  const [compileSaveModalOpen, setCompileSaveModalOpen] = useState(false);
+  const [toolbarImportModeOpen, setToolbarImportModeOpen] = useState(false);
+  const [toolbarImportConfirmOpen, setToolbarImportConfirmOpen] = useState(false);
+  const toolbarPendingImportTextRef = useRef<string | null>(null);
+  const [toolbarImportPreview, setToolbarImportPreview] = useState<{
+    mode: ImportMergeMode;
+    storyLine: string;
+    macroLine: string;
+  } | null>(null);
   const [compileInProgress, setCompileInProgress] = useState(false);
   const [compileProgress, setCompileProgress] = useState<MacroCompileProgress | null>(null);
   const [regenSummaryBusyChapter, setRegenSummaryBusyChapter] = useState<number | null>(null);
@@ -324,6 +394,29 @@ export default function App() {
     export: 0,
   });
   const [setupSelectedAnchorNodeId, setSetupSelectedAnchorNodeId] = useState<string | null>(null);
+  const [dagLayoutEpoch, setDagLayoutEpoch] = useState(0);
+  const [anchorDagFullscreen, setAnchorDagFullscreen] = useState(false);
+  const [dagGraphHeight, setDagGraphHeight] = useState(420);
+  const [dagDetailPanelOpen, setDagDetailPanelOpen] = useState(true);
+  const [dagModal, setDagModal] = useState<
+    null | "delete" | "leaveEditConfirm" | "leaveEditBlock" | "leaveEditEmptyFields"
+  >(null);
+  const [dagNavAwayPending, setDagNavAwayPending] = useState<null | { target: AppView; replace: boolean }>(null);
+  const [dagLeaveEditBlockMessage, setDagLeaveEditBlockMessage] = useState("");
+  const [dagValidationHighlights, setDagValidationHighlights] = useState<null | {
+    nodeIds: string[];
+    edges: Array<{ parentId: string; childId: string }>;
+  }>(null);
+  const [dagInteractionMode, setDagInteractionMode] = useState<"view" | "edit">("view");
+  const [dagLinkPick, setDagLinkPick] = useState<null | { mode: "parent"; childId: string } | { mode: "child"; parentId: string }>(
+    null,
+  );
+  const [dagPendingManualPosition, setDagPendingManualPosition] = useState<null | { id: string; x: number; y: number }>(null);
+  const [dagDialogMount, setDagDialogMount] = useState<HTMLElement>(() =>
+    typeof document !== "undefined" ? document.body : (null as unknown as HTMLElement),
+  );
+  /** Cleared on story change; next non-empty `anchorTopoSig` bumps `dagLayoutEpoch` once (initial fit / reload). */
+  const dagAnchorTopoSnapRef = useRef<string>("");
   const [flowStartedAt, setFlowStartedAt] = useState<number | null>(null);
   const workflowEventsUnsubRef = useRef<(() => void) | null>(null);
   const storyIdRef = useRef(storyId);
@@ -331,11 +424,19 @@ export default function App() {
   const chapterHardRulesRef = useRef<HTMLTextAreaElement | null>(null);
   const toolbarImportInputRef = useRef<HTMLInputElement | null>(null);
 
-  function setView(nextView: AppView, replace = false) {
+  function navigateToViewPath(nextView: AppView, replace = false) {
     const targetPath = VIEW_PATH_MAP[nextView];
     if (location.pathname !== targetPath) {
       navigate(targetPath, { replace });
     }
+  }
+
+  function requestNavigateToView(nextView: AppView, replace = false) {
+    if (dagInteractionMode === "edit" && view === "setup" && nextView !== "setup") {
+      setDagNavAwayPending({ target: nextView, replace });
+      return;
+    }
+    navigateToViewPath(nextView, replace);
   }
 
   useEffect(() => {
@@ -354,7 +455,7 @@ export default function App() {
 
   useEffect(() => {
     if (!storyId && (view === "write" || view === "review" || view === "graph" || view === "export")) {
-      setView("library");
+      navigateToViewPath("library");
     }
   }, [storyId, view]);
 
@@ -388,15 +489,17 @@ export default function App() {
     );
   }, [workflow]);
 
+  const nextGeneratableChapterId = useMemo(() => computeNextGeneratableChapterId(chapters), [chapters]);
+
   useEffect(() => {
-    if (!storyId || chapterId < 1) {
+    if (!storyId || nextGeneratableChapterId < 1) {
       setChapterAlreadyCompleted(false);
       return;
     }
     let cancelled = false;
     void (async () => {
       try {
-        const row = await fetchChapterIfExists(storyId, chapterId);
+        const row = await fetchChapterIfExists(storyId, nextGeneratableChapterId);
         if (!cancelled) {
           setChapterAlreadyCompleted(row?.status === "completed");
         }
@@ -407,10 +510,10 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [storyId, chapterId]);
+  }, [storyId, nextGeneratableChapterId]);
 
   useEffect(() => {
-    if (!storyId || chapterId < 1) {
+    if (!storyId || nextGeneratableChapterId < 1) {
       setWritingPreamble(null);
       return;
     }
@@ -418,7 +521,7 @@ export default function App() {
     setWritingPreamble(null);
     void (async () => {
       try {
-        const p = await fetchWritingPreamble(storyId, chapterId);
+        const p = await fetchWritingPreamble(storyId, nextGeneratableChapterId);
         if (!cancelled) setWritingPreamble(p);
       } catch {
         if (!cancelled) setWritingPreamble(null);
@@ -427,12 +530,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [storyId, chapterId]);
-
-  const latestChapterId = useMemo(() => {
-    if (!chapters.length) return 1;
-    return Math.max(...chapters.map((c) => c.chapter_id));
-  }, [chapters]);
+  }, [storyId, nextGeneratableChapterId]);
 
   /** Auto agent pipeline running for current workflow (not terminal, not HITL pause). */
   const workflowConflictLocked = useMemo(() => {
@@ -455,13 +553,107 @@ export default function App() {
     }
     return setupAnchorNodes[0];
   }, [setupAnchorNodes, setupSelectedAnchorNodeId]);
-  const setupCanEditSelectedNode = useMemo(() => {
+
+  const selectedAnchorLockedParentIds = useMemo(() => {
+    if (!macroData || !setupSelectedAnchorNode) return [];
+    const byId = new Map((macroData.anchor_nodes ?? []).map((n) => [String(n.id), n]));
+    const out: string[] = [];
+    for (const pid of setupSelectedAnchorNode.depends_on ?? []) {
+      const p = byId.get(String(pid));
+      if (p && String(p.status ?? "LOCKED").toUpperCase() === "LOCKED") out.push(String(p.id));
+    }
+    return out;
+  }, [macroData, setupSelectedAnchorNode]);
+
+  const mainStorylineIds = useMemo(() => {
+    const m = new Set<string>();
+    for (const s of macroData?.storylines ?? []) {
+      if (String(s.type).toUpperCase() === "MAIN") m.add(String(s.id));
+    }
+    return m;
+  }, [macroData?.storylines]);
+
+  const selectedIsMainline = useMemo(() => {
     if (!setupSelectedAnchorNode) return false;
-    const isMainline = (setupSelectedAnchorNode.storyline_ids ?? []).some((sid) => String(sid).endsWith("_main"));
-    const kind = String(setupSelectedAnchorNode.node_kind ?? "NORMAL").toUpperCase();
-    const resolved = String(setupSelectedAnchorNode.status ?? "").toUpperCase() === "RESOLVED";
-    return !isMainline && kind === "NORMAL" && !resolved;
-  }, [setupSelectedAnchorNode]);
+    return (setupSelectedAnchorNode.storyline_ids ?? []).some(
+      (sid) => mainStorylineIds.has(String(sid)) || String(sid).endsWith("_main"),
+    );
+  }, [setupSelectedAnchorNode, mainStorylineIds]);
+
+  /** Only RESOLVED anchors block in-panel DAG edits; LOCKED / UNLOCKED remain editable. */
+  const selectedResolved = useMemo(
+    () => String(setupSelectedAnchorNode?.status ?? "").toUpperCase() === "RESOLVED",
+    [setupSelectedAnchorNode],
+  );
+
+  const dagFieldsEditable = !selectedResolved && dagInteractionMode === "edit";
+
+  const anchorTopoSig = useMemo(
+    () =>
+      [...setupAnchorNodes]
+        .map((n) => `${String(n.id)}|${(n.depends_on ?? []).join(",")}`)
+        .sort()
+        .join(";"),
+    [setupAnchorNodes],
+  );
+
+  useEffect(() => {
+    dagAnchorTopoSnapRef.current = "";
+    setDagNavAwayPending(null);
+    setDagInteractionMode("view");
+  }, [storyId]);
+
+  useEffect(() => {
+    setDagDetailPanelOpen(true);
+  }, [storyId]);
+
+  useEffect(() => {
+    if (!dagModal && !dagNavAwayPending) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (dagNavAwayPending) {
+        setDagNavAwayPending(null);
+        return;
+      }
+      setDagLeaveEditBlockMessage("");
+      setDagValidationHighlights(null);
+      setDagModal(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [dagModal, dagNavAwayPending]);
+
+  useEffect(() => {
+    const sync = () => {
+      setDagDialogMount(((document.fullscreenElement as HTMLElement) ?? document.body) as HTMLElement);
+    };
+    sync();
+    document.addEventListener("fullscreenchange", sync);
+    return () => document.removeEventListener("fullscreenchange", sync);
+  }, []);
+
+  useEffect(() => {
+    const sig = anchorTopoSig;
+    if (!sig) {
+      dagAnchorTopoSnapRef.current = "";
+      return;
+    }
+    if (dagAnchorTopoSnapRef.current === sig) return;
+    const firstNonEmptyAfterClear = dagAnchorTopoSnapRef.current === "";
+    dagAnchorTopoSnapRef.current = sig;
+    if (firstNonEmptyAfterClear) setDagLayoutEpoch((x) => x + 1);
+  }, [anchorTopoSig]);
+
+  useEffect(() => {
+    if (!anchorDagFullscreen) {
+      setDagGraphHeight(420);
+      return;
+    }
+    const upd = () => setDagGraphHeight(Math.max(280, window.innerHeight - 132));
+    upd();
+    window.addEventListener("resize", upd);
+    return () => window.removeEventListener("resize", upd);
+  }, [anchorDagFullscreen]);
 
   useEffect(() => {
     const candidateIds = new Set(chapterAnchorCandidates.map((n) => n.id));
@@ -491,6 +683,12 @@ export default function App() {
     return fallback;
   }, [macroData?.anchor_nodes, selectedAnchorIds]);
 
+  const autoNextAnchorTitles = useMemo(() => {
+    const nodes = macroData?.anchor_nodes ?? [];
+    const byId = new Map(nodes.map((n) => [String(n.id), String(n.title ?? "").trim() || String(n.id)]));
+    return autoNextAnchorIds.map((id) => byId.get(id) ?? id);
+  }, [macroData?.anchor_nodes, autoNextAnchorIds]);
+
   useEffect(() => {
     if (!setupAnchorNodes.length) {
       setSetupSelectedAnchorNodeId(null);
@@ -502,33 +700,27 @@ export default function App() {
   }, [setupAnchorNodes, setupSelectedAnchorNodeId]);
 
   const storySummary = useMemo(() => {
-    if (!macroData) {
-      return locale === "en" ? "World compile not completed yet." : locale === "zh-Hans" ? "尚未完成世界观编译。" : "尚未完成世界觀編譯。";
-    }
+    if (!macroData) return t("app.setup.summaryNotCompiled");
     const volumes = macroData.volumes ?? [];
     const anchors = (macroData.anchor_nodes ?? []).length > 0 ? macroData.anchor_nodes ?? [] : macroData.anchors ?? [];
     const cast = macroData.cast ?? [];
     const castPart =
-      cast.length > 0
-        ? locale === "en"
-          ? ` · Cast ${cast.length}`
-          : locale === "zh-Hans"
-            ? ` · 人物 ${cast.length} 位`
-            : ` · 人物 ${cast.length} 位`
-        : "";
-    if (locale === "en") return `Volumes ${volumes.length} · Milestones ${anchors.length}${castPart}`;
-    if (locale === "zh-Hans") return `分卷 ${volumes.length} · 里程碑 ${anchors.length}${castPart}`;
-    return `分卷 ${volumes.length} · 里程碑 ${anchors.length}${castPart}`;
-  }, [locale, macroData]);
+      cast.length > 0 ? t("app.setup.summaryCastPart", undefined, { castCount: cast.length }) : "";
+    return t("app.setup.summaryLine", undefined, {
+      volumes: volumes.length,
+      anchors: anchors.length,
+      castPart,
+    });
+  }, [macroData, t]);
 
   const preambleHasNonLlmSummary = useMemo(() => {
-    if (!writingPreamble || chapterId <= 1) return false;
+    if (!writingPreamble || nextGeneratableChapterId <= 1) return false;
     const prev = writingPreamble.plot_progress.previous_chapter;
     if (plotSummarySourceNeedsRegenerate(prev.plot_summary_source)) {
       return true;
     }
     return writingPreamble.plot_progress.recent_summaries.some((r) => plotSummarySourceNeedsRegenerate(r.plot_summary_source));
-  }, [writingPreamble, chapterId]);
+  }, [writingPreamble, nextGeneratableChapterId]);
 
   async function handleRegenerateChapterSummary(targetChapterId: number) {
     if (!storyId) return;
@@ -536,7 +728,7 @@ export default function App() {
     setError("");
     try {
       await regenerateChapterSummary(storyId, targetChapterId);
-      const p = await fetchWritingPreamble(storyId, chapterId);
+      const p = await fetchWritingPreamble(storyId, nextGeneratableChapterId);
       setWritingPreamble(p);
     } catch (err) {
       reportApiError(err, "errors.regenerateSummaryFailed");
@@ -555,7 +747,6 @@ export default function App() {
       setStoryTitle(payload.title);
       setStoryConfigSnapshot(payload);
       setPersistedStoryConfig(payload);
-      setConfigurationLocked(false);
       setConfigVersion((v) => v + 1);
       setWorkflow(null);
       setMacroData(null);
@@ -568,7 +759,7 @@ export default function App() {
       setNavCount(0);
       setFlowStartedAt(Date.now());
       setStageVisitCount({ projectSetup: 1, planStructure: 0, writeChapter: 0, reviewFix: 0, export: 0 });
-      setView("setup");
+      navigateToViewPath("setup");
     } catch (err) {
       reportApiError(err, "errors.createStoryFailed");
     } finally {
@@ -591,7 +782,6 @@ export default function App() {
     setWritingPreamble(null);
     setStoryConfigSnapshot(null);
     setPersistedStoryConfig(null);
-    setConfigurationLocked(false);
     setHasExportedChapter(false);
     setHasExportedProject(false);
     setNavCount(0);
@@ -599,7 +789,7 @@ export default function App() {
     setStageVisitCount({ projectSetup: 0, planStructure: 0, writeChapter: 0, reviewFix: 0, export: 0 });
     setConfigVersion((v) => v + 1);
     setError("");
-    setView("setup");
+    navigateToViewPath("setup");
   }
 
   function handleStoryDeleted(deletedId: string) {
@@ -618,7 +808,6 @@ export default function App() {
     setWritingPreamble(null);
     setStoryConfigSnapshot(null);
     setPersistedStoryConfig(null);
-    setConfigurationLocked(false);
     setHasExportedChapter(false);
     setHasExportedProject(false);
     setNavCount(0);
@@ -626,7 +815,7 @@ export default function App() {
     setStageVisitCount({ projectSetup: 0, planStructure: 0, writeChapter: 0, reviewFix: 0, export: 0 });
     setConfigVersion((v) => v + 1);
     setError("");
-    setView("library");
+    requestNavigateToView("library");
   }
 
   async function handleSelectStoryFromLibrary(selectedId: string, title?: string) {
@@ -640,7 +829,6 @@ export default function App() {
       const nextConfig = storyDetailToInput(detail, storyConfigSnapshot?.output_language ?? "zh-Hant");
       setStoryConfigSnapshot(nextConfig);
       setPersistedStoryConfig(nextConfig);
-      setConfigurationLocked(detail.configuration_locked);
       setConfigVersion((v) => v + 1);
       const snap = await fetchMacroSnapshot(selectedId);
       setStoryId(selectedId);
@@ -678,7 +866,7 @@ export default function App() {
       setNavCount(0);
       setFlowStartedAt(Date.now());
       setStageVisitCount({ projectSetup: 1, planStructure: 0, writeChapter: 0, reviewFix: 0, export: 0 });
-      setView("setup");
+      navigateToViewPath("setup");
     } catch (err) {
       reportApiError(err, "errors.loadStoryFailed");
     } finally {
@@ -686,39 +874,9 @@ export default function App() {
     }
   }
 
-  async function handleMacroCompile() {
+  async function runMacroCompileAfterSettingsSaved() {
     if (!storyId) return;
-    setBusy(true);
-    setCompileInProgress(true);
-    setCompileProgress({ status: "QUEUED", percent: 5, message: "Macro compile queued..." });
-    setError("");
-    setNotice("");
     try {
-      if (!configurationLocked && isStoryConfigDirty(storyConfigSnapshot, persistedStoryConfig) && storyConfigSnapshot) {
-        const confirmed = window.confirm(
-          locale === "en"
-            ? "Unsaved story settings detected (including output language). Save settings before running compile?"
-            : locale === "zh-Hans"
-              ? "检测到未保存的故事设置（含输出语言）。是否先保存设置再执行编译？"
-              : "偵測到未儲存的故事設定（包含輸出語言）。是否先儲存設定再執行 compile？",
-        );
-        if (!confirmed) {
-          setNotice(t("setup.compileCancelledNotice"));
-          return;
-        }
-        await patchStory(storyId, {
-          title: storyConfigSnapshot.title,
-          premise: storyConfigSnapshot.premise,
-          target_total_words: storyConfigSnapshot.target_total_words,
-          branch_count_override: storyConfigSnapshot.branch_count_override ?? null,
-          plan_retry_limit: storyConfigSnapshot.plan_retry_limit,
-          draft_loop_retry_limit: storyConfigSnapshot.draft_loop_retry_limit,
-          macro_author_notes: storyConfigSnapshot.macro_author_notes ?? "",
-          cast_seed: storyConfigSnapshot.cast_seed ?? [],
-          output_language: normalizeOutputLanguage(storyConfigSnapshot.output_language),
-        });
-        setPersistedStoryConfig(storyConfigSnapshot);
-      }
       const result = await macroCompile(storyId, (progress) => {
         setCompileProgress(progress);
       });
@@ -741,8 +899,63 @@ export default function App() {
     }
   }
 
+  async function handleMacroCompile() {
+    if (!storyId) return;
+    setBusy(true);
+    setCompileInProgress(true);
+    setCompileProgress({ status: "QUEUED", percent: 5, message: "Macro compile queued..." });
+    setError("");
+    setNotice("");
+    if (isStoryConfigDirty(storyConfigSnapshot, persistedStoryConfig) && storyConfigSnapshot) {
+      setCompileSaveModalOpen(true);
+      return;
+    }
+    await runMacroCompileAfterSettingsSaved();
+  }
+
+  async function handleCompileSaveModalConfirm() {
+    if (!storyId || !storyConfigSnapshot) {
+      setCompileSaveModalOpen(false);
+      setCompileInProgress(false);
+      setCompileProgress(null);
+      setBusy(false);
+      return;
+    }
+    setCompileSaveModalOpen(false);
+    setError("");
+    try {
+      await patchStory(storyId, {
+        title: storyConfigSnapshot.title,
+        premise: storyConfigSnapshot.premise,
+        target_total_words: storyConfigSnapshot.target_total_words,
+        branch_count_override: storyConfigSnapshot.branch_count_override ?? null,
+        plan_retry_limit: storyConfigSnapshot.plan_retry_limit,
+        draft_loop_retry_limit: storyConfigSnapshot.draft_loop_retry_limit,
+        macro_author_notes: storyConfigSnapshot.macro_author_notes ?? "",
+        cast_seed: storyConfigSnapshot.cast_seed ?? [],
+        output_language: normalizeOutputLanguage(storyConfigSnapshot.output_language),
+      });
+      setPersistedStoryConfig(storyConfigSnapshot);
+    } catch (err) {
+      reportApiError(err, "errors.saveSettingsFailed");
+      setCompileInProgress(false);
+      setCompileProgress(null);
+      setBusy(false);
+      return;
+    }
+    await runMacroCompileAfterSettingsSaved();
+  }
+
+  function handleCompileSaveModalCancel() {
+    setCompileSaveModalOpen(false);
+    setNotice(t("setup.compileCancelledNotice"));
+    setCompileInProgress(false);
+    setCompileProgress(null);
+    setBusy(false);
+  }
+
   async function handleSaveStorySettings(payload: StoryInput) {
-    if (!storyId || configurationLocked) return;
+    if (!storyId) return;
     setBusy(true);
     setError("");
     setNotice("");
@@ -773,7 +986,7 @@ export default function App() {
       const wf = await fetchWorkflow(runId);
       setWorkflow(wf);
       if (String(wf.state.workflow_status ?? "") === "COMPLETED") {
-        setView("review");
+        navigateToViewPath("review");
       }
       const sid = storyIdRef.current;
       if (sid) {
@@ -784,12 +997,16 @@ export default function App() {
         } catch {
           /* optional */
         }
+        const resolvedChapterId =
+          typeof wf.run.chapter_id === "number" && Number.isFinite(wf.run.chapter_id)
+            ? wf.run.chapter_id
+            : chapterIdRef.current;
         try {
-          setSelectedChapter(await fetchChapter(sid, chapterIdRef.current));
+          setSelectedChapter(await fetchChapter(sid, resolvedChapterId));
         } catch {
           /* missing */
         }
-        const probe = await fetchChapterIfExists(sid, chapterIdRef.current);
+        const probe = await fetchChapterIfExists(sid, resolvedChapterId);
         setChapterAlreadyCompleted(probe?.status === "completed");
       }
     } catch (err) {
@@ -871,13 +1088,7 @@ export default function App() {
   async function handleRunChapter() {
     if (!storyId) return;
     if (manualAnchorSelectionOpen && selectedAnchorIds.length < 1) {
-      setError(
-        locale === "en"
-          ? "Select at least one anchor in advanced mode, or collapse to let director decide."
-          : locale === "zh-Hans"
-            ? "进阶模式下请至少选择一个 anchor，或收起选项改由 director 自动决定。"
-            : "進階模式下請至少選擇一個 anchor，或收起選項改由 director 自動決定。",
-      );
+      setError(t("app.write.manualAnchorRequired"));
       return;
     }
     setError("");
@@ -895,7 +1106,7 @@ export default function App() {
         selectedAnchorIds: manualAnchorSelectionOpen ? selectedAnchorIds : undefined,
         nextAnchorIds: manualAnchorSelectionOpen ? autoNextAnchorIds : undefined,
       };
-      const initial = await runChapter(storyId, chapterId, {
+      const initial = await runChapter(storyId, nextGeneratableChapterId, {
         ...runOptions,
       });
       setWorkflow(initial);
@@ -904,13 +1115,12 @@ export default function App() {
         const nextConfig = storyDetailToInput(detail, storyConfigSnapshot?.output_language ?? "zh-Hant");
         setStoryConfigSnapshot(nextConfig);
         setPersistedStoryConfig(nextConfig);
-        setConfigurationLocked(detail.configuration_locked);
       } catch {
-        setConfigurationLocked(true);
+        /* optional refresh */
       }
       setConfigVersion((v) => v + 1);
       const runId = initial.run.run_id;
-      setView("write");
+      navigateToViewPath("write");
       attachWorkflowEventStream(runId);
     } catch (err) {
       reportApiError(err, "errors.runChapterFailed");
@@ -948,52 +1158,30 @@ export default function App() {
     setHasExportedProject(true);
   }
 
-  async function importProjectBundle(jsonText: string, mode: ImportMergeMode) {
-    if (!storyId || configurationLocked) return;
+  function buildImportBundlePreviewLines(jsonText: string): { storyLine: string; macroLine: string } {
     const { story: parsedStory, macro_plan: parsedMacroRaw } = parseProjectBundleJson(jsonText);
     const parsedMacro = parsedMacroRaw ? namespaceMacroPlanIdsForStory(parsedMacroRaw, storyId) : undefined;
-    const modeLabel =
-      mode === "replace"
-        ? locale === "en"
-          ? "Replace"
-          : locale === "zh-Hans"
-            ? "覆盖"
-            : "覆蓋"
-        : locale === "en"
-          ? "Merge"
-          : locale === "zh-Hans"
-            ? "合并"
-            : "合併";
-    const storySummary = parsedStory
-      ? locale === "en"
-        ? `Story: ${parsedStory.title}`
-        : `故事：${parsedStory.title}`
-      : locale === "en"
-        ? "(No story block)"
-        : locale === "zh-Hans"
-          ? "（无故事区块）"
-          : "（無故事區塊）";
+    const storyLine = parsedStory
+      ? t("app.import.storyWithTitle", undefined, { title: parsedStory.title })
+      : t("app.import.storyEmpty");
     const nodeCount = (parsedMacro?.anchor_nodes ?? []).length;
     const slCount = (parsedMacro?.storylines ?? []).length;
-    const macroSummary = parsedMacro
-      ? locale === "en"
-        ? `Macro: Volumes ${parsedMacro.volumes.length} · DAG nodes ${nodeCount} · Storylines ${slCount} · Cast ${parsedMacro.cast.length}`
-        : locale === "zh-Hans"
-          ? `宏观：分卷 ${parsedMacro.volumes.length} · 剧情节点 ${nodeCount} · 剧情线 ${slCount} · 人物 ${parsedMacro.cast.length}`
-          : `宏觀：分卷 ${parsedMacro.volumes.length} · 劇情節點 ${nodeCount} · 劇情線 ${slCount} · 人物 ${parsedMacro.cast.length}`
-      : locale === "en"
-        ? "(No macro block)"
-        : locale === "zh-Hans"
-          ? "（无宏观区块）"
-          : "（無宏觀區塊）";
-    const proceed = window.confirm(
-      locale === "en"
-        ? `About to import project JSON (${modeLabel})\n${storySummary}\n${macroSummary}\n\nContinue?`
-        : locale === "zh-Hans"
-          ? `即将导入项目 JSON（${modeLabel}）\n${storySummary}\n${macroSummary}\n\n确定继续吗？`
-          : `即將匯入專案 JSON（${modeLabel}）\n${storySummary}\n${macroSummary}\n\n確定要繼續嗎？`,
-    );
-    if (!proceed) return;
+    const macroLine = parsedMacro
+      ? t("app.import.macroWithCounts", undefined, {
+          volumes: parsedMacro.volumes.length,
+          nodes: nodeCount,
+          storylines: slCount,
+          cast: parsedMacro.cast.length,
+        })
+      : t("app.import.macroEmpty");
+    return { storyLine, macroLine };
+  }
+
+  async function applyImportProjectBundle(jsonText: string, mode: ImportMergeMode) {
+    if (!storyId) return;
+    const { story: parsedStory, macro_plan: parsedMacroRaw } = parseProjectBundleJson(jsonText);
+    const parsedMacro = parsedMacroRaw ? namespaceMacroPlanIdsForStory(parsedMacroRaw, storyId) : undefined;
+    const modeLabel = mode === "replace" ? t("app.confirm.importReplace") : t("app.confirm.importMerge");
 
     if (parsedStory) {
       const current =
@@ -1056,37 +1244,57 @@ export default function App() {
 
     if (parsedStory || parsedMacro) {
       setConfigVersion((v) => v + 1);
-      setNotice(
-        locale === "en"
-          ? `Project JSON imported (${modeLabel})`
-          : locale === "zh-Hans"
-            ? `项目 JSON 已导入（${modeLabel}）`
-            : `專案 JSON 已匯入（${modeLabel}）`,
-      );
+      setNotice(t("app.import.doneNotice", undefined, { modeLabel }));
     }
   }
 
-  function askImportMode(): ImportMergeMode {
-    const replace = window.confirm(
-      locale === "en"
-        ? "Import mode: OK = Replace current data; Cancel = Merge (prefer existing values)."
-        : locale === "zh-Hans"
-          ? "导入模式：按“确定”= 覆盖当前数据；按“取消”= 合并（已有值优先）"
-          : "匯入模式：按「確定」= 覆蓋目前資料；按「取消」= 合併（已有值優先）",
-    );
-    return replace ? "replace" : "merge";
+  function openToolbarImportConfirm(mode: ImportMergeMode) {
+    const text = toolbarPendingImportTextRef.current;
+    if (!text) return;
+    try {
+      const { storyLine, macroLine } = buildImportBundlePreviewLines(text);
+      setToolbarImportPreview({ mode, storyLine, macroLine });
+      setToolbarImportModeOpen(false);
+      setToolbarImportConfirmOpen(true);
+    } catch (err) {
+      reportApiError(err, "errors.importJsonFailed");
+      toolbarPendingImportTextRef.current = null;
+      setToolbarImportModeOpen(false);
+    }
+  }
+
+  function cancelToolbarImportFlow() {
+    toolbarPendingImportTextRef.current = null;
+    setToolbarImportModeOpen(false);
+    setToolbarImportConfirmOpen(false);
+    setToolbarImportPreview(null);
   }
 
   async function handleToolbarImportProjectBundle(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     event.target.value = "";
-    if (!file || !storyId || configurationLocked) return;
-    const mode = askImportMode();
-    setBusy(true);
+    if (!file || !storyId) return;
     setError("");
     try {
       const text = await file.text();
-      await importProjectBundle(text, mode);
+      toolbarPendingImportTextRef.current = text;
+      setToolbarImportModeOpen(true);
+    } catch (err) {
+      reportApiError(err, "errors.importJsonFailed");
+    }
+  }
+
+  async function handleToolbarImportConfirmed() {
+    const text = toolbarPendingImportTextRef.current;
+    const prev = toolbarImportPreview;
+    if (!text || !prev) return;
+    setToolbarImportConfirmOpen(false);
+    setToolbarImportPreview(null);
+    toolbarPendingImportTextRef.current = null;
+    setBusy(true);
+    setError("");
+    try {
+      await applyImportProjectBundle(text, prev.mode);
     } catch (err) {
       reportApiError(err, "errors.importJsonFailed");
     } finally {
@@ -1096,39 +1304,254 @@ export default function App() {
 
   function patchSetupAnchorNode(patch: Partial<NonNullable<MacroCompileData["anchor_nodes"]>[number]>) {
     if (!macroData || !setupSelectedAnchorNode) return;
+    if (dagInteractionMode !== "edit") return;
+    if (String(setupSelectedAnchorNode.status ?? "").toUpperCase() === "RESOLVED") return;
     const nextNodes = (macroData.anchor_nodes ?? []).map((n) =>
       String(n.id) === String(setupSelectedAnchorNode.id) ? { ...n, ...patch } : n,
     );
-    setMacroData({ ...macroData, anchor_nodes: nextNodes });
+    setMacroData({
+      ...macroData,
+      anchor_nodes: coerceAnchorsLockedWhenParentLocked(nextNodes),
+    });
   }
 
-  async function persistSetupDagChanges() {
-    if (!storyId || !macroData || configurationLocked) return;
+  function userEditStorylineId(): string | null {
+    if (!storyId) return null;
+    return idUnderStoryPrefix(storyId, "user_edit");
+  }
+
+  function requestDeleteSetupAnchorNode() {
+    if (!macroData || !setupSelectedAnchorNode) return;
+    if (String(setupSelectedAnchorNode.status ?? "").toUpperCase() === "RESOLVED") return;
+    if (selectedIsMainline) return;
+    setDagModal("delete");
+  }
+
+  function executeDeleteSetupAnchorNode() {
+    setDagModal(null);
+    if (!macroData || !setupSelectedAnchorNode) return;
+    if (String(setupSelectedAnchorNode.status ?? "").toUpperCase() === "RESOLVED") return;
+    if (selectedIsMainline) return;
+    deleteAnchorNodeById(String(setupSelectedAnchorNode.id));
+  }
+
+  function addDependencyEdge(parentId: string, childId: string) {
+    if (!macroData || parentId === childId) return;
+    const next = (macroData.anchor_nodes ?? []).map((n) => {
+      if (String(n.id) !== childId) return n;
+      const deps = new Set([...(n.depends_on ?? [])]);
+      deps.add(parentId);
+      return { ...n, depends_on: [...deps] };
+    });
+    setMacroData({
+      ...macroData,
+      anchor_nodes: coerceAnchorsLockedWhenParentLocked(next),
+    });
+  }
+
+  function removeDependencyEdge(parentId: string, childId: string) {
+    if (!macroData) return;
+    const next = (macroData.anchor_nodes ?? []).map((n) => {
+      if (String(n.id) !== String(childId)) return n;
+      return {
+        ...n,
+        depends_on: [...(n.depends_on ?? []).filter((d) => String(d) !== String(parentId))],
+      };
+    });
+    setMacroData({
+      ...macroData,
+      anchor_nodes: coerceAnchorsLockedWhenParentLocked(next),
+    });
+  }
+
+  function deleteAnchorNodeById(nodeId: string) {
+    if (!macroData) return;
+    const idRemoved = String(nodeId);
+    const next = coerceAnchorsLockedWhenParentLocked(
+      (macroData.anchor_nodes ?? [])
+        .filter((n) => String(n.id) !== idRemoved)
+        .map((n) => ({
+          ...n,
+          depends_on: [...(n.depends_on ?? []).filter((d) => String(d) !== idRemoved)],
+        })),
+    );
+    setMacroData({ ...macroData, anchor_nodes: next });
+    setSetupSelectedAnchorNodeId((prev) => {
+      if (String(prev) !== idRemoved) return prev;
+      return next[0]?.id ? String(next[0].id) : null;
+    });
+  }
+
+  function createAnchorNodeAtGraphPosition(canvasX: number, canvasY: number) {
+    if (!macroData || !storyId || dagInteractionMode !== "edit") return;
+    const ueId = userEditStorylineId();
+    if (!ueId) return;
+    let storylines = [...(macroData.storylines ?? [])];
+    if (!storylines.some((s) => s.id === ueId)) {
+      storylines.push({
+        id: ueId,
+        type: "USER_EDIT",
+        title: t("app.dag.userEditStorylineTitle"),
+        overall_goal: "",
+        involved_entities: [],
+      });
+    }
+    const vol =
+      String(setupSelectedAnchorNode?.volume_id ?? "").trim() ||
+      String(macroData.volumes?.[0]?.volume_id ?? "").trim();
+    if (!vol) return;
+    const newId = `${storyId}_ua_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const newNode: NonNullable<MacroCompileData["anchor_nodes"]>[number] = {
+      id: newId,
+      storyline_ids: [ueId],
+      volume_id: vol,
+      node_kind: "NORMAL",
+      title: t("app.dag.newNodeTitle"),
+      description: "",
+      depends_on: [],
+      status: "LOCKED",
+      estimated_chapter: null,
+    };
+    setMacroData({
+      ...macroData,
+      storylines,
+      anchor_nodes: coerceAnchorsLockedWhenParentLocked([...(macroData.anchor_nodes ?? []), newNode]),
+    });
+    setSetupSelectedAnchorNodeId(newId);
+    setDagPendingManualPosition({ id: newId, x: canvasX, y: canvasY });
+  }
+
+  function resolveDagLinkPick(pickedNodeId: string) {
+    if (pickedNodeId === "__cancel__") {
+      setDagLinkPick(null);
+      return;
+    }
+    if (!dagLinkPick) return;
+    if (dagLinkPick.mode === "parent") {
+      addDependencyEdge(pickedNodeId, dagLinkPick.childId);
+    } else {
+      addDependencyEdge(dagLinkPick.parentId, pickedNodeId);
+    }
+    setDagLinkPick(null);
+  }
+
+  function requestDeleteSetupAnchorNodeFromGraph(nodeId: string) {
+    if (!macroData) return;
+    const n = macroData.anchor_nodes?.find((x) => String(x.id) === String(nodeId));
+    if (!n) return;
+    if (String(n.status ?? "").toUpperCase() === "RESOLVED") {
+      setError(t("app.dag.errorResolvedNoDelete"));
+      return;
+    }
+    const isMl = (n.storyline_ids ?? []).some(
+      (sid) => mainStorylineIds.has(String(sid)) || String(sid).endsWith("_main"),
+    );
+    if (isMl) {
+      setError(t("app.dag.errorMainlineNoDelete"));
+      return;
+    }
+    setSetupSelectedAnchorNodeId(String(nodeId));
+    setDagModal("delete");
+  }
+
+  function applyMacroPutResult(updated: Awaited<ReturnType<typeof putMacroPlan>>) {
+    setMacroData({
+      story_id: updated.story_id,
+      bible: updated.bible ?? {},
+      macro_author_notes: updated.macro_author_notes,
+      cast_seed: updated.cast_seed,
+      volumes: updated.volumes,
+      anchors: updated.anchors,
+      storylines: updated.storylines ?? [],
+      anchor_nodes: updated.anchor_nodes ?? [],
+      cast: updated.cast,
+      protagonist_character_id: updated.protagonist_character_id,
+      macro_topology_mode: updated.macro_topology_mode,
+      topology_locked: updated.topology_locked,
+    });
+  }
+
+  async function persistLeaveEditAfterValidation(warnings: AnchorDagValidationIssue[]) {
+    if (!storyId || !macroData) return;
     setBusy(true);
     setError("");
     try {
       const payload = buildMacroPutBody(macroData);
       const updated = await putMacroPlan(storyId, payload);
-      setMacroData({
-        story_id: updated.story_id,
-        bible: updated.bible ?? {},
-        macro_author_notes: updated.macro_author_notes,
-        cast_seed: updated.cast_seed,
-        volumes: updated.volumes,
-        anchors: updated.anchors,
-        storylines: updated.storylines ?? [],
-        anchor_nodes: updated.anchor_nodes ?? [],
-        cast: updated.cast,
-        protagonist_character_id: updated.protagonist_character_id,
-        macro_topology_mode: updated.macro_topology_mode,
-        topology_locked: updated.topology_locked,
-      });
-      setNotice(locale === "en" ? "DAG changes saved." : locale === "zh-Hans" ? "DAG 变更已保存。" : "DAG 變更已儲存。");
+      applyMacroPutResult(updated);
+      const base = t("app.dag.savedLeavingEdit");
+      const loc = locale as DagValidateLocale;
+      const noticeText =
+        warnings.length > 0 ? [base, ...warnings.map((w) => formatAnchorDagValidationIssue(w, loc))].join("\n") : base;
+      setNotice(noticeText);
+      setDagInteractionMode("view");
+      setDagModal(null);
+      setDagLeaveEditBlockMessage("");
+      setDagValidationHighlights(null);
     } catch (err) {
       reportApiError(err, "errors.saveDagFailed");
     } finally {
       setBusy(false);
     }
+  }
+
+  /** Runs after user confirms "save and exit" — empty fields / DAG blocking → dialogs + graph highlights; else PUT. */
+  function confirmLeaveEditModeFromDialog() {
+    setDagLinkPick(null);
+    if (!storyId || !macroData) {
+      setDagInteractionMode("view");
+      setDagModal(null);
+      setDagValidationHighlights(null);
+      return;
+    }
+    const anchors = macroData.anchor_nodes ?? [];
+    const emptyIds = findAnchorNodesWithEmptyTitleOrDescription(
+      anchors.map((n) => ({
+        id: String(n.id),
+        title: String(n.title ?? ""),
+        description: String(n.description ?? ""),
+      })),
+    );
+    if (emptyIds.length > 0) {
+      const detail = emptyIds.map((id) => `· ${id}`).join("\n");
+      setDagLeaveEditBlockMessage(t("app.dag.emptyAnchorsDetail", undefined, { detail }));
+      setDagValidationHighlights({ nodeIds: emptyIds, edges: [] });
+      setDagModal("leaveEditEmptyFields");
+      return;
+    }
+    const nodes = anchors.map((n) => ({
+      id: String(n.id),
+      storyline_ids: [...(n.storyline_ids ?? [])],
+      node_kind: n.node_kind,
+      depends_on: [...(n.depends_on ?? [])],
+    }));
+    const storylinesLite = (macroData.storylines ?? []).map((s) => ({
+      id: String(s.id),
+      type: String(s.type),
+    }));
+    const r = validateAnchorDagComprehensive(nodes, storylinesLite);
+    if (r.blocking) {
+      setDagValidationHighlights(computeDagBlockingHighlights(nodes, storylinesLite, r.blocking));
+      setDagLeaveEditBlockMessage(formatAnchorDagValidationIssue(r.blocking, locale as DagValidateLocale));
+      setDagModal("leaveEditBlock");
+      return;
+    }
+    setDagValidationHighlights(null);
+    void persistLeaveEditAfterValidation(r.warnings);
+  }
+
+  function handleDagInteractionModeChange(next: "view" | "edit") {
+    if (next === "edit") {
+      setDagInteractionMode("edit");
+      return;
+    }
+    if (!storyId || !macroData) {
+      setDagInteractionMode("view");
+      return;
+    }
+    setDagLeaveEditBlockMessage("");
+    setDagValidationHighlights(null);
+    setDagModal("leaveEditConfirm");
   }
 
   async function runHitlAction<TPayload>(
@@ -1187,13 +1610,13 @@ export default function App() {
   const hasReviewed = Boolean(selectedChapter || chapters.length > 0);
   const hasExported = hasExportedChapter || hasExportedProject;
   const workflowMiniStatus = useMemo(() => {
-    if (!workflow) return locale === "en" ? "Chapter not run yet" : locale === "zh-Hans" ? "尚未执行章节" : "尚未執行章節";
+    if (!workflow) return t("workflow.mini.notRun");
     const status = String(workflow.state.workflow_status ?? workflow.run.status ?? "");
-    if (status === "WAITING_HITL") return locale === "en" ? "Waiting for human decision" : locale === "zh-Hans" ? "等待人工决策" : "等待人工決策";
-    if (status === "COMPLETED") return locale === "en" ? "Chapter workflow completed" : locale === "zh-Hans" ? "章节流程已完成" : "章節流程已完成";
-    if (status === "FAILED") return locale === "en" ? "Chapter workflow failed" : locale === "zh-Hans" ? "章节流程失败" : "章節流程失敗";
-    return locale === "en" ? "Chapter workflow running" : locale === "zh-Hans" ? "章节流程执行中" : "章節流程執行中";
-  }, [locale, workflow]);
+    if (status === "WAITING_HITL") return t("workflow.mini.waitingHitl");
+    if (status === "COMPLETED") return t("workflow.mini.completed");
+    if (status === "FAILED") return t("workflow.mini.failed");
+    return t("workflow.mini.running");
+  }, [workflow, t]);
   const failureNotice = useMemo(() => {
     if (!workflow) return "";
     const status = String(workflow.state.workflow_status ?? workflow.run.status ?? "");
@@ -1229,36 +1652,22 @@ export default function App() {
       setNavCount((prev) => prev + 1);
     };
     if (!storyId && nextView !== "library" && nextView !== "setup") {
-      setNotice(
-        locale === "en"
-          ? "Select or create a story in library first."
-          : locale === "zh-Hans"
-            ? "请先在故事库选择或创建故事。"
-            : "請先在故事庫選擇或建立故事。",
-      );
-      setView("library");
+      setNotice(t("app.nav.selectStoryFirst"));
+      requestNavigateToView("library");
       return;
     }
     if (nextView === "write" && !hasMacroCompiled) {
-      setNotice(
-        locale === "en"
-          ? "Finish macro compile in Setup & Planning first."
-          : locale === "zh-Hans"
-            ? "请先在“设置与规划”完成世界观编译。"
-            : "請先在「設定與規劃」完成世界觀編譯。",
-      );
-      setView("setup");
+      setNotice(t("app.nav.finishMacroFirst"));
+      requestNavigateToView("setup");
       return;
     }
     if ((nextView === "review" || nextView === "export") && !hasChapterRun) {
-      setNotice(
-        locale === "en"
-          ? "Run at least one chapter workflow first."
-          : locale === "zh-Hans"
-            ? "请先执行至少一轮章节流程。"
-            : "請先執行至少一輪章節流程。",
-      );
-      setView("write");
+      setNotice(t("app.nav.needChapterRun"));
+      requestNavigateToView("write");
+      return;
+    }
+    if (dagInteractionMode === "edit" && view === "setup" && nextView !== "setup") {
+      setDagNavAwayPending({ target: nextView, replace: false });
       return;
     }
     if (nextView === "setup") {
@@ -1270,8 +1679,56 @@ export default function App() {
     } else if (nextView === "export") {
       markStageVisit("export");
     }
-    setView(nextView);
+    navigateToViewPath(nextView);
   }
+
+  function confirmDagNavAwayAndNavigate() {
+    const pending = dagNavAwayPending;
+    if (!pending) return;
+    setDagNavAwayPending(null);
+    setDagInteractionMode("view");
+    setDagLinkPick(null);
+    setDagValidationHighlights(null);
+    setDagModal(null);
+    const target = pending.target;
+    const markStageVisit = (stage: TaskFlowStageId) => {
+      setStageVisitCount((prev) => ({ ...prev, [stage]: prev[stage] + 1 }));
+      setNavCount((prev) => prev + 1);
+    };
+    if (target === "setup") {
+      markStageVisit(hasMacroCompiled ? "planStructure" : "projectSetup");
+    } else if (target === "write") {
+      markStageVisit("writeChapter");
+    } else if (target === "review" || target === "graph") {
+      markStageVisit("reviewFix");
+    } else if (target === "export") {
+      markStageVisit("export");
+    }
+    navigateToViewPath(target, pending.replace);
+  }
+
+  const anchorDagFsOverlay =
+    view === "setup" && anchorDagFullscreen && (error || failureNotice || notice) ? (
+      <div className="flex flex-col gap-2">
+        {error ? (
+          <div className="rounded-xl border border-error/40 bg-error/10 px-3 py-2 font-label text-xs text-error shadow-lg backdrop-blur-sm">
+            {error}
+          </div>
+        ) : null}
+        {failureNotice ? (
+          <div className="rounded-xl border border-warning/40 bg-warning/10 px-3 py-2 font-label text-xs text-on-surface shadow-lg backdrop-blur-sm">
+            {failureNotice}
+          </div>
+        ) : null}
+        {notice ? (
+          <div className="rounded-xl border border-secondary/35 bg-secondary/10 px-3 py-2 font-label text-xs text-secondary shadow-lg backdrop-blur-sm">
+            {notice}
+          </div>
+        ) : null}
+      </div>
+    ) : null;
+
+  const hideTopAlertsForAnchorFs = view === "setup" && anchorDagFullscreen;
 
   return (
     <AppShell
@@ -1283,23 +1740,23 @@ export default function App() {
       workflowMiniStatus={workflowMiniStatus}
     >
       <div className="mx-4 mt-4 min-h-[3.5rem]">
-        {error ? (
+        {!hideTopAlertsForAnchorFs && error ? (
           <div className="rounded-xl border border-error/40 bg-error/10 px-4 py-3 font-label text-sm text-error">{error}</div>
         ) : null}
-        {!error && failureNotice ? (
+        {!hideTopAlertsForAnchorFs && !error && failureNotice ? (
           <div className="mt-2 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 font-label text-sm text-on-surface">
             {failureNotice}
           </div>
         ) : null}
-        {!error && notice ? (
+        {!hideTopAlertsForAnchorFs && !error && notice ? (
           <div className="rounded-xl border border-secondary/35 bg-secondary/10 px-4 py-3 font-label text-sm text-secondary">{notice}</div>
         ) : null}
       </div>
       {!error && alignmentRulesPromptActive && view !== "setup" && view !== "library" ? (
         <div className="mx-4 mt-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 font-label text-sm text-on-surface">
-          偵測到複雜智鬥，需補充硬性規則。你可以先留在此頁查看流程，或前往「故事設定」填寫 `chapter_hard_rules`。
-          <button type="button" className="btn-secondary ml-3" onClick={() => setView("setup")}>
-            前往故事設定
+          {t("app.alignmentRules.banner")}
+          <button type="button" className="btn-secondary ml-3" onClick={() => requestNavigateToView("setup")}>
+            {t("app.alignmentRules.goSetup")}
           </button>
         </div>
       ) : null}
@@ -1319,30 +1776,18 @@ export default function App() {
         <div className="min-h-[calc(100vh-12rem)] px-4 pb-12 pt-8 md:px-10 lg:px-12">
           <div className="mb-10 max-w-7xl">
             <span className="mb-2 block font-label text-xs font-semibold uppercase tracking-[0.3em] text-secondary">
-              {locale === "en" ? "Project Setup" : locale === "zh-Hans" ? "项目设置" : "專案設定"}
+              {t("app.setup.kicker")}
             </span>
             <h1 className="mb-3 font-headline text-4xl font-black tracking-tighter text-on-surface">
-              {locale === "en" ? "Story Settings" : locale === "zh-Hans" ? "故事设置" : "故事設定"}
+              {t("app.setup.title")}
             </h1>
-            <p className="max-w-2xl font-body text-lg italic text-on-surface-variant">
-              {locale === "en"
-                ? "Define premise and parameters here, then run world compile to generate volumes, cast, and milestones."
-                : locale === "zh-Hans"
-                  ? "在此整理故事梗概与参数，并执行世界观编译以生成分卷、人物与里程碑。"
-                  : "在此整理故事梗概與參數，並執行世界觀編譯以生成分卷、人物與里程碑。"}
-            </p>
+            <p className="max-w-2xl font-body text-lg italic text-on-surface-variant">{t("app.setup.subtitle")}</p>
           </div>
 
-          {storyId && !configurationLocked ? (
+          {storyId ? (
             <div className="mb-4 max-w-7xl rounded-xl border border-tertiary/25 bg-tertiary/5 px-4 py-3 font-body text-sm leading-relaxed text-on-surface">
-              <span className="font-headline font-bold text-tertiary">
-                {locale === "en" ? "Re-run World Compile" : locale === "zh-Hans" ? "重新执行世界观编译" : "重新執行世界觀編譯"}
-              </span>
-              {locale === "en"
-                ? " will overwrite auto-generated cast nodes and current world bible/volumes/milestones. Manual edits on those generated nodes will be lost."
-                : locale === "zh-Hans"
-                  ? "会覆写自动生成的角色节点，以及当前保存的世界观总表、分卷与里程碑；若你曾在图谱手动修改这些自动生成角色，这些改动会消失。"
-                  : "會覆寫自動產生的角色節點，以及目前儲存的世界觀總表、分卷與里程碑；若你曾在圖譜上手動改過這些自動產生的角色，那些修改會消失。"}
+              <span className="font-headline font-bold text-tertiary">{t("app.setup.rerunCompileTitle")}</span>
+              {t("app.setup.rerunCompileBody")}
             </div>
           ) : null}
 
@@ -1352,21 +1797,21 @@ export default function App() {
                 type="button"
                 className="btn-primary-gradient flex items-center gap-2 text-sm"
                 onClick={handleMacroCompile}
-                disabled={!storyId || busy || workflowConflictLocked || configurationLocked}
+                disabled={!storyId || busy || workflowConflictLocked}
               >
                 <span className="material-symbols-outlined text-lg">auto_awesome</span>
-                {locale === "en" ? "Compile World & Structure" : locale === "zh-Hans" ? "生成世界观与结构" : "產生世界觀與結構"}
+                {t("app.setup.compileCta")}
               </button>
               <button type="button" className="btn-secondary" onClick={storyId ? exportProjectBundle : undefined} disabled={!storyId || busy}>
-                {locale === "en" ? "Export Project JSON" : locale === "zh-Hans" ? "导出项目 JSON" : "匯出專案 JSON"}
+                {t("setup.exportProjectJson")}
               </button>
               <button
                 type="button"
                 className="btn-secondary"
                 onClick={() => toolbarImportInputRef.current?.click()}
-                disabled={!storyId || busy || configurationLocked}
+                disabled={!storyId || busy}
               >
-                {locale === "en" ? "Import Project JSON" : locale === "zh-Hans" ? "导入项目 JSON" : "匯入專案 JSON"}
+                {t("setup.importProjectJson")}
               </button>
               <input
                 ref={toolbarImportInputRef}
@@ -1393,8 +1838,8 @@ export default function App() {
           </div>
 
           <div className="mb-6 max-w-7xl rounded-xl border border-outline-variant/10 bg-surface-container-low px-6 py-4 font-label text-sm text-on-surface-variant">
-            <span className="text-secondary">{locale === "en" ? "Story ID" : locale === "zh-Hans" ? "故事编号" : "故事編號"}</span>{" "}
-            {storyId || (locale === "en" ? "Not created" : locale === "zh-Hans" ? "未建立" : "未建立")} · {storySummary}
+            <span className="text-secondary">{t("app.setup.storyIdLabel")}</span>{" "}
+            {storyId || t("app.setup.storyIdMissing")} · {storySummary}
           </div>
 
           <div className="grid max-w-7xl grid-cols-1 items-start gap-8 lg:grid-cols-12">
@@ -1402,13 +1847,13 @@ export default function App() {
               <StorySetupForm
                 resetKey={`${storyId || "new"}-${configVersion}`}
                 initialValues={storyId ? storyConfigSnapshot : null}
-                locked={Boolean(storyId && configurationLocked)}
-                onValuesChange={storyId && !configurationLocked ? setStoryConfigSnapshot : undefined}
+                onValuesChange={storyId ? setStoryConfigSnapshot : undefined}
                 onSubmit={handleCreateStory}
-                onSaveSettings={storyId && !configurationLocked ? handleSaveStorySettings : undefined}
+                onSaveSettings={storyId ? handleSaveStorySettings : undefined}
                 showCreateButton={!storyId}
                 onExportProjectBundle={storyId ? exportProjectBundle : undefined}
-                onImportProjectBundle={storyId && !configurationLocked ? importProjectBundle : undefined}
+                onImportProjectBundle={storyId ? applyImportProjectBundle : undefined}
+                getImportBundlePreview={storyId ? buildImportBundlePreviewLines : undefined}
                 onBusy={setBusy}
                 onError={setError}
                 disabled={busy}
@@ -1418,13 +1863,12 @@ export default function App() {
               <div className="rounded-xl border border-outline-variant/10 bg-surface-container-low/50 p-3">
                 <div className="mb-3 px-1">
                   <h3 className="font-label text-xs font-semibold uppercase tracking-wider text-on-surface-variant">
-                    {locale === "en" ? "World & Structure Editor" : locale === "zh-Hans" ? "世界观与结构编修" : "世界觀與結構編修"}
+                    {t("app.setup.worldEditorTitle")}
                   </h3>
                 </div>
                 <MacroPlanPanel
                   macroData={macroData}
                   storyId={storyId || null}
-                  configurationLocked={configurationLocked}
                   onMacroDataUpdate={setMacroData}
                   onBusy={setBusy}
                   onError={setError}
@@ -1436,122 +1880,69 @@ export default function App() {
             <div className="rounded-xl border border-outline-variant/10 bg-surface-container-low/50 p-3">
               <div className="mb-3 px-1">
                 <h3 className="font-label text-xs font-semibold uppercase tracking-wider text-on-surface-variant">
-                  {locale === "en" ? "Anchor DAG GraphView" : locale === "zh-Hans" ? "Anchor DAG 图谱" : "Anchor DAG 圖譜"}
+                  {t("app.setup.anchorDagTitle")}
                 </h3>
               </div>
               {setupAnchorNodes.length > 0 ? (
-                <div className="space-y-3">
-                  <AnchorNodesGraphView
-                    nodes={setupAnchorNodes.map((n) => ({
-                      id: String(n.id),
-                      title: String(n.title ?? ""),
-                      status: n.status,
-                      node_kind: n.node_kind,
-                      storyline_ids: [...(n.storyline_ids ?? [])],
-                      depends_on: [...(n.depends_on ?? [])],
-                    }))}
-                    storylines={macroData?.storylines}
-                    selectedId={setupSelectedAnchorNodeId}
-                    onSelect={(nodeId) => setSetupSelectedAnchorNodeId(nodeId)}
-                    height={420}
-                  />
-                  <div className="rounded-xl border border-outline-variant/20 bg-surface-container-low p-3">
-                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                      <p className="text-xs font-semibold text-on-surface-variant">
-                        {locale === "en" ? "Node Detail Card" : locale === "zh-Hans" ? "节点详情卡" : "節點詳情卡"}
-                      </p>
-                      <div className="flex flex-wrap gap-2">
-                        <button
-                          type="button"
-                          className="rounded-lg border border-secondary/40 px-3 py-1.5 text-xs font-semibold text-secondary"
-                          onClick={persistSetupDagChanges}
-                          disabled={!storyId || configurationLocked || busy}
-                        >
-                          {locale === "en" ? "Save DAG JSON" : locale === "zh-Hans" ? "保存 DAG JSON" : "儲存 DAG JSON"}
-                        </button>
-                      </div>
-                    </div>
-                    <p className="mb-2 text-[11px] text-on-surface-variant">
-                      {locale === "en"
-                        ? "Temporary mode: node add/remove is paused. You can edit side-arc node title/description only."
-                        : locale === "zh-Hans"
-                          ? "临时模式：暂停新增/删除节点，目前仅提供支线节点内容编辑。"
-                          : "臨時模式：暫停新增/刪除節點，目前僅提供支線節點內容編輯。"}
-                    </p>
-                    {setupSelectedAnchorNode ? (
-                      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                        <label className="text-xs text-on-surface-variant">
-                          {locale === "en" ? "Node ID" : locale === "zh-Hans" ? "节点 ID" : "節點 ID"}
-                          <input
-                            value={String(setupSelectedAnchorNode.id)}
-                            disabled
-                            className="mt-1 w-full rounded-lg border border-outline-variant/25 bg-surface-container-highest px-3 py-2 text-sm"
-                          />
-                        </label>
-                        <label className="text-xs text-on-surface-variant">
-                          {locale === "en" ? "Depends On" : locale === "zh-Hans" ? "依赖节点" : "依賴節點"}
-                          <input
-                            value={(setupSelectedAnchorNode.depends_on ?? []).join(", ")}
-                            disabled
-                            className="mt-1 w-full rounded-lg border border-outline-variant/25 bg-surface-container-highest px-3 py-2 text-sm"
-                          />
-                        </label>
-                        <label className="text-xs text-on-surface-variant">
-                          {locale === "en" ? "Status" : locale === "zh-Hans" ? "状态" : "狀態"}
-                          <input
-                            value={
-                              String(setupSelectedAnchorNode.status ?? "LOCKED").toUpperCase() === "RESOLVED"
-                                ? locale === "en"
-                                  ? "Resolved"
-                                  : locale === "zh-Hans"
-                                    ? "已解决"
-                                    : "已解決"
-                                : String(setupSelectedAnchorNode.status ?? "LOCKED").toUpperCase() === "UNLOCKED"
-                                  ? locale === "en"
-                                    ? "Unlocked"
-                                    : locale === "zh-Hans"
-                                      ? "已解锁"
-                                      : "已解鎖"
-                                  : locale === "en"
-                                    ? "Locked"
-                                    : locale === "zh-Hans"
-                                      ? "已锁定"
-                                      : "已上鎖"
-                            }
-                            disabled
-                            className="mt-1 w-full rounded-lg border border-outline-variant/25 bg-surface-container-highest px-3 py-2 text-sm"
-                          />
-                        </label>
-                        <label className="text-xs text-on-surface-variant">
-                          {locale === "en" ? "Title" : locale === "zh-Hans" ? "标题" : "標題"}
-                          <input
-                            value={String(setupSelectedAnchorNode.title ?? "")}
-                            onChange={(e) => patchSetupAnchorNode({ title: e.target.value })}
-                            disabled={!setupCanEditSelectedNode || configurationLocked}
-                            className="mt-1 w-full rounded-lg border border-outline-variant/25 bg-surface-container-highest px-3 py-2 text-sm"
-                          />
-                        </label>
-                        <label className="text-xs text-on-surface-variant md:col-span-2">
-                          {locale === "en" ? "Description" : locale === "zh-Hans" ? "描述" : "描述"}
-                          <textarea
-                            value={String(setupSelectedAnchorNode.description ?? "")}
-                            onChange={(e) => patchSetupAnchorNode({ description: e.target.value })}
-                            disabled={!setupCanEditSelectedNode || configurationLocked}
-                            rows={3}
-                            className="mt-1 w-full resize-y rounded-lg border border-outline-variant/25 bg-surface-container-highest px-3 py-2 text-sm"
-                          />
-                        </label>
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
+                <AnchorDagSection
+                  locale={locale}
+                  fsOverlay={anchorDagFsOverlay}
+                  detailOpen={dagDetailPanelOpen}
+                  onDetailOpenChange={setDagDetailPanelOpen}
+                  onFullscreenChange={setAnchorDagFullscreen}
+                  toolbarExtras={
+                    <span className="text-[10px] text-on-surface-variant">
+                      {t("app.setup.anchorDagHint")}
+                    </span>
+                  }
+                  graph={(dagFs) => (
+                    <AnchorNodesGraphView
+                      nodes={setupAnchorNodes.map((n) => ({
+                        id: String(n.id),
+                        title: String(n.title ?? ""),
+                        status: n.status,
+                        node_kind: n.node_kind,
+                        storyline_ids: [...(n.storyline_ids ?? [])],
+                        depends_on: [...(n.depends_on ?? [])],
+                      }))}
+                      storylines={macroData?.storylines}
+                      selectedId={setupSelectedAnchorNodeId}
+                      onSelect={(nodeId) => setSetupSelectedAnchorNodeId(nodeId)}
+                      height={dagGraphHeight}
+                      layoutEpoch={dagLayoutEpoch}
+                      detailPanelOpen={dagDetailPanelOpen}
+                      onToggleDetailPanel={() => setDagDetailPanelOpen((o) => !o)}
+                      fullscreen={dagFs}
+                      interactionMode={dagInteractionMode}
+                      onInteractionModeChange={handleDagInteractionModeChange}
+                      linkPick={dagLinkPick}
+                      onResolveLinkPick={resolveDagLinkPick}
+                      onCanvasCreateNode={({ x, y }) => createAnchorNodeAtGraphPosition(x, y)}
+                      onGraphDeleteNode={requestDeleteSetupAnchorNodeFromGraph}
+                      onGraphStartLinkParent={(childId) => setDagLinkPick({ mode: "parent", childId })}
+                      onGraphStartLinkChild={(parentId) => setDagLinkPick({ mode: "child", parentId })}
+                      onRemoveDependency={removeDependencyEdge}
+                      pendingManualPosition={dagPendingManualPosition}
+                      onConsumePendingManualPosition={() => setDagPendingManualPosition(null)}
+                      validationHighlights={dagValidationHighlights}
+                    />
+                  )}
+                  detail={
+                    <SetupAnchorDagDetailPanel
+                      storyId={storyId.trim() ? storyId : null}
+                      setupSelectedAnchorNode={setupSelectedAnchorNode}
+                      selectedResolved={selectedResolved}
+                      topologyLocked={Boolean(macroData?.topology_locked)}
+                      dagFieldsEditable={dagFieldsEditable}
+                      busy={busy}
+                      selectedAnchorLockedParentIds={selectedAnchorLockedParentIds}
+                      onPatchAnchor={patchSetupAnchorNode}
+                    />
+                  }
+                />
               ) : (
                 <div className="rounded-lg border border-outline-variant/20 bg-surface-container-low p-4 text-sm text-on-surface-variant">
-                  {locale === "en"
-                    ? "No anchor_nodes yet. Run macro compile first."
-                    : locale === "zh-Hans"
-                      ? "尚无 anchor_nodes，请先执行 macro compile。"
-                      : "尚無 anchor_nodes，請先執行 macro compile。"}
+                  {t("app.dagDetail.noMapYet")}
                 </div>
               )}
             </div>
@@ -1578,7 +1969,7 @@ export default function App() {
               } catch (err) {
                 const msg = err instanceof Error ? err.message : "";
                 if (msg.includes("Chapter not found")) {
-                  setNotice("章節尚未落盤，請稍後再讀取。");
+                  setNotice(t("app.chapter.notOnDisk"));
                   setSelectedChapter(null);
                 } else {
                   reportApiError(err, "errors.loadChapterFailed");
@@ -1601,19 +1992,67 @@ export default function App() {
               }
             }}
             rightRail={
-              <div className="flex flex-col gap-4 p-4">
+              <div className="flex min-w-0 flex-col gap-4 p-4">
                 <WorkflowProgressTrack workflow={workflow} compact />
-                <WorkflowMonitor workflow={workflow} variant="compact" />
-                <HitlPanel
-                  workflow={workflow}
-                  graph={graph}
-                  storyId={storyId || null}
-                  variant="compact"
-                  busy={busy}
-                  workflowError={workflowHitlActive ? error : ""}
-                  {...hitlHandlers}
-                />
-                <AgentOutputView workflow={workflow} variant="compact" />
+                <section className="rounded-xl border border-outline-variant/15 bg-surface-container-low/70 p-2">
+                  <div
+                    className="inline-flex rounded-md bg-surface-container-lowest/40 p-1"
+                    role="tablist"
+                    aria-label={t("workflow.sidePanel.ariaReview")}
+                  >
+                    <button
+                      type="button"
+                      id="review-tab-progress"
+                      role="tab"
+                      aria-controls="review-panel-progress"
+                      aria-selected={reviewPanelTab === "progress"}
+                      className={`rounded-md px-3 py-1.5 text-xs font-semibold ${
+                        reviewPanelTab === "progress" ? "bg-primary/20 text-primary" : "text-on-surface-variant"
+                      }`}
+                      onClick={() => setReviewPanelTab("progress")}
+                      aria-pressed={reviewPanelTab === "progress"}
+                    >
+                      {t("workflow.sidePanel.tabProgress")}
+                    </button>
+                    <button
+                      type="button"
+                      id="review-tab-logs"
+                      role="tab"
+                      aria-controls="review-panel-logs"
+                      aria-selected={reviewPanelTab === "logs"}
+                      className={`rounded-md px-3 py-1.5 text-xs font-semibold ${
+                        reviewPanelTab === "logs" ? "bg-secondary/20 text-secondary" : "text-on-surface-variant"
+                      }`}
+                      onClick={() => setReviewPanelTab("logs")}
+                      aria-pressed={reviewPanelTab === "logs"}
+                    >
+                      {t("workflow.sidePanel.tabLogs")}
+                    </button>
+                  </div>
+                </section>
+                {reviewPanelTab === "progress" ? (
+                  <div
+                    id="review-panel-progress"
+                    role="tabpanel"
+                    aria-labelledby="review-tab-progress"
+                    className="flex min-w-0 flex-col gap-4"
+                  >
+                    <WorkflowMonitor workflow={workflow} variant="compact" />
+                    <HitlPanel
+                      workflow={workflow}
+                      graph={graph}
+                      storyId={storyId || null}
+                      variant="compact"
+                      busy={busy}
+                      workflowError={workflowHitlActive ? error : ""}
+                      {...hitlHandlers}
+                    />
+                  </div>
+                ) : (
+                  <div id="review-panel-logs" role="tabpanel" aria-labelledby="review-tab-logs" className="min-w-0">
+                    <AgentOutputView workflow={workflow} variant="compact" />
+                  </div>
+                )}
               </div>
             }
           />
@@ -1623,11 +2062,11 @@ export default function App() {
       {view === "graph" ? (
         <div className="min-h-[calc(100vh-12rem)] bg-background p-4 md:p-8">
           <div className="mb-4 flex items-center justify-end gap-3">
-            <button type="button" className="btn-secondary" onClick={() => setView("setup")}>
-              {locale === "en" ? "Back to Setup & Planning" : locale === "zh-Hans" ? "回到设置与规划" : "回到設定與規劃"}
+            <button type="button" className="btn-secondary" onClick={() => requestNavigateToView("setup")}>
+              {t("app.graph.backSetup")}
             </button>
             <span className="rounded-full border border-secondary/20 bg-secondary/10 px-3 py-1 font-label text-[10px] font-bold uppercase tracking-widest text-secondary">
-              {locale === "en" ? "Read Only" : locale === "zh-Hans" ? "仅供阅览" : "僅供閱覽"}
+              {t("app.graph.readOnly")}
             </span>
           </div>
           <GraphView graph={graph} protagonistCharacterId={macroData?.protagonist_character_id} />
@@ -1638,34 +2077,21 @@ export default function App() {
         <div className="min-h-[calc(100vh-12rem)] bg-background px-4 py-6 md:px-8 md:py-8">
           <div className="mx-auto flex w-full max-w-7xl flex-col gap-6">
             <section className="rounded-xl border border-outline-variant/15 bg-surface-container-low/70 p-4 shadow-glow">
-              <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(180px,220px)_minmax(220px,280px)_auto] lg:items-end">
+              <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(180px,240px)_minmax(220px,280px)_auto] lg:items-end">
                 <div className="flex flex-col gap-1.5">
                   <span className="font-label text-[10px] uppercase tracking-wider text-outline">
-                    {locale === "en" ? "Chapter" : locale === "zh-Hans" ? "章节" : "章節"}
+                    {t("app.write.chapterToWrite")}
                   </span>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="number"
-                      min={1}
-                      value={chapterId}
-                      onChange={(e) => setChapterId(Number(e.target.value))}
-                      className="h-10 w-24 rounded-lg border border-outline-variant/20 bg-surface-container-highest px-2 py-2 text-on-surface"
-                    />
-                    <button
-                      type="button"
-                      className="btn-secondary h-10"
-                      title={locale === "en" ? "Set to latest existing chapter" : locale === "zh-Hans" ? "将章节设为当前最新章节" : "將章節選擇設為目前已有的最大章節"}
-                      disabled={!storyId || busy || chapters.length === 0}
-                      onClick={() => setChapterId(latestChapterId)}
-                    >
-                      <span className="material-symbols-outlined align-middle text-base">skip_next</span>
-                      {locale === "en" ? "Latest" : locale === "zh-Hans" ? "最新章" : "最新章"}
-                    </button>
+                  <div
+                    className="flex h-10 items-center rounded-lg border border-outline-variant/20 bg-surface-container-highest px-3 font-semibold text-on-surface"
+                    title={t("app.write.chapterToWriteHint")}
+                  >
+                    {t("app.write.chapterN", undefined, { n: nextGeneratableChapterId })}
                   </div>
                 </div>
                 <label className="flex min-w-0 flex-col gap-1.5 font-body text-sm text-on-surface">
                   <span className="font-label text-[10px] uppercase tracking-wider text-outline">
-                    {locale === "en" ? "AI Freedom" : locale === "zh-Hans" ? "创作自由度" : "創作自由度"}
+                    {t("app.write.aiFreedom")}
                   </span>
                   <select
                     value={aiFreedomLevel}
@@ -1673,21 +2099,9 @@ export default function App() {
                     disabled={!storyId || busy || workflowConflictLocked || chapterAlreadyCompleted}
                     className="auteur-input h-10 w-full text-sm"
                   >
-                    <option value="strict">
-                      {locale === "en"
-                        ? "Strict (fixed facts cannot change; outline must be specific)"
-                        : locale === "zh-Hans"
-                          ? "严格（已写明处不可改；大纲需更具体）"
-                          : "嚴格（已寫明處不可改；大綱需較具體才 FULL 綁定）"}
-                    </option>
-                    <option value="balanced">{locale === "en" ? "Balanced (default)" : locale === "zh-Hans" ? "平衡（预设）" : "平衡（預設）"}</option>
-                    <option value="wild">
-                      {locale === "en"
-                        ? "Wild (more creative fill-in, still marked [AI_INVENTION])"
-                        : locale === "zh-Hans"
-                          ? "狂野（留白脑补更多，仍标 [AI_INVENTION]）"
-                          : "狂野（留白腦補多，仍標 [AI_INVENTION]）"}
-                    </option>
+                    <option value="strict">{t("app.write.aiFreedom.strict")}</option>
+                    <option value="balanced">{t("app.write.aiFreedom.balanced")}</option>
+                    <option value="wild">{t("app.write.aiFreedom.wild")}</option>
                   </select>
                 </label>
                 <div className="flex items-end">
@@ -1697,57 +2111,85 @@ export default function App() {
                     onClick={handleRunChapter}
                     disabled={!storyId || busy || workflowConflictLocked || chapterAlreadyCompleted}
                   >
-                    {locale === "en" ? "Run Chapter" : locale === "zh-Hans" ? "撰写本章" : "撰寫本章"}
+                    {t("app.write.runChapter")}
                   </button>
                 </div>
               </div>
               {chapterAlreadyCompleted ? (
                 <div className="mt-3">
                   <span className="rounded-full border border-tertiary/30 bg-tertiary/10 px-2 py-1 text-xs text-tertiary">
-                    {locale === "en"
-                      ? `Chapter ${chapterId} already completed. Change chapter number to continue.`
-                      : locale === "zh-Hans"
-                        ? `第 ${chapterId} 章已完成，请改章节号后再执行`
-                        : `第 ${chapterId} 章已完成，請改章號後再執行`}
+                    {t("app.write.chapterCompleteBadge", undefined, { n: nextGeneratableChapterId })}
                   </span>
                 </div>
               ) : null}
+              {storyId ? (
+                <div className="mt-3 overflow-hidden rounded-xl border border-outline-variant/15 bg-surface-container/90">
+                  <button
+                    type="button"
+                    className="flex w-full items-center justify-between gap-2 px-4 py-3 text-left hover:bg-surface-container-highest/50"
+                    onClick={() => setPreamblePanelOpen((o) => !o)}
+                  >
+                    <span className="flex min-w-0 flex-1 items-center gap-2">
+                      <span className="font-label text-[11px] font-bold uppercase tracking-wider text-secondary">
+                        {t("app.write.preambleToggle")}
+                      </span>
+                      <span className="truncate font-body text-sm text-on-surface-variant">
+                        {t("app.write.preambleSummary", undefined, { n: Math.max(0, nextGeneratableChapterId - 1) })}
+                      </span>
+                    </span>
+                    <span className="material-symbols-outlined shrink-0 text-on-surface-variant">
+                      {preamblePanelOpen ? "expand_less" : "expand_more"}
+                    </span>
+                  </button>
+                  {preamblePanelOpen && !writingPreamble ? (
+                    <div className="border-t border-outline-variant/10 px-4 py-3 font-body text-sm text-on-surface-variant">
+                      {t("app.write.preambleLoading")}
+                    </div>
+                  ) : null}
+                  {preamblePanelOpen && writingPreamble ? (
+                    <div className="space-y-2 border-t border-outline-variant/10 px-4 py-3 font-body text-sm text-on-surface-variant">
+                      <p>
+                        {t("app.write.preamblePrevChapter")}
+                        {writingPreamble.plot_progress.previous_chapter.plot_summary || t("app.write.preambleNoSummary")}
+                      </p>
+                      {preambleHasNonLlmSummary ? (
+                        <p className="rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-xs text-on-surface">
+                          {t("app.write.preambleNonLlmWarn")}
+                        </p>
+                      ) : null}
+                      {writingPreamble.plot_progress.previous_chapter.chapter_id != null &&
+                      plotSummarySourceNeedsRegenerate(writingPreamble.plot_progress.previous_chapter.plot_summary_source) ? (
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          disabled={regenSummaryBusyChapter !== null || busy}
+                          onClick={() => void handleRegenerateChapterSummary(writingPreamble.plot_progress.previous_chapter.chapter_id!)}
+                        >
+                          {regenSummaryBusyChapter === writingPreamble.plot_progress.previous_chapter.chapter_id
+                            ? t("app.write.regenProcessing")
+                            : t("app.write.regenSummary")}
+                        </button>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
               <div className="mt-3 rounded-lg border border-outline-variant/15 bg-surface-container-high/30 p-3">
-                <p className="mb-2 font-label text-[10px] font-bold uppercase tracking-wider text-secondary">
-                  {locale === "en" ? "Start Chapter Anchors" : locale === "zh-Hans" ? "开章锚点选择" : "開章 Anchor 選點"}
-                </p>
+                <p className="mb-2 font-label text-[10px] font-bold uppercase tracking-wider text-secondary">{t("app.write.milestonesTitle")}</p>
                 <div className="rounded-lg border border-outline-variant/15 bg-surface-container-low px-3 py-2">
-                  <p className="text-xs text-on-surface-variant">
-                    {locale === "en"
-                      ? "Default: keep collapsed and run chapter directly. Director will pick anchors automatically."
-                      : locale === "zh-Hans"
-                        ? "默认：保持收起并直接运行章节，由 director 自动选择锚点。"
-                        : "預設：保持收起並直接執行章節，由 director 自動選擇錨點。"}
-                  </p>
+                  <p className="text-xs text-on-surface-variant">{t("app.write.milestonesHint")}</p>
                   <button
                     type="button"
                     className="mt-2 rounded-md border border-secondary/35 px-3 py-1.5 text-xs font-semibold text-secondary"
                     onClick={() => setManualAnchorSelectionOpen((v) => !v)}
                     disabled={!storyId || busy || workflowConflictLocked || chapterAlreadyCompleted}
                   >
-                    {manualAnchorSelectionOpen
-                      ? locale === "en"
-                        ? "Hide Advanced Manual Selection"
-                        : locale === "zh-Hans"
-                          ? "收起进阶手动选择"
-                          : "收起進階手動選擇"
-                      : locale === "en"
-                        ? "Show Advanced Manual Selection"
-                        : locale === "zh-Hans"
-                          ? "展开进阶手动选择"
-                          : "展開進階手動選擇"}
+                    {manualAnchorSelectionOpen ? t("app.write.manualHide") : t("app.write.manualShow")}
                   </button>
                 </div>
                 {manualAnchorSelectionOpen ? (
                   chapterAnchorCandidates.length === 0 ? (
-                    <p className="mt-2 text-xs text-on-surface-variant">
-                      {locale === "en" ? "No unlocked anchor candidates yet." : locale === "zh-Hans" ? "目前没有可用的解锁锚点。" : "目前沒有可用的已解鎖 Anchor。"}
-                    </p>
+                    <p className="mt-2 text-xs text-on-surface-variant">{t("app.write.noMilestonesAvailable")}</p>
                   ) : (
                     <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-2">
                       {chapterAnchorCandidates.map((n) => (
@@ -1766,7 +2208,7 @@ export default function App() {
                               }
                               disabled={!storyId || busy || workflowConflictLocked || chapterAlreadyCompleted}
                             />
-                            <span>{locale === "en" ? "Use For This Chapter" : locale === "zh-Hans" ? "用于本章" : "用於本章"}</span>
+                            <span>{t("app.write.anchorPick")}</span>
                           </label>
                         </label>
                       ))}
@@ -1775,44 +2217,37 @@ export default function App() {
                 ) : null}
                 {manualAnchorSelectionOpen ? (
                   <p className="mt-2 text-[11px] text-on-surface-variant">
-                    {locale === "en"
-                      ? `Advanced mode enabled: director will be skipped. Selected anchors carry auto next-step anchors (window size = 2): ${autoNextAnchorIds.join(", ") || "auto-detecting..."}`
-                      : locale === "zh-Hans"
-                        ? `已启用进阶模式：将跳过 director。已选锚点会自动携带下一步锚点（window size = 2）：${autoNextAnchorIds.join("、") || "自动推断中…"}`
-                        : `已啟用進階模式：將跳過 director。已選錨點會自動帶出下一步錨點（window size = 2）：${autoNextAnchorIds.join("、") || "自動推斷中…"}`
-                    }
+                    {autoNextAnchorTitles.length > 0
+                      ? t("app.write.anchorAutoHint", undefined, {
+                          titles: autoNextAnchorTitles.join(t("app.write.listSep")),
+                        })
+                      : t("app.write.anchorAutoThinking")}
                   </p>
                 ) : null}
               </div>
               <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
                 <div>
                   <p className="mb-2 font-label text-[10px] font-bold uppercase tracking-wider text-secondary">
-                    {locale === "en" ? "Chapter Direction" : locale === "zh-Hans" ? "章节方向" : "Chapter Direction"}
+                    {t("app.write.chapterDirection")}
                   </p>
                   <textarea
                     value={chapterOutline}
                     onChange={(e) => setChapterOutline(e.target.value)}
                     maxLength={2000}
                     rows={4}
-                    placeholder={
-                      locale === "en"
-                        ? "e.g. advance mystery through dialogue, avoid combat scenes..."
-                        : locale === "zh-Hans"
-                          ? "例如：本章以对话推进谜底、避免打斗场面…"
-                          : "例如：本章以對話推進謎底、避免打鬥場面…"
-                    }
+                    placeholder={t("app.write.outlinePlaceholder")}
                     disabled={!storyId || busy || workflowConflictLocked || chapterAlreadyCompleted}
                     className="w-full resize-y rounded-lg border border-outline-variant/20 bg-surface-container-highest px-3 py-2 font-body text-sm text-on-surface placeholder:text-on-surface-variant/50"
                   />
                   {chapterOutline.trim().length > 0 && chapterOutline.trim().length < OUTLINE_FULL_BINDING_MIN_CHARS ? (
                     <p className="mt-2 font-body text-xs text-secondary">
-                      大綱較短（低於 {OUTLINE_FULL_BINDING_MIN_CHARS} 字）：流程會保留 AI 填坑權；strict 僅約束你已寫明的片段。
+                      {t("app.write.outlineShortHint", undefined, { min: OUTLINE_FULL_BINDING_MIN_CHARS })}
                     </p>
                   ) : null}
                 </div>
                 <div>
                   <p className="mb-2 font-label text-[10px] font-bold uppercase tracking-wider text-secondary">
-                    {locale === "en" ? "Hard Rules for This Chapter" : locale === "zh-Hans" ? "本章硬性规则" : "本章硬性規則"}
+                    {t("app.write.hardRules")}
                   </p>
                   <textarea
                     value={chapterHardRules}
@@ -1820,92 +2255,21 @@ export default function App() {
                     ref={chapterHardRulesRef}
                     maxLength={8000}
                     rows={4}
-                    placeholder={
-                      locale === "en"
-                        ? "e.g. game rules, win conditions, immutable system laws..."
-                        : locale === "zh-Hans"
-                          ? "例如：游戏规则、胜负条件、不可违背的系统法则（POV 不可知底牌请标清）"
-                          : "例如：遊戲規則、勝負條件、不可違背的系統法則（POV 不可知的底牌請標示清楚）"
-                    }
+                    placeholder={t("app.write.hardRulesPlaceholder")}
                     disabled={!storyId || busy || workflowConflictLocked || chapterAlreadyCompleted}
                     className="w-full resize-y rounded-lg border border-outline-variant/20 bg-surface-container-highest px-3 py-2 font-body text-sm text-on-surface placeholder:text-on-surface-variant/50"
                   />
                 </div>
               </div>
-              {storyId ? (
-                <div className="mt-3 overflow-hidden rounded-xl border border-outline-variant/15 bg-surface-container/90">
-                  <button
-                    type="button"
-                    className="flex w-full items-center justify-between gap-2 px-4 py-3 text-left hover:bg-surface-container-highest/50"
-                    onClick={() => setPreamblePanelOpen((o) => !o)}
-                  >
-                    <span className="flex min-w-0 flex-1 items-center gap-2">
-                      <span className="font-label text-[11px] font-bold uppercase tracking-wider text-secondary">
-                        {locale === "en" ? "Pre-write Reference" : locale === "zh-Hans" ? "开写前参考" : "開寫前參考"}
-                      </span>
-                      <span className="truncate font-body text-sm text-on-surface-variant">
-                        {locale === "en"
-                          ? `Story progress (through chapter ${Math.max(0, chapterId - 1)})`
-                          : locale === "zh-Hans"
-                            ? `剧情进度（至第 ${Math.max(0, chapterId - 1)} 章）`
-                            : `劇情進度（至第 ${Math.max(0, chapterId - 1)} 章）`}
-                      </span>
-                    </span>
-                    <span className="material-symbols-outlined shrink-0 text-on-surface-variant">
-                      {preamblePanelOpen ? "expand_less" : "expand_more"}
-                    </span>
-                  </button>
-                  {preamblePanelOpen && !writingPreamble ? (
-                    <div className="border-t border-outline-variant/10 px-4 py-3 font-body text-sm text-on-surface-variant">
-                      {locale === "en" ? "Loading..." : locale === "zh-Hans" ? "加载中…" : "載入提示中…"}
-                    </div>
-                  ) : null}
-                  {preamblePanelOpen && writingPreamble ? (
-                    <div className="space-y-2 border-t border-outline-variant/10 px-4 py-3 font-body text-sm text-on-surface-variant">
-                      <p>
-                        {locale === "en" ? "Previous chapter: " : locale === "zh-Hans" ? "上一章：" : "上一章："}
-                        {writingPreamble.plot_progress.previous_chapter.plot_summary ||
-                          (locale === "en" ? "No structured summary yet" : locale === "zh-Hans" ? "尚无结构化摘要" : "尚無結構化摘要")}
-                      </p>
-                      {preambleHasNonLlmSummary ? (
-                        <p className="rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-xs text-on-surface">
-                          {locale === "en"
-                            ? "Detected non-summarizer summary; regenerate summary for the related chapter."
-                            : locale === "zh-Hans"
-                              ? "检测到非章节整理器摘要，建议在对应章节重新生成摘要。"
-                              : "偵測到非章節整理器摘要，建議在對應章節重新產生摘要。"}
-                        </p>
-                      ) : null}
-                      {writingPreamble.plot_progress.previous_chapter.chapter_id != null &&
-                      plotSummarySourceNeedsRegenerate(writingPreamble.plot_progress.previous_chapter.plot_summary_source) ? (
-                        <button
-                          type="button"
-                          className="btn-secondary"
-                          disabled={regenSummaryBusyChapter !== null || busy}
-                          onClick={() => void handleRegenerateChapterSummary(writingPreamble.plot_progress.previous_chapter.chapter_id!)}
-                        >
-                          {regenSummaryBusyChapter === writingPreamble.plot_progress.previous_chapter.chapter_id
-                            ? locale === "en"
-                              ? "Processing..."
-                              : locale === "zh-Hans"
-                                ? "处理中…"
-                                : "處理中…"
-                            : locale === "en"
-                              ? "Regenerate Previous Summary"
-                              : locale === "zh-Hans"
-                                ? "重新生成上一章摘要"
-                                : "重新產生上一章摘要"}
-                        </button>
-                      ) : null}
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
             </section>
 
             <WorkflowProgressTrack workflow={workflow} />
             <section className="rounded-xl border border-outline-variant/15 bg-surface-container-low/70 p-2">
-              <div className="inline-flex rounded-md bg-surface-container-lowest/40 p-1" role="tablist" aria-label="撰寫資訊檢視模式">
+              <div
+                className="inline-flex rounded-md bg-surface-container-lowest/40 p-1"
+                role="tablist"
+                aria-label={t("workflow.sidePanel.ariaWrite")}
+              >
                 <button
                   type="button"
                   id="write-tab-progress"
@@ -1918,7 +2282,7 @@ export default function App() {
                   onClick={() => setWritePanelTab("progress")}
                   aria-pressed={writePanelTab === "progress"}
                 >
-                  {locale === "en" ? "Chapter Progress" : locale === "zh-Hans" ? "章节撰写进度" : "章節撰寫進度"}
+                  {t("workflow.sidePanel.tabProgress")}
                 </button>
                 <button
                   type="button"
@@ -1932,7 +2296,7 @@ export default function App() {
                   onClick={() => setWritePanelTab("logs")}
                   aria-pressed={writePanelTab === "logs"}
                 >
-                  {locale === "en" ? "Run Logs" : locale === "zh-Hans" ? "撰写过程记录" : "撰寫過程紀錄"}
+                  {t("workflow.sidePanel.tabLogs")}
                 </button>
               </div>
             </section>
@@ -1988,6 +2352,282 @@ export default function App() {
           />
         </div>
       ) : null}
+      {dagModal === "delete" && dagDialogMount
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-[65000] flex items-center justify-center bg-black/55 px-4 backdrop-blur-[2px]"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="dag-delete-dialog-title"
+              onClick={(e) => {
+                if (e.target === e.currentTarget) setDagModal(null);
+              }}
+            >
+              <div
+                className="max-w-md rounded-2xl border border-red-400/25 bg-[#120808] p-5 shadow-[0_24px_80px_rgba(0,0,0,0.55)]"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <h2 id="dag-delete-dialog-title" className="font-label text-sm font-bold uppercase tracking-wider text-red-200">
+                  {t("app.dag.deleteTitle")}
+                </h2>
+                <p className="mt-3 font-body text-sm leading-relaxed text-red-100/85">{t("app.dag.deleteBody")}</p>
+                <div className="mt-5 flex flex-wrap justify-end gap-2">
+                  <button
+                    type="button"
+                    className="rounded-xl border border-outline-variant/35 px-4 py-2 text-xs font-semibold text-on-surface-variant hover:bg-white/5"
+                    onClick={() => setDagModal(null)}
+                  >
+                    {t("common.cancel")}
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-xl border border-red-400/50 bg-red-950/60 px-4 py-2 text-xs font-semibold text-red-100 hover:bg-red-900/50"
+                    onClick={executeDeleteSetupAnchorNode}
+                  >
+                    {t("app.dag.delete")}
+                  </button>
+                </div>
+              </div>
+            </div>,
+            dagDialogMount,
+          )
+        : null}
+      {dagModal === "leaveEditConfirm" && dagDialogMount
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-[65000] flex items-center justify-center bg-black/55 px-4 backdrop-blur-[2px]"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="dag-leave-edit-confirm-title"
+              onClick={(e) => {
+                if (e.target === e.currentTarget) {
+                  setDagModal(null);
+                  setDagValidationHighlights(null);
+                }
+              }}
+            >
+              <div
+                className="max-w-md rounded-2xl border border-outline-variant/30 bg-surface-container-high p-5 shadow-[0_24px_80px_rgba(0,0,0,0.55)]"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <h2
+                  id="dag-leave-edit-confirm-title"
+                  className="font-label text-sm font-bold uppercase tracking-wider text-on-surface"
+                >
+                  {t("app.dag.leaveTitle")}
+                </h2>
+                <p className="mt-3 font-body text-sm leading-relaxed text-on-surface-variant">{t("app.dag.leaveBody")}</p>
+                <div className="mt-5 flex flex-wrap justify-end gap-2">
+                  <button
+                    type="button"
+                    className="rounded-xl border border-outline-variant/35 px-4 py-2 text-xs font-semibold text-on-surface-variant hover:bg-surface-container-low"
+                    onClick={() => {
+                      setDagModal(null);
+                      setDagValidationHighlights(null);
+                    }}
+                  >
+                    {t("common.cancel")}
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-xl border border-secondary/50 bg-secondary/15 px-4 py-2 text-xs font-semibold text-secondary hover:bg-secondary/25"
+                    onClick={confirmLeaveEditModeFromDialog}
+                  >
+                    {t("common.confirm")}
+                  </button>
+                </div>
+              </div>
+            </div>,
+            dagDialogMount,
+          )
+        : null}
+      {dagModal === "leaveEditBlock" && dagDialogMount
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-[65000] flex items-center justify-center bg-black/55 px-4 backdrop-blur-[2px]"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="dag-leave-edit-block-title"
+              onClick={(e) => {
+                if (e.target === e.currentTarget) {
+                  setDagModal(null);
+                  setDagLeaveEditBlockMessage("");
+                  setDagValidationHighlights(null);
+                }
+              }}
+            >
+              <div
+                className="max-w-md rounded-2xl border border-amber-400/30 bg-[#120a06] p-5 shadow-[0_24px_80px_rgba(0,0,0,0.55)]"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <h2
+                  id="dag-leave-edit-block-title"
+                  className="font-label text-sm font-bold uppercase tracking-wider text-amber-100"
+                >
+                  {t("app.dag.cannotSaveTitle")}
+                </h2>
+                <p className="mt-3 whitespace-pre-wrap font-body text-sm leading-relaxed text-amber-50/95">
+                  {dagLeaveEditBlockMessage}
+                </p>
+                <p className="mt-3 font-body text-[11px] leading-relaxed text-amber-200/75">{t("app.dag.cannotSaveFooter")}</p>
+                <div className="mt-5 flex flex-wrap justify-end gap-2">
+                  <button
+                    type="button"
+                    className="rounded-xl border border-amber-400/40 bg-amber-950/50 px-4 py-2 text-xs font-semibold text-amber-50 hover:bg-amber-900/40"
+                    onClick={() => {
+                      setDagModal(null);
+                      setDagLeaveEditBlockMessage("");
+                      setDagValidationHighlights(null);
+                    }}
+                  >
+                    {t("common.ok")}
+                  </button>
+                </div>
+              </div>
+            </div>,
+            dagDialogMount,
+          )
+        : null}
+      {dagModal === "leaveEditEmptyFields" && dagDialogMount
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-[65000] flex items-center justify-center bg-black/55 px-4 backdrop-blur-[2px]"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="dag-leave-edit-empty-title"
+              onClick={(e) => {
+                if (e.target === e.currentTarget) {
+                  setDagModal(null);
+                  setDagLeaveEditBlockMessage("");
+                  setDagValidationHighlights(null);
+                }
+              }}
+            >
+              <div
+                className="max-w-md rounded-2xl border border-red-400/30 bg-[#120808] p-5 shadow-[0_24px_80px_rgba(0,0,0,0.55)]"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <h2
+                  id="dag-leave-edit-empty-title"
+                  className="font-label text-sm font-bold uppercase tracking-wider text-red-200"
+                >
+                  {t("app.dag.emptyFieldsTitle")}
+                </h2>
+                <p className="mt-3 whitespace-pre-wrap font-body text-sm leading-relaxed text-red-100/90">
+                  {dagLeaveEditBlockMessage}
+                </p>
+                <p className="mt-3 font-body text-[11px] leading-relaxed text-red-200/75">{t("app.dag.emptyFieldsFooter")}</p>
+                <div className="mt-5 flex flex-wrap justify-end gap-2">
+                  <button
+                    type="button"
+                    className="rounded-xl border border-red-400/40 bg-red-950/50 px-4 py-2 text-xs font-semibold text-red-50 hover:bg-red-900/40"
+                    onClick={() => {
+                      setDagModal(null);
+                      setDagLeaveEditBlockMessage("");
+                      setDagValidationHighlights(null);
+                    }}
+                  >
+                    {t("common.ok")}
+                  </button>
+                </div>
+              </div>
+            </div>,
+            dagDialogMount,
+          )
+        : null}
+      {dagNavAwayPending && dagDialogMount
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-[65000] flex items-center justify-center bg-black/55 px-4 backdrop-blur-[2px]"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="dag-nav-away-title"
+              onClick={(e) => {
+                if (e.target === e.currentTarget) setDagNavAwayPending(null);
+              }}
+            >
+              <div
+                className="max-w-md rounded-2xl border border-outline-variant/30 bg-surface-container-high p-5 shadow-[0_24px_80px_rgba(0,0,0,0.55)]"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <h2
+                  id="dag-nav-away-title"
+                  className="font-label text-sm font-bold uppercase tracking-wider text-on-surface"
+                >
+                  {t("app.dag.navAwayTitle")}
+                </h2>
+                <p className="mt-3 font-body text-sm leading-relaxed text-on-surface-variant">{t("app.dag.navAwayBody")}</p>
+                <p className="mt-2 font-body text-xs text-on-surface-variant/90">
+                  {t("app.dag.navAwayGoingTo") + navTargetLabel(dagNavAwayPending.target, t)}
+                </p>
+                <div className="mt-5 flex flex-wrap justify-end gap-2">
+                  <button
+                    type="button"
+                    className="rounded-xl border border-outline-variant/35 px-4 py-2 text-xs font-semibold text-on-surface-variant hover:bg-surface-container-low"
+                    onClick={() => setDagNavAwayPending(null)}
+                  >
+                    {t("app.dag.stayHere")}
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-xl border border-secondary/50 bg-secondary/15 px-4 py-2 text-xs font-semibold text-secondary hover:bg-secondary/25"
+                    onClick={confirmDagNavAwayAndNavigate}
+                  >
+                    {t("app.dag.exitEditSwitch")}
+                  </button>
+                </div>
+              </div>
+            </div>,
+            dagDialogMount,
+          )
+        : null}
+      <ConfirmModal
+        mount={typeof document !== "undefined" ? document.body : null}
+        open={toolbarImportModeOpen}
+        danger
+        title={t("app.confirm.importModeTitle")}
+        message={t("app.confirm.importModeBody")}
+        cancelLabel={t("common.cancel")}
+        secondaryLabel={t("app.confirm.importMerge")}
+        onSecondary={() => openToolbarImportConfirm("merge")}
+        confirmLabel={t("app.confirm.importReplace")}
+        onConfirm={() => openToolbarImportConfirm("replace")}
+        onCancel={cancelToolbarImportFlow}
+      />
+      <ConfirmModal
+        mount={typeof document !== "undefined" ? document.body : null}
+        open={toolbarImportConfirmOpen && toolbarImportPreview !== null}
+        title={t("app.confirm.importProjectTitle")}
+        message={
+          toolbarImportPreview
+            ? t("app.confirm.importProjectBody", undefined, {
+                modeLabel:
+                  toolbarImportPreview.mode === "replace"
+                    ? t("app.confirm.importReplace")
+                    : t("app.confirm.importMerge"),
+                storyLine: toolbarImportPreview.storyLine,
+                macroLine: toolbarImportPreview.macroLine,
+              })
+            : ""
+        }
+        confirmLabel={t("app.confirm.importProjectConfirm")}
+        cancelLabel={t("common.cancel")}
+        onConfirm={() => void handleToolbarImportConfirmed()}
+        onCancel={() => {
+          setToolbarImportConfirmOpen(false);
+          setToolbarImportModeOpen(true);
+        }}
+      />
+      <ConfirmModal
+        mount={typeof document !== "undefined" ? document.body : null}
+        open={compileSaveModalOpen}
+        title={t("app.confirm.compileDirtyTitle")}
+        message={t("app.confirm.compileDirtyBody")}
+        confirmLabel={t("app.confirm.saveAndCompile")}
+        cancelLabel={t("common.cancel")}
+        onConfirm={() => void handleCompileSaveModalConfirm()}
+        onCancel={handleCompileSaveModalCancel}
+      />
     </AppShell>
   );
 }

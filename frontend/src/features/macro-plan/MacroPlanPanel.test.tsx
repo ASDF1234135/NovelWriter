@@ -47,7 +47,6 @@ describe("MacroPlanPanel", () => {
           cast: [{ node_id: "char_1", canonical_name: "主角", role: "protagonist" }],
         }}
         storyId="s1"
-        configurationLocked={false}
         onMacroDataUpdate={vi.fn()}
         onBusy={vi.fn()}
         onError={vi.fn()}
@@ -95,7 +94,6 @@ describe("MacroPlanPanel", () => {
           cast: [{ node_id: "char_1", canonical_name: "主角", role: "protagonist" }],
         }}
         storyId="s1"
-        configurationLocked={false}
         onMacroDataUpdate={vi.fn()}
         onBusy={vi.fn()}
         onError={vi.fn()}
@@ -131,7 +129,6 @@ describe("MacroPlanPanel", () => {
           cast: [{ node_id: "char_1", canonical_name: "主角", role: "protagonist" }],
         }}
         storyId="s1"
-        configurationLocked={false}
         onMacroDataUpdate={onMacroDataUpdate}
         onBusy={vi.fn()}
         onError={vi.fn()}
@@ -176,7 +173,6 @@ describe("MacroPlanPanel", () => {
           cast: [{ node_id: "char_1", canonical_name: "主角", role: "protagonist" }],
         }}
         storyId="s1"
-        configurationLocked={false}
         onMacroDataUpdate={vi.fn()}
         onBusy={vi.fn()}
         onError={vi.fn()}
@@ -211,7 +207,6 @@ describe("MacroPlanPanel", () => {
           cast: [{ node_id: "char_1", canonical_name: "主角", role: "protagonist" }],
         }}
         storyId="s1"
-        configurationLocked={false}
         onMacroDataUpdate={vi.fn()}
         onBusy={vi.fn()}
         onError={vi.fn()}

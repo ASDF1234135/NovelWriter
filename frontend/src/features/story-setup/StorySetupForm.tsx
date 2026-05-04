@@ -1,4 +1,5 @@
 import { type ChangeEvent, useEffect, useRef, useState } from "react";
+import { ConfirmModal } from "../../components/ConfirmModal";
 import type { ImportMergeMode, StoryInput, StoryOutputLanguage } from "../../types";
 import { useI18n } from "../../i18n/useI18n";
 
@@ -20,6 +21,8 @@ type Props = {
   showCreateButton?: boolean;
   onExportProjectBundle?: () => void;
   onImportProjectBundle?: (jsonText: string, mode: ImportMergeMode) => Promise<void>;
+  /** Preview lines for import confirmation modal (paired with `onImportProjectBundle`). */
+  getImportBundlePreview?: (jsonText: string) => { storyLine: string; macroLine: string };
   onBusy?: (busy: boolean) => void;
   onError?: (message: string) => void;
 };
@@ -82,6 +85,7 @@ export function StorySetupForm({
   showCreateButton = true,
   onExportProjectBundle,
   onImportProjectBundle,
+  getImportBundlePreview,
   onBusy,
   onError,
 }: Props) {
@@ -102,6 +106,12 @@ export function StorySetupForm({
   const [outputLanguage, setOutputLanguage] = useState<StoryOutputLanguage>(seedOutputLanguage);
   const [saveBusy, setSaveBusy] = useState(false);
   const importInputRef = useRef<HTMLInputElement | null>(null);
+  const [importModeOpen, setImportModeOpen] = useState(false);
+  const [importConfirmOpen, setImportConfirmOpen] = useState(false);
+  const importPendingTextRef = useRef<string | null>(null);
+  const [importPreview, setImportPreview] = useState<{ mode: ImportMergeMode; storyLine: string; macroLine: string } | null>(
+    null,
+  );
 
   useEffect(() => {
     if (initialValues) {
@@ -200,21 +210,52 @@ export function StorySetupForm({
     }
   }
 
-  function askImportMode(): ImportMergeMode {
-    const replace = window.confirm(t("setup.importModeConfirm"));
-    return replace ? "replace" : "merge";
+  function cancelSetupImportFlow() {
+    importPendingTextRef.current = null;
+    setImportModeOpen(false);
+    setImportConfirmOpen(false);
+    setImportPreview(null);
+  }
+
+  function openSetupImportConfirm(mode: ImportMergeMode) {
+    const text = importPendingTextRef.current;
+    if (!text || !getImportBundlePreview) return;
+    try {
+      const { storyLine, macroLine } = getImportBundlePreview(text);
+      setImportPreview({ mode, storyLine, macroLine });
+      setImportModeOpen(false);
+      setImportConfirmOpen(true);
+    } catch (err) {
+      onError?.(err instanceof Error ? err.message : t("setup.importFailed"));
+      cancelSetupImportFlow();
+    }
   }
 
   async function handleImportProjectBundleFile(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     event.target.value = "";
-    if (!file || !onImportProjectBundle) return;
-    const mode = askImportMode();
-    onBusy?.(true);
+    if (!file || !onImportProjectBundle || !getImportBundlePreview) return;
     onError?.("");
     try {
       const text = await file.text();
-      await onImportProjectBundle(text, mode);
+      importPendingTextRef.current = text;
+      setImportModeOpen(true);
+    } catch (err) {
+      onError?.(err instanceof Error ? err.message : t("setup.importFailed"));
+    }
+  }
+
+  async function confirmSetupImportProjectBundle() {
+    const text = importPendingTextRef.current;
+    const prev = importPreview;
+    if (!text || !prev || !onImportProjectBundle) return;
+    setImportConfirmOpen(false);
+    setImportPreview(null);
+    importPendingTextRef.current = null;
+    onBusy?.(true);
+    onError?.("");
+    try {
+      await onImportProjectBundle(text, prev.mode);
     } catch (err) {
       onError?.(err instanceof Error ? err.message : t("setup.importFailed"));
     } finally {
@@ -396,6 +437,41 @@ export function StorySetupForm({
           </div>
         </div>
       </form>
+      <ConfirmModal
+        mount={typeof document !== "undefined" ? document.body : null}
+        open={importModeOpen}
+        danger
+        title={t("app.confirm.importModeTitle")}
+        message={t("app.confirm.importModeBody")}
+        cancelLabel={t("common.cancel")}
+        secondaryLabel={t("app.confirm.importMerge")}
+        onSecondary={() => openSetupImportConfirm("merge")}
+        confirmLabel={t("app.confirm.importReplace")}
+        onConfirm={() => openSetupImportConfirm("replace")}
+        onCancel={cancelSetupImportFlow}
+      />
+      <ConfirmModal
+        mount={typeof document !== "undefined" ? document.body : null}
+        open={importConfirmOpen && importPreview !== null}
+        title={t("app.confirm.importProjectTitle")}
+        message={
+          importPreview
+            ? t("app.confirm.importProjectBody", undefined, {
+                modeLabel:
+                  importPreview.mode === "replace" ? t("app.confirm.importReplace") : t("app.confirm.importMerge"),
+                storyLine: importPreview.storyLine,
+                macroLine: importPreview.macroLine,
+              })
+            : ""
+        }
+        confirmLabel={t("app.confirm.importProjectConfirm")}
+        cancelLabel={t("common.cancel")}
+        onConfirm={() => void confirmSetupImportProjectBundle()}
+        onCancel={() => {
+          setImportConfirmOpen(false);
+          setImportModeOpen(true);
+        }}
+      />
     </section>
   );
 }

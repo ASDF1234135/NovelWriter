@@ -69,10 +69,10 @@ export function WorkflowMonitor({ workflow, variant = "default" }: Props) {
         <span className="material-symbols-outlined text-base">monitoring</span>
         {compact ? (locale === "en" ? "Current Run" : locale === "zh-Hans" ? "本次执行" : "本次執行") : locale === "en" ? "Chapter Progress" : locale === "zh-Hans" ? "章节撰写进度" : "章節撰寫進度"}
       </h2>
-      <div className={`grid gap-3 ${compact ? "grid-cols-1 text-xs" : "grid-cols-2 md:grid-cols-4"}`}>
+      <div className={`grid gap-3 ${compact ? "grid-cols-1 text-xs" : "grid-cols-2 md:grid-cols-3"}`}>
         <div>
-          <div className="font-label text-[10px] uppercase tracking-wider text-outline">{locale === "en" ? "Run ID" : locale === "zh-Hans" ? "执行编号" : "執行編號"}</div>
-          <div className="break-all font-mono text-on-surface">{workflow.run.run_id}</div>
+          <div className="font-label text-[10px] uppercase tracking-wider text-outline">{locale === "en" ? "Chapter" : locale === "zh-Hans" ? "章节" : "章節"}</div>
+          <div className="text-on-surface">{locale === "en" ? `Chapter ${workflow.run.chapter_id}` : `第 ${workflow.run.chapter_id} 章`}</div>
         </div>
         <div>
           <div className="font-label text-[10px] uppercase tracking-wider text-outline">{locale === "en" ? "Current Step" : locale === "zh-Hans" ? "当前步骤" : "目前步驟"}</div>
@@ -81,59 +81,69 @@ export function WorkflowMonitor({ workflow, variant = "default" }: Props) {
         <div>
           <div className="font-label text-[10px] uppercase tracking-wider text-outline">{locale === "en" ? "Status" : locale === "zh-Hans" ? "状态" : "狀態"}</div>
           <div className="text-on-surface">{workflowRunStatusLabel(workflow.run.status)}</div>
-          {!compact ? (
-            <div className="text-xs text-on-surface-variant">
-              {locale === "en" ? "Internal: " : locale === "zh-Hans" ? "内部状态：" : "內部狀態："}
-              {workflowInternalStatusLabel(String(state.workflow_status ?? "-"))}
-            </div>
-          ) : null}
-        </div>
-        <div>
-          <div className="font-label text-[10px] uppercase tracking-wider text-outline">{locale === "en" ? "Chapter" : locale === "zh-Hans" ? "章节" : "章節"}</div>
-          <div className="text-on-surface">{workflow.run.chapter_id}</div>
         </div>
       </div>
       {!compact ? (
-        <div className="mt-4 flex flex-wrap gap-3 border-t border-outline-variant/10 pt-4 font-label text-xs text-on-surface-variant">
-          <span>{locale === "en" ? "POV Character" : locale === "zh-Hans" ? "视角角色" : "視角角色"}：{String(state.pov_character_id ?? "-")}</span>
-          <span>{locale === "en" ? "Epoch" : locale === "zh-Hans" ? "时间段" : "時間段"}：{String(state.active_epoch_id ?? "-")}</span>
-          <span>{locale === "en" ? "Target Anchor" : locale === "zh-Hans" ? "目标里程碑" : "目標里程碑"}：{String(state.target_anchor_id ?? "-")}</span>
-          <span>{locale === "en" ? "AI Freedom" : locale === "zh-Hans" ? "创作自由度" : "創作自由度"}：{String(state.ai_freedom_level ?? "—")}</span>
-          <span>{locale === "en" ? "Outline Binding" : locale === "zh-Hans" ? "大纲绑定" : "大綱綁定"}：{String(state.outline_binding_mode ?? "—")}</span>
-          <span>{locale === "en" ? "Reader Score" : locale === "zh-Hans" ? "阅读评分" : "閱讀評分"}：{String(state.last_reader_score ?? "-")}</span>
-          <span>{locale === "en" ? "Pause Reason" : locale === "zh-Hans" ? "暂停原因" : "暫停原因"}：{hitlReasonRaw ? hitlReasonTitle(hitlReasonRaw) : "—"}</span>
-          <span>{locale === "en" ? "Resume From" : locale === "zh-Hans" ? "接续位置" : "接續位置"}：{resumeDisplay(String(state.resume_from ?? ""))}</span>
-          {String(state.workflow_status ?? "") === "FAILED" ? (
-            <>
-              <span>
-                {t("workflow.monitor.failureType")}：{failureType || "ERROR"}
-              </span>
-              <span>
-                {t("workflow.monitor.timeoutTier")}：{timeoutBucket || "—"}
-              </span>
-              <span>
-                {t("workflow.monitor.dataCommit")}：{commitExecuted ? t("workflow.monitor.committedYes") : t("workflow.monitor.committedNo")}
-              </span>
-              <span>
-                {t("workflow.monitor.threadReset")}：{threadResetDone ? t("workflow.monitor.resetDone") : t("workflow.monitor.resetPending")}
-              </span>
-            </>
-          ) : null}
-        </div>
+        <details className="mt-4 rounded-lg border border-outline-variant/15 bg-surface-container-highest/30 px-3 py-2">
+          <summary className="cursor-pointer font-label text-xs font-semibold text-primary">
+            {locale === "en" ? "Technical details" : locale === "zh-Hans" ? "技术详情" : "技術詳情"}
+          </summary>
+          <div className="mt-3 flex flex-wrap gap-3 border-t border-outline-variant/10 pt-3 font-label text-xs text-on-surface-variant">
+            <span className="min-w-0 break-all">
+              {locale === "en" ? "Run ID" : locale === "zh-Hans" ? "执行编号" : "執行編號"}：
+              <span className="font-mono text-on-surface">{workflow.run.run_id}</span>
+            </span>
+            <span>
+              {locale === "en" ? "Engine status" : locale === "zh-Hans" ? "引擎状态" : "引擎狀態"}：
+              {workflowInternalStatusLabel(String(state.workflow_status ?? "-"))}
+            </span>
+            <span>{locale === "en" ? "Viewpoint" : locale === "zh-Hans" ? "叙事视角" : "敘事視角"}：{String(state.pov_character_id ?? "-")}</span>
+            <span>{locale === "en" ? "Timeframe" : locale === "zh-Hans" ? "叙事时段" : "敘事時段"}：{String(state.active_epoch_id ?? "-")}</span>
+            <span>
+              {locale === "en" ? "Focus milestone" : locale === "zh-Hans" ? "进行中里程碑" : "進行中里程碑"}：
+              {String(state.target_anchor_id ?? "-")}
+            </span>
+            <span>{locale === "en" ? "AI freedom" : locale === "zh-Hans" ? "创作自由度" : "創作自由度"}：{String(state.ai_freedom_level ?? "—")}</span>
+            <span>{locale === "en" ? "Outline binding" : locale === "zh-Hans" ? "大纲约束强度" : "大綱約束強度"}：{String(state.outline_binding_mode ?? "—")}</span>
+            <span>{locale === "en" ? "Reader score" : locale === "zh-Hans" ? "阅读评分" : "閱讀評分"}：{String(state.last_reader_score ?? "-")}</span>
+            <span>
+              {locale === "en" ? "Pause reason" : locale === "zh-Hans" ? "暂停原因" : "暫停原因"}：
+              {hitlReasonRaw ? hitlReasonTitle(hitlReasonRaw) : "—"}
+            </span>
+            <span>
+              {locale === "en" ? "Resume from" : locale === "zh-Hans" ? "接续位置" : "接續位置"}：
+              {resumeDisplay(String(state.resume_from ?? ""))}
+            </span>
+            {String(state.workflow_status ?? "") === "FAILED" ? (
+              <>
+                <span>
+                  {t("workflow.monitor.failureType")}：{failureType || "ERROR"}
+                </span>
+                <span>
+                  {t("workflow.monitor.timeoutTier")}：{timeoutBucket || "—"}
+                </span>
+                <span>
+                  {t("workflow.monitor.dataCommit")}：{commitExecuted ? t("workflow.monitor.committedYes") : t("workflow.monitor.committedNo")}
+                </span>
+                <span>
+                  {t("workflow.monitor.threadReset")}：{threadResetDone ? t("workflow.monitor.resetDone") : t("workflow.monitor.resetPending")}
+                </span>
+              </>
+            ) : null}
+          </div>
+        </details>
       ) : null}
       {!compact && directorBrief ? (
         <div className="mt-4 rounded-lg border border-outline-variant/15 bg-surface-container-highest/40 px-3 py-2">
           <p className="font-label text-[10px] uppercase tracking-wider text-outline">
-            {locale === "en" ? "Director Brief" : locale === "zh-Hans" ? "Director 状态简报" : "Director 狀態簡報"}
+            {locale === "en" ? "Chapter direction summary" : locale === "zh-Hans" ? "本章走向摘要" : "本章走向摘要"}
           </p>
           <p className="mt-1 whitespace-pre-wrap font-body text-xs text-on-surface">{directorBrief.slice(0, 1200)}{directorBrief.length > 1200 ? "…" : ""}</p>
         </div>
       ) : null}
       {!compact && planWarnings.length > 0 ? (
         <div className="mt-3 rounded-lg border border-secondary/20 bg-secondary/5 px-3 py-2">
-          <p className="font-label text-[10px] uppercase tracking-wider text-secondary">
-            {t("workflow.monitor.planWarningsLabel")} / plan_warnings
-          </p>
+          <p className="font-label text-[10px] uppercase tracking-wider text-secondary">{t("workflow.monitor.planWarningsLabel")}</p>
           <ul className="mt-1 list-inside list-disc font-body text-xs text-on-surface">
             {planWarnings.slice(0, 12).map((w, i) => (
               <li key={i}>{w}</li>
@@ -143,9 +153,7 @@ export function WorkflowMonitor({ workflow, variant = "default" }: Props) {
       ) : null}
       {!compact && conflictNotes.length > 0 ? (
         <div className="mt-3 rounded-lg border border-tertiary/25 bg-tertiary/5 px-3 py-2">
-          <p className="font-label text-[10px] uppercase tracking-wider text-tertiary">
-            {t("workflow.monitor.conflictNotesLabel")}（human_outline_conflict_notes）
-          </p>
+          <p className="font-label text-[10px] uppercase tracking-wider text-tertiary">{t("workflow.monitor.conflictNotesLabel")}</p>
           <ul className="mt-1 list-inside list-disc font-body text-xs text-on-surface">
             {conflictNotes.map((w, i) => (
               <li key={i}>{w}</li>

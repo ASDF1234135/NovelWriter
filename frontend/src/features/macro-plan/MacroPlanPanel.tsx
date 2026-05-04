@@ -1,6 +1,7 @@
 /** 世界觀與結構產出（欄位編輯）— 用語面向一般文字工作者 */
 
 import { useEffect, useMemo, useState } from "react";
+import { ConfirmModal } from "../../components/ConfirmModal";
 import type { Anchor, CastMember, MacroCompileData, MacroPlanPutBody, VolumePlan } from "../../types";
 import { putMacroPlan } from "../../api";
 import {
@@ -20,7 +21,6 @@ import { useI18n } from "../../i18n/useI18n";
 type Props = {
   macroData: MacroCompileData | null;
   storyId: string | null;
-  configurationLocked: boolean;
   onMacroDataUpdate: (next: MacroCompileData) => void;
   onBusy: (busy: boolean) => void;
   onError: (msg: string) => void;
@@ -144,13 +144,12 @@ function ReadonlyId({ label, value }: { label: string; value: string }) {
 export function MacroPlanPanel({
   macroData,
   storyId,
-  configurationLocked,
   onMacroDataUpdate,
   onBusy,
   onError,
 }: Props) {
   const { locale } = useI18n();
-  const canEdit = Boolean(storyId && !configurationLocked);
+  const canEdit = Boolean(storyId);
 
   const [tab, setTab] = useState<MacroTab>("bible");
   const [editSurface, setEditSurface] = useState<EditSurface>("off");
@@ -159,6 +158,13 @@ export function MacroPlanPanel({
   const [selectedEntityId, setSelectedEntityId] = useState<string | null>(null);
   const [anchorEdits, setAnchorEdits] = useState<Record<string, AnchorEdit>>({});
   const [inlineError, setInlineError] = useState("");
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    message: string;
+    danger?: boolean;
+    confirmLabel: string;
+    onConfirm: () => void;
+  } | null>(null);
 
   const displayMacro = draftMacro ?? macroData;
   const isDirtySession = isEditingSurface(editSurface);
@@ -194,16 +200,22 @@ export function MacroPlanPanel({
   function switchTab(next: MacroTab) {
     if (next === tab) return;
     if (isDirtySession && editSurface !== "off") {
-      const ok = window.confirm(
-        tr(
+      setConfirmDialog({
+        title: tr(locale, "未儲存的變更", "未保存的变更", "Unsaved changes"),
+        message: tr(
           locale,
           "尚未儲存的變更會被捨棄。確定要切換分頁嗎？",
           "尚未保存的变更会被舍弃。确定切换分页吗？",
           "Unsaved changes will be discarded. Switch tab anyway?",
         ),
-      );
-      if (!ok) return;
-      cancelEdit();
+        confirmLabel: tr(locale, "捨棄並切換", "舍弃并切换", "Discard & switch"),
+        onConfirm: () => {
+          setConfirmDialog(null);
+          cancelEdit();
+          setTab(next);
+        },
+      });
+      return;
     }
     setTab(next);
   }
@@ -480,10 +492,19 @@ export function MacroPlanPanel({
       window.alert(tr(locale, "仍有情節節點掛在此分卷上，請先刪除或改掛節點後再刪除分卷。", "仍有情节节点挂在此分卷上，请先处理后再删除分卷。", "This volume still has anchors. Reassign/remove them before deleting."));
       return;
     }
-    if (!window.confirm(tr(locale, "確定要刪除此分卷嗎？此動作無法復原。", "确定删除此分卷吗？此操作不可恢复。", "Delete this volume? This cannot be undone."))) return;
-    const next = (dm.volumes ?? []).filter((v) => v.volume_id !== volumeId);
-    setDraftMacro({ ...dm, volumes: next });
-    if (selectedEntityId === volumeId) setSelectedEntityId(next[0]?.volume_id ?? null);
+    setConfirmDialog({
+      title: tr(locale, "刪除分卷", "删除分卷", "Delete volume"),
+      message: tr(locale, "確定要刪除此分卷嗎？此動作無法復原。", "确定删除此分卷吗？此操作不可恢复。", "Delete this volume? This cannot be undone."),
+      danger: true,
+      confirmLabel: tr(locale, "刪除", "删除", "Delete"),
+      onConfirm: () => {
+        setConfirmDialog(null);
+        const next = (dm.volumes ?? []).filter((v) => v.volume_id !== volumeId);
+        setDraftMacro({ ...dm, volumes: next });
+        if (selectedEntityId === volumeId) setSelectedEntityId(next[0]?.volume_id ?? null);
+      },
+    });
+    return;
   }
 
   function deleteCastMember(nodeId: string) {
@@ -494,12 +515,20 @@ export function MacroPlanPanel({
       window.alert(tr(locale, "至少需要保留一位人物。", "至少需要保留一位人物。", "At least one character is required."));
       return;
     }
-    if (!window.confirm(tr(locale, "確定要刪除此人物嗎？", "确定删除此人物吗？", "Delete this character?"))) return;
-    const next = list.filter((c) => c.node_id !== nodeId);
-    let prot = dm.protagonist_character_id;
-    if (prot === nodeId) prot = next[0]?.node_id ?? "";
-    setDraftMacro({ ...dm, cast: next, protagonist_character_id: prot });
-    if (selectedEntityId === nodeId) setSelectedEntityId(next[0]?.node_id ?? null);
+    setConfirmDialog({
+      title: tr(locale, "刪除人物", "删除人物", "Delete character"),
+      message: tr(locale, "確定要刪除此人物嗎？", "确定删除此人物吗？", "Delete this character?"),
+      danger: true,
+      confirmLabel: tr(locale, "刪除", "删除", "Delete"),
+      onConfirm: () => {
+        setConfirmDialog(null);
+        const next = list.filter((c) => c.node_id !== nodeId);
+        let prot = dm.protagonist_character_id;
+        if (prot === nodeId) prot = next[0]?.node_id ?? "";
+        setDraftMacro({ ...dm, cast: next, protagonist_character_id: prot });
+        if (selectedEntityId === nodeId) setSelectedEntityId(next[0]?.node_id ?? null);
+      },
+    });
   }
 
   function addVolume() {
@@ -1196,6 +1225,19 @@ export function MacroPlanPanel({
           )}
         </div>
       ) : null}
+      <ConfirmModal
+        mount={typeof document !== "undefined" ? document.body : null}
+        open={confirmDialog != null}
+        title={confirmDialog?.title ?? ""}
+        message={confirmDialog?.message ?? ""}
+        danger={confirmDialog?.danger}
+        confirmLabel={confirmDialog?.confirmLabel ?? tr(locale, "確定", "确定", "OK")}
+        cancelLabel={tr(locale, "取消", "取消", "Cancel")}
+        onConfirm={() => {
+          confirmDialog?.onConfirm();
+        }}
+        onCancel={() => setConfirmDialog(null)}
+      />
     </section>
   );
 }

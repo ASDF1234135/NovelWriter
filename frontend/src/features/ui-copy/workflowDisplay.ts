@@ -16,11 +16,12 @@ const RUN_STATUS_LABELS: Record<string, string> = {
   FAILED: pick("失敗", "失败", "Failed"),
 };
 
-/** 後端 WorkflowRun / 章節工作狀態顯示 */
+/** 後端 WorkflowRun / 章節工作狀態顯示（相容大小寫，例如 step log 的 completed） */
 export function workflowRunStatusLabel(status: string): string {
   const s = status.trim();
   if (!s) return "—";
-  return RUN_STATUS_LABELS[s] ?? pick(`狀態：${s}`, `状态：${s}`, `Status: ${s}`);
+  const key = s.toUpperCase();
+  return RUN_STATUS_LABELS[key] ?? pick(`狀態：${s}`, `状态：${s}`, `Status: ${s}`);
 }
 
 /** 與 workflowRunStatusLabel 相同語意，內部狀態欄位用 */
@@ -30,7 +31,6 @@ export function workflowInternalStatusLabel(status: string): string {
 
 const AGENT_EXTRA: Record<string, string> = {
   hitl: pick("等待您協助", "等待你协助", "Waiting for your input"),
-  chapter_summarizer: pick("整理章節摘要", "整理章节摘要", "Summarizing chapter"),
   end: pick("結束", "结束", "End"),
   END: pick("結束", "结束", "End"),
 };
@@ -80,9 +80,14 @@ const ROUTE_DECISION_LABELS: Record<string, string> = {
   planner: pick("回到劇情規劃", "回到剧情规划", "Back to planning"),
   author: pick("回到撰寫", "回到撰写", "Back to writing"),
   reader: pick("閱讀檢查", "阅读检查", "Reader check"),
-  extraction_gate: pick("設定歸檔", "设定归档", "Extraction gate"),
+  extraction_gate: pick("章末設定整理", "章末设定整理", "Chapter settings wrap-up"),
+  copyeditor: pick("文稿潤飾", "文稿润饰", "Line editing"),
+  output_language_gate: pick("語言一致檢查", "语言一致检查", "Language check"),
+  chapter_summarizer: pick("章節摘要整理", "章节摘要整理", "Chapter summary"),
+  profile_expander: pick("角色資料補齊", "角色资料补齐", "Character profiles"),
+  commit_to_databases: pick("寫入作品庫", "写入作品库", "Saving to library"),
   resolve_subplots: pick("副線收尾", "副线收尾", "Resolve subplot"),
-  state_updater: pick("完稿更新", "完稿更新", "State update"),
+  state_updater: pick("章節進度儲存", "章节进度保存", "Preparing save"),
   graph_rag: pick("背景整理", "背景整理", "Context prep"),
   draft_supervisor: pick("內文審核", "正文审核", "Draft review"),
   plan_supervisor: pick("大綱審核", "大纲审核", "Plan review"),

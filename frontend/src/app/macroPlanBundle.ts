@@ -5,7 +5,7 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-const STORYLINE_TYPES = new Set<string>(["MAIN", "S_TIER", "A_TIER", "B_TIER"]);
+const STORYLINE_TYPES = new Set<string>(["MAIN", "USER_EDIT", "S_TIER", "A_TIER", "B_TIER"]);
 
 function parseStorylinesFromCandidate(candidate: Record<string, unknown>): NonNullable<MacroPlanPutBody["storylines"]> {
   const raw = candidate.storylines;

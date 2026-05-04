@@ -46,6 +46,31 @@ describe("splitBibleForForm", () => {
     });
     expect(generalWorldLore).toBe("## Custom\n\nbody");
   });
+
+  it("omits compile/runtime debug keys from extra rows (top-level and nested extra)", () => {
+    const { extraRows } = splitBibleForForm({
+      genre: "G",
+      tags: ["ok"],
+      branch_count_final: 3,
+      llm_weave_debug: { x: 1 },
+      resolved_anchors: ["a1"],
+      anchor_candidates: ["a2"],
+      extra: {
+        branch_count_final: 9,
+        llm_weave_debug: {},
+        resolved_anchors: [],
+        anchor_candidates: [],
+        note: "visible",
+      },
+    });
+    const keys = extraRows.map((r) => r.key);
+    expect(keys).toContain("tags");
+    expect(keys).toContain("note");
+    expect(keys.some((k) => k === "branch_count_final")).toBe(false);
+    expect(keys.some((k) => k === "llm_weave_debug")).toBe(false);
+    expect(keys.some((k) => k === "resolved_anchors")).toBe(false);
+    expect(keys.some((k) => k === "anchor_candidates")).toBe(false);
+  });
 });
 
 describe("buildExtraObject", () => {

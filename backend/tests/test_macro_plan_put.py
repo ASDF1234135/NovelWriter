@@ -26,7 +26,6 @@ from app.services.llm import MockLLMClient
 from app.services.vector_store import InMemoryVectorStore
 from app.services.workflow.service import (
     MacroPlanValidationError,
-    StoryConfigurationLockedError,
     WorkflowService,
     _unachieved_from_anchor_nodes,
 )
@@ -69,7 +68,7 @@ def test_put_macro_plan_edits_volume_title(tmp_path) -> None:
     assert out["volumes"][0]["title"] == "手改卷名"
 
 
-def test_put_macro_plan_locked_after_workflow_run(tmp_path) -> None:
+def test_put_macro_plan_allowed_after_workflow_run(tmp_path) -> None:
     svc = _service(str(tmp_path / "lock.sqlite3"))
     sid = svc.create_story(
         StoryInput(title="T", premise="p", bible={}, target_total_words=30_000),
@@ -77,8 +76,8 @@ def test_put_macro_plan_locked_after_workflow_run(tmp_path) -> None:
     macro = svc.macro_compile(sid)
     body = _macro_to_put(macro)
     svc.workflow_repository.create_run(sid, 1, {"story_id": sid, "chapter_id": 1})
-    with pytest.raises(StoryConfigurationLockedError):
-        svc.put_macro_plan(sid, body)
+    out = svc.put_macro_plan(sid, body)
+    assert out["story_id"] == sid
 
 
 def test_put_macro_plan_validates_anchor_volume(tmp_path) -> None:

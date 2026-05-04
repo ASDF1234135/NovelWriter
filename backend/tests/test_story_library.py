@@ -155,7 +155,7 @@ def test_api_get_story_detail_and_configuration_locked(tmp_path) -> None:
         service.workflow_repository.create_run(sid, 1, {"story_id": sid, "chapter_id": 1})
         r2 = client.get(f"/api/stories/{sid}")
         assert r2.status_code == 200
-        assert r2.json()["configuration_locked"] is True
+        assert r2.json()["configuration_locked"] is False
 
         r404 = client.get("/api/stories/story_missing_xyz")
         assert r404.status_code == 404
@@ -243,7 +243,7 @@ def test_delete_story_missing_raises(tmp_path) -> None:
         service.delete_story("story_does_not_exist")
 
 
-def test_api_patch_story_before_run_then_409_after_workflow(tmp_path) -> None:
+def test_api_patch_story_before_and_after_workflow_run(tmp_path) -> None:
     from fastapi.testclient import TestClient
 
     from app.dependencies import get_workflow_service
@@ -268,7 +268,8 @@ def test_api_patch_story_before_run_then_409_after_workflow(tmp_path) -> None:
         assert service.story_repository.get_story(sid)["premise"] == "p2"
 
         service.workflow_repository.create_run(sid, 1, {"story_id": sid, "chapter_id": 1})
-        r409 = client.patch(f"/api/stories/{sid}", json={"premise": "blocked"})
-        assert r409.status_code == 409
+        r_after_run = client.patch(f"/api/stories/{sid}", json={"premise": "after_run"})
+        assert r_after_run.status_code == 200
+        assert r_after_run.json()["premise"] == "after_run"
     finally:
         app.dependency_overrides.clear()

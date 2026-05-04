@@ -93,7 +93,7 @@ export type MacroPlanPutBody = {
   }>;
   storylines?: Array<{
     id: string;
-    type: "MAIN" | "S_TIER" | "A_TIER" | "B_TIER";
+    type: "MAIN" | "USER_EDIT" | "S_TIER" | "A_TIER" | "B_TIER";
     title: string;
     overall_goal: string;
     involved_entities: string[];
@@ -139,7 +139,7 @@ export type MacroCompileData = {
   protagonist_character_id?: string;
   storylines?: Array<{
     id: string;
-    type: "MAIN" | "S_TIER" | "A_TIER" | "B_TIER";
+    type: "MAIN" | "USER_EDIT" | "S_TIER" | "A_TIER" | "B_TIER";
     title: string;
     overall_goal: string;
     involved_entities: string[];

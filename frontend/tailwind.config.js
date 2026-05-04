@@ -52,6 +52,10 @@ export default {
         "inverse-surface": "#dae2fd",
         "inverse-on-surface": "#283044",
         "surface-tint": "#c0c1ff",
+        "semantic-success": "#5eead4",
+        "semantic-warning": "#fbbf24",
+        "semantic-danger": "#fb7185",
+        "semantic-info": "#93c5fd",
       },
       fontFamily: {
         headline: ["Manrope", "system-ui", "sans-serif"],

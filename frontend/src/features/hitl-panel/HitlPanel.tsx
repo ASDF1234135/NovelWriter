@@ -28,6 +28,7 @@ import {
   getRemapExpectedNodeType,
   type GraphNodeLite,
 } from "./hitlNarrative";
+import { HitlFlowStrip } from "./HitlFlowStrip";
 
 export { HITL_REASON } from "./hitlCopy";
 
@@ -379,9 +380,11 @@ export function HitlPanel({
   const decisionMode = String(workflow?.run.hitl_decision_mode ?? "");
 
   return (
-    <section className={shell}>
+    <section className={shell} aria-labelledby="hitl-panel-heading">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-        <h2 className="font-headline text-sm font-bold uppercase tracking-wider text-tertiary">{t("hitl.title")}</h2>
+        <h2 id="hitl-panel-heading" className="font-headline text-sm font-bold uppercase tracking-wider text-tertiary">
+          {t("hitl.title")}
+        </h2>
         {hitlActive ? (
           <button
             type="button"
@@ -406,6 +409,7 @@ export function HitlPanel({
           t("hitl.noPending")
         )}
       </p>
+      {hitlActive ? <HitlFlowStrip reason={reason} resumeFrom={resumeHint} compact={compact} /> : null}
       {hitlActive ? (
         <div
           className="mb-3 inline-flex rounded-lg border border-outline-variant/25 bg-surface-container-highest/30 p-1"

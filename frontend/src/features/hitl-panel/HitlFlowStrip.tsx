@@ -1,4 +1,5 @@
 import { FLOW_STEPS, getStuckFlowStepIndex } from "./hitlCopy";
+import { useI18n } from "../../i18n/useI18n";
 
 type Props = {
   reason: string;
@@ -6,39 +7,57 @@ type Props = {
   compact?: boolean;
 };
 
+const FULL_FLOW: { labelKey: string; indices: number[] }[] = [
+  { labelKey: "hitl.flowStrip.merged.chapterDirection", indices: [0] },
+  { labelKey: "hitl.flowStrip.merged.background", indices: [1] },
+  { labelKey: "hitl.flowStrip.merged.planAndReview", indices: [2, 3, 4] },
+  { labelKey: "hitl.flowStrip.merged.writeAndEdit", indices: [5, 6] },
+  { labelKey: "hitl.flowStrip.merged.reader", indices: [7] },
+  { labelKey: "hitl.flowStrip.merged.wrapUp", indices: [8, 9, 10, 11] },
+  { labelKey: "hitl.flowStrip.merged.confirmSave", indices: [12, 13, 14, 15] },
+];
+
+const COMPACT_FLOW: { labelKey: string; indices: number[] }[] = [
+  { labelKey: "hitl.flowStrip.compact.planning", indices: [0, 1, 2, 3, 4] },
+  { labelKey: "hitl.flowStrip.compact.writing", indices: [5, 6, 7] },
+  { labelKey: "hitl.flowStrip.compact.finish", indices: [8, 9, 10, 11, 12, 13, 14, 15] },
+];
+
 export function HitlFlowStrip({ reason, resumeFrom, compact }: Props) {
+  const { t } = useI18n();
   const stuckIndex = getStuckFlowStepIndex(reason, resumeFrom);
   const steps = compact ? COMPACT_FLOW : FULL_FLOW;
 
   if (compact) {
     const cur = steps.find((s) => s.indices.includes(stuckIndex));
-    const label = cur?.userLabel ?? FLOW_STEPS[stuckIndex]?.userLabel ?? "流程中";
+    const stepId = FLOW_STEPS[stuckIndex]?.id;
+    const fromStepKey = stepId ? `hitl.flowStep.${stepId}` : "";
+    const label = cur
+      ? t(cur.labelKey)
+      : fromStepKey
+        ? t(fromStepKey)
+        : t("hitl.flowStrip.inPipeline");
     return (
-      <div className="rounded-lg border border-outline-variant/15 bg-surface-container-highest/30 px-3 py-2">
-        <p className="font-label text-[10px] uppercase tracking-wider text-on-surface-variant">目前停在哪一步</p>
+      <div className="mb-3 rounded-lg border border-outline-variant/15 bg-surface-container-highest/30 px-3 py-2">
+        <p className="font-label text-[10px] uppercase tracking-wider text-on-surface-variant">{t("hitl.flowStrip.pausedAt")}</p>
         <p className="mt-0.5 font-body text-sm font-medium text-tertiary">{label}</p>
-        <p className="mt-1 font-label text-[10px] text-on-surface-variant">
-          完整步驟圖請在「主控台」檢視暫停面板。
-        </p>
+        <p className="mt-1 font-label text-[10px] text-on-surface-variant">{t("hitl.flowStrip.fullPipelineHint")}</p>
       </div>
     );
   }
 
   return (
-    <div className="overflow-x-auto pb-1">
+    <div className="mb-3 overflow-x-auto pb-1">
       <ol className="flex min-w-max items-stretch gap-0">
         {steps.map((step, i) => {
           const isStuck = step.indices.includes(stuckIndex);
           const isPast = Math.min(...step.indices) < stuckIndex;
+          const label = t(step.labelKey);
           return (
-            <li key={step.userLabel} className="flex items-stretch">
+            <li key={step.labelKey} className="flex items-stretch">
               <div
                 className={`flex max-w-[7.5rem] flex-col items-center px-1 text-center ${
-                  isStuck
-                    ? "text-tertiary"
-                    : isPast
-                      ? "text-on-surface-variant"
-                      : "text-on-surface-variant/70"
+                  isStuck ? "text-tertiary" : isPast ? "text-on-surface-variant" : "text-on-surface-variant/70"
                 }`}
               >
                 <span
@@ -53,12 +72,12 @@ export function HitlFlowStrip({ reason, resumeFrom, compact }: Props) {
                 >
                   {i + 1}
                 </span>
-                <span className="mt-1.5 font-label text-[10px] leading-tight">{step.userLabel}</span>
+                <span className="mt-1.5 font-label text-[10px] leading-tight">{label}</span>
               </div>
               {i < steps.length - 1 ? (
                 <div
                   className={`mt-4 h-px w-3 shrink-0 self-start ${
-                    Math.min(...steps[i + 1].indices) <= stuckIndex ? "bg-primary/30" : "bg-outline-variant/20"
+                    Math.min(...(steps[i + 1]?.indices ?? [0])) <= stuckIndex ? "bg-primary/30" : "bg-outline-variant/20"
                   }`}
                   aria-hidden
                 />
@@ -70,20 +89,3 @@ export function HitlFlowStrip({ reason, resumeFrom, compact }: Props) {
     </div>
   );
 }
-
-/** Collapsed labels for default horizontal strip */
-const FULL_FLOW: { userLabel: string; indices: number[] }[] = [
-  { userLabel: "章節方向", indices: [0] },
-  { userLabel: "背景整理", indices: [1] },
-  { userLabel: "規劃與審核", indices: [2, 3] },
-  { userLabel: "撰寫與審稿", indices: [4, 5] },
-  { userLabel: "閱讀檢查", indices: [6] },
-  { userLabel: "設定歸檔", indices: [7] },
-  { userLabel: "副線與完稿", indices: [8, 9] },
-];
-
-const COMPACT_FLOW: { userLabel: string; indices: number[] }[] = [
-  { userLabel: "規劃階段", indices: [0, 1, 2, 3] },
-  { userLabel: "撰寫階段", indices: [4, 5, 6] },
-  { userLabel: "收尾階段", indices: [7, 8, 9] },
-];

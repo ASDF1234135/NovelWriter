@@ -666,6 +666,9 @@ class AnchorService:
             if not linked:
                 dropped.append(f"{s.id}:no_anchor_nodes")
                 continue
+            if s.type == StorylineTier.USER_EDIT:
+                keep_storyline_ids.add(s.id)
+                continue
             if s.type == StorylineTier.S_TIER:
                 ok = True
                 for vid in vol_ids:
@@ -712,7 +715,8 @@ class AnchorService:
     def _weave_minimum_tier_counts(storylines: list[Storyline]) -> bool:
         tiers = {StorylineTier.MAIN: 0, StorylineTier.S_TIER: 0, StorylineTier.A_TIER: 0, StorylineTier.B_TIER: 0}
         for s in storylines:
-            tiers[s.type] = tiers.get(s.type, 0) + 1
+            if s.type in tiers:
+                tiers[s.type] += 1
         return (
             tiers[StorylineTier.MAIN] >= 1
             and tiers[StorylineTier.S_TIER] >= 1

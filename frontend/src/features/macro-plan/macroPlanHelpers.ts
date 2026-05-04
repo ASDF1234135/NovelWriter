@@ -5,6 +5,14 @@ export const BIBLE_ALIAS_KEYS = new Set(["story_genre", "story_tone"]);
 /** Keys duplicated in primary bible fields — skip when merging from `extra` to avoid dup rows. */
 export const BIBLE_OPTIONAL_TOP_KEYS = new Set<string>(["theme", "narrative_pov", "writing_style"]);
 
+/** Compile/runtime bible keys — omit from macro panel "Extra Notes" (read + edit). */
+export const BIBLE_MACRO_PANEL_SUPPRESSED_KEYS = new Set<string>([
+  "branch_count_final",
+  "llm_weave_debug",
+  "resolved_anchors",
+  "anchor_candidates",
+]);
+
 export const BIBLE_RESERVED_TOP_KEYS = new Set<string>([
   "genre",
   "story_genre",
@@ -22,6 +30,7 @@ export const BIBLE_RESERVED_TOP_KEYS = new Set<string>([
   "active_b_stories",
   "storylines",
   "anchor_nodes",
+  ...BIBLE_MACRO_PANEL_SUPPRESSED_KEYS,
 ]);
 
 export type ExtraRow = { key: string; value: string; isList: boolean };
@@ -102,6 +111,7 @@ export function splitBibleForForm(bible: Record<string, unknown>): LegacySplit {
   if (isObjectRecord(extraObj)) {
     for (const [k, v] of Object.entries(extraObj)) {
       if (BIBLE_OPTIONAL_TOP_KEYS.has(k)) continue;
+      if (BIBLE_MACRO_PANEL_SUPPRESSED_KEYS.has(k)) continue;
       const ser = serializeExtraValue(v);
       extraRows.push({ key: k, value: ser.text, isList: ser.isList });
     }
