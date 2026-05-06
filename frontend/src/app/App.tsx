@@ -510,7 +510,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [storyId, nextGeneratableChapterId]);
+  }, [storyId, nextGeneratableChapterId, chapters]);
 
   useEffect(() => {
     if (!storyId || nextGeneratableChapterId < 1) {
@@ -1006,8 +1006,6 @@ export default function App() {
         } catch {
           /* missing */
         }
-        const probe = await fetchChapterIfExists(sid, resolvedChapterId);
-        setChapterAlreadyCompleted(probe?.status === "completed");
       }
     } catch (err) {
       reportApiError(err, "errors.finalizeWorkflowFailed");

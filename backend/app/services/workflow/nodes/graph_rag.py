@@ -22,6 +22,93 @@ def _tier_truncate_limits(tier: int) -> tuple[int, int]:
     return 1800, 1200
 
 
+def _build_aligned_chunk_context(graph_snapshot, vector_hits: list, *, max_chars: int = 5000) -> str:
+    """
+    Build aligned chunk context with required fallback semantics:
+    - If hit.chunk_id aligns to graph event/edge chunk_ids -> group by event_id:
+      1 event summary + multiple supporting text chunks
+    - If cannot align -> keep raw text as background ambience (never drop)
+    """
+    # Index edges by chunk_ids for quick lookup.
+    chunk_to_edges: dict[str, list] = {}
+    for e in getattr(graph_snapshot, "edges", []) or []:
+        attrs = getattr(e, "attributes", None) or {}
+        chunk_ids = attrs.get("chunk_ids") or []
+        if isinstance(chunk_ids, str):
+            chunk_ids = [chunk_ids]
+        if not isinstance(chunk_ids, list):
+            continue
+        for cid in chunk_ids:
+            cid_s = str(cid).strip()
+            if cid_s:
+                chunk_to_edges.setdefault(cid_s, []).append(e)
+
+    # Index event nodes by chunk_ids stored on node metadata/properties (tolerate absence).
+    chunk_to_events: dict[str, list] = {}
+    for n in getattr(graph_snapshot, "nodes", []) or []:
+        if getattr(n, "node_type", None) is None:
+            continue
+        if str(getattr(n, "node_type", "")) != "NodeType.EVENT" and str(getattr(n, "node_type", "")) != "EVENT":
+            continue
+        chunk_ids = getattr(n, "chunk_ids", None) or []
+        if isinstance(chunk_ids, str):
+            chunk_ids = [chunk_ids]
+        if isinstance(chunk_ids, list):
+            for cid in chunk_ids:
+                cid_s = str(cid).strip()
+                if cid_s:
+                    chunk_to_events.setdefault(cid_s, []).append(n)
+
+    grouped: dict[str, dict[str, object]] = {}
+    ambience: list[str] = []
+    for hit in vector_hits:
+        meta = getattr(hit, "metadata", {}) or {}
+        cid = str(meta.get("chunk_id") or "").strip()
+        text = str(getattr(hit, "text_chunk", "") or "").strip()
+        if not text:
+            continue
+        aligned_events = chunk_to_events.get(cid, []) if cid else []
+        aligned_edges = chunk_to_edges.get(cid, []) if cid else []
+        if aligned_events:
+            for ev in aligned_events:
+                ev_id = str(getattr(ev, "node_id", "") or "").strip() or "event_unknown"
+                entry = grouped.setdefault(ev_id, {"event": ev, "texts": []})
+                entry["texts"].append(text)
+        elif aligned_edges:
+            # No event node alignment; treat as edge-triggered context.
+            # Group under a synthetic key so we don't drop it.
+            key = f"edge:{cid or 'unknown'}"
+            entry = grouped.setdefault(key, {"event": None, "texts": [], "edges": aligned_edges})
+            entry["texts"].append(text)
+        else:
+            ambience.append(text)
+
+    lines: list[str] = []
+    if grouped:
+        lines.append("【Aligned Evidence Chunks】")
+        for key, payload in list(grouped.items())[:10]:
+            ev = payload.get("event")
+            if ev is not None:
+                ev_id = str(getattr(ev, "node_id", "") or "").strip() or key
+                ev_name = str(getattr(ev, "canonical_name", "") or "").strip()
+                header = f"- event_id={ev_id}"
+                if ev_name:
+                    header += f" | {ev_name}"
+                lines.append(header)
+            else:
+                lines.append(f"- {key}")
+            texts = payload.get("texts") or []
+            for t in texts[:4]:
+                lines.append(f"  - {t[:400]}")
+    if ambience:
+        lines.append("")
+        lines.append("【背景語意/氛圍 (Unaligned but retained)】")
+        for t in ambience[:8]:
+            lines.append(f"- {t[:400]}")
+    out = "\n".join(lines).strip()
+    return out if len(out) <= max_chars else out[: max_chars - 1] + "…"
+
+
 def run_graph_rag(state: dict, context: WorkflowContext) -> dict:
     story = context.story_repository.get_story(state["story_id"])
     start_tier = int(state.get("graph_rag_context_tier", 2) or 2)
@@ -49,6 +136,7 @@ def run_graph_rag(state: dict, context: WorkflowContext) -> dict:
             )
             graph_snapshot = context.graph_store.query_context(request)
         vector_hits = context.vector_store.search(state["story_id"], state["narrative_directive"])
+        aligned_chunk_context = _build_aligned_chunk_context(graph_snapshot, vector_hits, max_chars=5000)
         recent_chapters = context.story_repository.list_recent_chapters_with_content(
             state["story_id"],
             state["chapter_id"],
@@ -128,6 +216,7 @@ def run_graph_rag(state: dict, context: WorkflowContext) -> dict:
             len(bible_context)
             + len(graph_context)
             + len(vector_context)
+            + len(aligned_chunk_context)
             + len(continuity.get("previous_chapter_summary") or "")
             + len(continuity.get("recent_chapter_context") or "")
             + len(local_enforced_rules_context)
@@ -137,6 +226,7 @@ def run_graph_rag(state: dict, context: WorkflowContext) -> dict:
             "bible_context": bible_context,
             "graph_context": graph_context,
             "vector_context": vector_context,
+            "chunk_context": aligned_chunk_context,
             "local_enforced_rules_context": local_enforced_rules_context,
             "graph_rag_context_tier": tier,
             "context_overflow_char_estimate": total,

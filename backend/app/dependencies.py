@@ -7,6 +7,7 @@ from app.repositories.sqlite.story_repository import StoryRepository
 from app.repositories.sqlite.workflow_repository import WorkflowRepository
 from app.services.anchor_service import AnchorService
 from app.services.bible_service import BibleService
+from app.services.graph_rag_service import GraphRAGService
 from app.services.graph_store import GraphStore, InMemoryGraphStore, Neo4jGraphStore
 from app.services.llm import EmbeddingClient, LLMClient, MockLLMClient, OpenAICompatibleEmbeddingClient, OpenAICompatibleLLMClient
 from app.services.vector_store import DeterministicEmbeddingClient, InMemoryVectorStore, QdrantVectorStore, VectorStore
@@ -121,4 +122,13 @@ def get_workflow_service() -> WorkflowService:
         graph_store=get_graph_store(),
         vector_store=get_vector_store(),
         llm_client=get_llm_client(),
+    )
+
+
+@lru_cache
+def get_graph_rag_service() -> GraphRAGService:
+    return GraphRAGService(
+        graph_store=get_graph_store(),
+        vector_store=get_vector_store(),
+        llm=get_llm_client(),
     )

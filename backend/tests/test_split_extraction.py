@@ -12,6 +12,7 @@ from app.domain.schema import (
     ChapterMemoryExtractionOutput,
     EntityExtractionOutput,
     EventOutline,
+    ExtractedEntity,
     ExtractedEntityCandidate,
     ExtractedRelation,
     GraphQueryRequest,
@@ -217,13 +218,22 @@ def test_relation_extractor_batches_canonical_entities_with_small_batch_size(mon
             if profile.agent_name == "entity_extractor":
                 ents = [
                     ExtractedEntityCandidate(
-                        node_type=NodeType.CHARACTER,
-                        canonical_name=f"Char{i}",
+                        node_type=NodeType.EVENT,
+                        canonical_name="多人同行",
                         aliases=[],
                         summary="",
-                        suggested_node_id="",
-                    )
-                    for i in range(5)
+                        suggested_node_id="evt_01",
+                    ),
+                    *[
+                        ExtractedEntityCandidate(
+                            node_type=NodeType.CHARACTER,
+                            canonical_name=f"Char{i}",
+                            aliases=[],
+                            summary="",
+                            suggested_node_id="",
+                        )
+                        for i in range(5)
+                    ],
                 ]
                 out = EntityExtractionOutput(entities=ents)
                 return response_model.model_validate(out.model_dump(mode="json")), LLMResult(
@@ -270,13 +280,15 @@ def test_relation_extractor_batches_canonical_entities_with_small_batch_size(mon
 
     client = ctx.llm_client
     assert isinstance(client, MultiEntityCountingFake)
-    assert client.relation_calls == 3
+    # Phase1 batches (3) + Phase2 (1) = 4 relation calls
+    assert client.relation_calls == 4
     assert diag is not None
     rel_step = diag["steps"]["relation_extractor"]
     assert rel_step["batch_count"] == 3
     assert rel_step["batched"] is True
-    assert len(rel_step["batches"]) == 3
-    assert len(output.entities) == 5
+    # 3 Phase1 batches + 1 Phase2 call record
+    assert len(rel_step["batches"]) == 4
+    assert len(output.entities) == 6
     # Same relation from each batch → deduped to one
     assert len(output.relations) == 1
 
@@ -303,7 +315,10 @@ def test_validation_gate_rejects_unbacked_caused_between_ground_truth_events() -
         ),
     ]
     output = ChapterExtractionOutput(
-        entities=[],
+        entities=[
+            ExtractedEntity(node_id="event_ch1_01", node_type=NodeType.EVENT, canonical_name="a", summary="A"),
+            ExtractedEntity(node_id="event_ch1_02", node_type=NodeType.EVENT, canonical_name="b", summary="B"),
+        ],
         relations=[
             ExtractedRelation(
                 source_node_id="event_ch1_01",
@@ -340,7 +355,10 @@ def test_validation_gate_allows_caused_when_ai_invention_involved() -> None:
         ),
     ]
     output = ChapterExtractionOutput(
-        entities=[],
+        entities=[
+            ExtractedEntity(node_id="event_ch1_01", node_type=NodeType.EVENT, canonical_name="a", summary="A"),
+            ExtractedEntity(node_id="event_ch1_02", node_type=NodeType.EVENT, canonical_name="b", summary="B"),
+        ],
         relations=[
             ExtractedRelation(
                 source_node_id="event_ch1_01",

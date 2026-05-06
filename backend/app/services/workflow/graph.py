@@ -37,10 +37,13 @@ from app.services.workflow.nodes.profile_expander import run_profile_expander
 from app.services.workflow.nodes.reader import run_reader
 from app.services.workflow.nodes.state_updater import run_state_updater
 from app.services.workflow.recorder import WorkflowRecorder, elapsed_ms, timed
+from app.services.workflow.chunking import build_chapter_chunks, extract_prev_tail
 
 
 LLM_NODE_TIMEOUT_MS = 10 * 60 * 1000
 LOGIC_NODE_TIMEOUT_MS = 3 * 60 * 1000
+# extraction_gate runs multi-phase LLM extraction; allow longer than default logic nodes.
+EXTRACTION_GATE_TIMEOUT_MS = 6 * 60 * 1000
 
 
 class WorkflowNodeTimeoutError(TimeoutError):
@@ -53,6 +56,8 @@ class WorkflowNodeTimeoutError(TimeoutError):
 def _timeout_ms_for_node(node_name: str) -> int:
     if node_name in {"director", "planner", "author", "reader"}:
         return LLM_NODE_TIMEOUT_MS
+    if node_name == "extraction_gate":
+        return EXTRACTION_GATE_TIMEOUT_MS
     return LOGIC_NODE_TIMEOUT_MS
 
 
@@ -616,6 +621,7 @@ def build_chapter_graph(context: WorkflowContext):
             best_score = output["literary_score"]
             best_content = state["current_draft"]
         if output["is_approved"]:
+            # Keep external route name stable for callers/tests, but internally we route to chunker.
             route = "extraction_gate"
             current_draft = state["current_draft"]
         elif draft_loop_retry_count > state.get("draft_loop_retry_limit", 3):
@@ -644,7 +650,7 @@ def build_chapter_graph(context: WorkflowContext):
             "last_reader_score": output["literary_score"],
             "last_agent": "reader",
             "reader_route": route,
-            "resume_from": "author" if route == "author" else "extraction_gate",
+            "resume_from": "author" if route == "author" else "chunker",
         }
         recorder.record_and_update_run(
             "reader",
@@ -653,6 +659,87 @@ def build_chapter_graph(context: WorkflowContext):
             {**state, **merged},
             latency_ms=elapsed_ms(start),
             route_decision=route,
+        )
+        return merged
+
+    def chunker_node(state: AgentWorkflowState) -> dict:
+        """
+        Build chunk list for this chapter.
+        Includes prev_tail chunks for extraction alignment (NOT for Qdrant embedding).
+        """
+        start = timed()
+        body = str(state.get("best_draft_content") or state.get("current_draft") or "")
+        prev_row = None
+        if int(state["chapter_id"]) > 1:
+            prev_row = context.story_repository.get_chapter(state["story_id"], int(state["chapter_id"]) - 1)
+        prev_content = str(prev_row.get("content") or "") if isinstance(prev_row, dict) else ""
+        prev_tail = extract_prev_tail(prev_content, output_language=context.output_language)
+        chunks = build_chapter_chunks(
+            story_id=state["story_id"],
+            chapter_id=int(state["chapter_id"]),
+            current_body=body,
+            prev_tail=prev_tail,
+        )
+        merged = {
+            "chapter_chunks": [c.__dict__ for c in chunks],
+            "last_agent": "chunker",
+            "resume_from": "vectorize_chunks",
+        }
+        recorder.record_and_update_run(
+            "chunker",
+            dict(state),
+            merged,
+            {**state, **merged},
+            latency_ms=elapsed_ms(start),
+        )
+        return merged
+
+    def vectorize_chunks_node(state: AgentWorkflowState) -> dict:
+        """
+        Vectorize only current_body chunks into Qdrant.
+        prev_tail chunks are excluded by design.
+        """
+        start = timed()
+        vector_docs = []
+        # Build VectorDocument-like payloads without importing VectorDocument here to avoid import cycles.
+        for raw in list(state.get("chapter_chunks") or []):
+            if not isinstance(raw, dict):
+                continue
+            if str(raw.get("source_role") or "") != "current_body":
+                continue
+            text_chunk = str(raw.get("text_chunk") or "")
+            chunk_id = str(raw.get("chunk_id") or "").strip()
+            if not text_chunk.strip() or not chunk_id:
+                continue
+            vector_docs.append(
+                {
+                    "text_chunk": text_chunk,
+                    "metadata": {
+                        "chunk_id": chunk_id,
+                        "chunk_index": int(raw.get("chunk_index") or 0),
+                        "chapter_id": int(state["chapter_id"]),
+                        "epoch_id": str(state.get("active_epoch_id") or ""),
+                        "source_role": "current_body",
+                    },
+                }
+            )
+        # Use the vector store protocol directly (expects VectorDocument objects).
+        from app.domain.schema import VectorDocument
+
+        context.vector_store.add_documents(
+            state["story_id"],
+            [VectorDocument.model_validate(d) for d in vector_docs],
+        )
+        merged = {
+            "last_agent": "vectorize_chunks",
+            "resume_from": "extraction_gate",
+        }
+        recorder.record_and_update_run(
+            "vectorize_chunks",
+            dict(state),
+            merged,
+            {**state, **merged},
+            latency_ms=elapsed_ms(start),
         )
         return merged
 
@@ -1013,6 +1100,8 @@ def build_chapter_graph(context: WorkflowContext):
     graph.add_node("author", _timeout_node("author", author_node))
     graph.add_node("draft_supervisor", _timeout_node("draft_supervisor", draft_supervisor_node))
     graph.add_node("reader", _timeout_node("reader", reader_node))
+    graph.add_node("chunker", _timeout_node("chunker", chunker_node))
+    graph.add_node("vectorize_chunks", _timeout_node("vectorize_chunks", vectorize_chunks_node))
     graph.add_node("extraction_gate", _timeout_node("extraction_gate", extraction_gate_node))
     graph.add_node("copyeditor", _timeout_node("copyeditor", copyeditor_node))
     graph.add_node("output_language_gate", _timeout_node("output_language_gate", output_language_gate_node))
@@ -1070,8 +1159,10 @@ def build_chapter_graph(context: WorkflowContext):
     graph.add_conditional_edges(
         "reader",
         route_reader,
-        {"author": "author", "extraction_gate": "extraction_gate"},
+        {"author": "author", "extraction_gate": "chunker"},
     )
+    graph.add_edge("chunker", "vectorize_chunks")
+    graph.add_edge("vectorize_chunks", "extraction_gate")
     graph.add_conditional_edges(
         "extraction_gate",
         route_extraction_gate,

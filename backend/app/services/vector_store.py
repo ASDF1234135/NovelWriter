@@ -8,12 +8,16 @@ from time import sleep
 from typing import Protocol
 from uuid import NAMESPACE_URL, uuid5
 
+import httpx
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from qdrant_client.http.exceptions import UnexpectedResponse
 
+from app.core.logging import get_logger
 from app.domain.schema import VectorDocument
 from app.services.llm import EmbeddingClient
+
+logger = get_logger(__name__)
 
 
 class VectorStore(Protocol):
@@ -135,7 +139,34 @@ class QdrantVectorStore:
         self._with_retry(operation)
 
     def _detect_embedding_dimension(self) -> int:
-        vectors = self.embedding_client.embed_texts(["vector-dimension-probe"])
+        try:
+            vectors = self.embedding_client.embed_texts(["vector-dimension-probe"])
+        except httpx.RequestError as exc:
+            # DNS/connect/timeouts during startup should not take down unrelated API routes
+            # (e.g. macro-snapshot) that only need WorkflowService construction.
+            logger.warning(
+                "embedding_dimension_probe_unreachable",
+                extra={
+                    "extra_payload": {
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                        "fallback_vector_size": self.vector_size,
+                    }
+                },
+            )
+            return int(self.vector_size)
+        except OSError as exc:
+            logger.warning(
+                "embedding_dimension_probe_os_error",
+                extra={
+                    "extra_payload": {
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                        "fallback_vector_size": self.vector_size,
+                    }
+                },
+            )
+            return int(self.vector_size)
         if not vectors or not vectors[0]:
             raise RuntimeError(
                 "Embedding client returned an empty vector during startup validation."
@@ -184,12 +215,13 @@ class QdrantVectorStore:
         points = []
         for index, (document, vector) in enumerate(zip(documents, vectors, strict=False)):
             payload = {"story_id": story_id, "text_chunk": document.text_chunk, **document.metadata}
-            point_id = str(
-                uuid5(
-                    NAMESPACE_URL,
-                    f"{story_id}:{payload.get('chapter_id', '')}:{index}:{document.text_chunk}",
-                )
-            )
+            # Prefer stable chunk_id-based IDs when provided so overwrites are deterministic.
+            chunk_id = str(payload.get("chunk_id") or "").strip()
+            if chunk_id:
+                point_key = f"{story_id}:{payload.get('chapter_id', '')}:{chunk_id}"
+            else:
+                point_key = f"{story_id}:{payload.get('chapter_id', '')}:{index}:{document.text_chunk}"
+            point_id = str(uuid5(NAMESPACE_URL, point_key))
             points.append(
                 models.PointStruct(
                     id=point_id,

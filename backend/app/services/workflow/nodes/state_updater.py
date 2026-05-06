@@ -7,7 +7,6 @@ from app.domain.schema import (
     ChapterMemory,
     EdgeMutation,
     EdgeType,
-    EventLinkType,
     EventOutline,
     ExtractedEntity,
     ExtractedRelation,
@@ -29,11 +28,11 @@ from app.services.workflow.continuity import chapter_content_tail_snippet
 from app.services.workflow.context import WorkflowContext
 from app.services.workflow.event_normalization import (
     coalesce_over_fragmented_events,
-    flatten_event_links,
     is_standard_event_id,
     normalize_event_ai_flags,
     normalize_event_ids,
 )
+from app.services.workflow.chunking import build_chapter_chunks, extract_prev_tail
 
 
 def run_state_updater(state: dict, context: WorkflowContext) -> dict:
@@ -44,7 +43,6 @@ def run_state_updater(state: dict, context: WorkflowContext) -> dict:
     malformed_ids = [event.event_id for event in events if not is_standard_event_id(event.event_id, chapter_id=int(state["chapter_id"]))]
     if malformed_ids:
         events = normalize_event_ids(int(state["chapter_id"]), events).events
-    normalized_links = flatten_event_links(events)
     chapter_content = state["best_draft_content"] or state["current_draft"]
     graph_snapshot = context.graph_store.query_context(
         GraphQueryRequest(
@@ -66,80 +64,55 @@ def run_state_updater(state: dict, context: WorkflowContext) -> dict:
         extracted = ChapterExtractionOutput.model_validate(pending_raw)
     else:
         extracted, _ = extract_chapter_artifacts(state, context, graph_snapshot, chapter_content, events)
+
+    # Chunk context for binding: prefer precomputed chapter_chunks (from workflow chunker),
+    # else build a best-effort chunk set from current draft only.
+    chunk_list = list(state.get("chapter_chunks") or [])
+    if not chunk_list:
+        prev_row = None
+        if int(state["chapter_id"]) > 1:
+            prev_row = context.story_repository.get_chapter(state["story_id"], int(state["chapter_id"]) - 1)
+        prev_content = str(prev_row.get("content") or "") if isinstance(prev_row, dict) else ""
+        prev_tail = extract_prev_tail(prev_content, output_language=context.output_language)
+        chunks = build_chapter_chunks(
+            story_id=state["story_id"],
+            chapter_id=int(state["chapter_id"]),
+            current_body=str(chapter_content or ""),
+            prev_tail=prev_tail,
+        )
+        chunk_list = [c.__dict__ for c in chunks]
+    chunk_text_by_id = {
+        str(c.get("chunk_id") or "").strip(): str(c.get("text_chunk") or "")
+        for c in chunk_list
+        if isinstance(c, dict) and str(c.get("chunk_id") or "").strip()
+    }
     new_ids: set[str] = set()
     mutations: list[NodeMutation | EdgeMutation] = []
     resolved_entities, resolved_name_index = _resolve_extracted_entities(extracted.entities, existing_nodes_by_id)
     node_types = {node_id: node.node_type for node_id, node in existing_nodes_by_id.items()}
     node_types.update({node_id: resolved["node_type"] for node_id, resolved in resolved_entities.items()})
-    primary_event_id = events[0].event_id if events else f"chapter_{state['chapter_id']}_memory"
+    extracted_event_node_ids = [nid for nid, r in resolved_entities.items() if r["node_type"] == NodeType.EVENT]
+    primary_event_id = (
+        extracted_event_node_ids[0] if extracted_event_node_ids else f"chapter_{state['chapter_id']}_memory"
+    )
     active_location_edges = _index_active_location_edges(graph_snapshot.edges, state["active_epoch_id"])
 
-    for event in events:
-        new_ids.add(event.event_id)
-        node_types[event.event_id] = NodeType.EVENT
-        mutations.append(
-            NodeMutation(
-                action="UPDATE_NODE" if event.event_id in existing_ids else "CREATE_NODE",
-                node_id=event.event_id,
-                node_type=NodeType.EVENT,
-                properties={
-                    "canonical_name": clip_event_description_for_storage(event.description),
-                    "aliases": [],
-                },
-            )
-        )
-        mutations.append(
-            EdgeMutation(
-                action="CREATE_EDGE",
-                source_id=event.event_id,
-                relation_type=EdgeType.BELONGS_TO_EPOCH,
-                target_id=state["active_epoch_id"],
-                attributes={
-                    "valid_epoch": state["active_epoch_id"],
-                    "start_event_id": event.event_id,
-                    "is_truth": True,
-                    "is_public": True,
-                    "known_by": [],
-                    "holder": [],
-                    "context_details": "Chapter closeout epoch binding",
-                },
-            )
-        )
-    seen_event_links: set[tuple[str, str, EventLinkType]] = set()
-    for link in normalized_links:
-        link_key = (link.target_event_id, link.source_event_id, link.link_type)
-        if link_key in seen_event_links:
+    for node_id, resolved in resolved_entities.items():
+        if resolved["node_type"] != NodeType.EVENT:
             continue
-        seen_event_links.add(link_key)
-        relation_type = (
-            EdgeType.CAUSED
-            if link.link_type == EventLinkType.CAUSAL
-            else EdgeType.HAPPENED_BEFORE
-        )
-        if link.target_event_id == link.source_event_id:
+        props = resolved["properties"]
+        desc = str(props.get("canonical_name") or "").strip()
+        if not desc:
             continue
-        mutations.append(
-            EdgeMutation(
-                action="CREATE_EDGE",
-                source_id=link.target_event_id,
-                relation_type=relation_type,
-                target_id=link.source_event_id,
-                attributes={
-                    "valid_epoch": state["active_epoch_id"],
-                    "start_event_id": link.target_event_id,
-                    "end_event_id": link.source_event_id,
-                    "is_truth": True,
-                    "is_public": True,
-                    "known_by": [],
-                    "holder": [],
-                    "context_details": (
-                        f"{link.target_event_id} caused {link.source_event_id}"
-                        if relation_type == EdgeType.CAUSED
-                        else f"{link.target_event_id} happened before {link.source_event_id}"
-                    ),
-                },
-            )
-        )
+        key = desc[:30]
+        ev_chunks: list[str] = []
+        for cid, txt in chunk_text_by_id.items():
+            if key and key in txt:
+                ev_chunks.append(cid)
+                if len(ev_chunks) >= 4:
+                    break
+        if ev_chunks:
+            props["chunk_ids"] = ev_chunks
 
     for resolved in resolved_entities.values():
         new_ids.add(resolved["node_id"])
@@ -164,6 +137,13 @@ def run_state_updater(state: dict, context: WorkflowContext) -> dict:
             state["pov_character_id"],
         )
         if edge is not None:
+            # Promote chunk evidence into top-level attributes for graph_rag alignment.
+            meta = dict(edge.attributes.get("metadata") or {}) if isinstance(edge.attributes.get("metadata"), dict) else {}
+            ev_ids = meta.get("evidence_chunk_ids")
+            if isinstance(ev_ids, list):
+                cleaned = [str(x).strip() for x in ev_ids if str(x).strip()]
+                if cleaned:
+                    edge.attributes["chunk_ids"] = cleaned
             if edge.relation_type == EdgeType.LOCATED_IN:
                 mutations.extend(_build_location_transition_mutations(edge, active_location_edges, primary_event_id))
                 _register_active_location_edge(active_location_edges, edge)
@@ -345,6 +325,8 @@ def _sanitize_node_properties(node_type: NodeType, properties: dict) -> dict:
             clean["tags"] = _sanitize_tags_value(v)
         elif k == "metadata":
             clean["metadata"] = _sanitize_metadata_value(v)
+        elif k == "chunk_ids":
+            clean["chunk_ids"] = _sanitize_tags_value(v)
         elif k in allowed:
             clean[k] = v
     return clean

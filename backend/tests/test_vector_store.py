@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from qdrant_client.http import models
 
@@ -17,6 +18,12 @@ class FakeEmbeddingClient:
 class EmptyProbeEmbeddingClient:
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         return [[] for _ in texts]
+
+
+class UnreachableEmbeddingClient:
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        req = httpx.Request("POST", "http://unresolvable.invalid/v1/embeddings")
+        raise httpx.ConnectError("[Errno -5] No address associated with hostname", request=req)
 
 
 class FakeQdrantClient:
@@ -96,6 +103,20 @@ def test_qdrant_store_recreates_collection_when_enabled(monkeypatch) -> None:
     assert store.vector_size == 1024
     assert fake_client.deleted_collections == ["story_chunks"]
     assert fake_client.created_collections == [("story_chunks", 1024)]
+
+
+def test_qdrant_store_uses_config_vector_size_when_embedding_probe_unreachable(monkeypatch) -> None:
+    fake_client = FakeQdrantClient()
+    monkeypatch.setattr("app.services.vector_store.QdrantClient", lambda url: fake_client)
+
+    store = QdrantVectorStore(
+        url="http://qdrant:6333",
+        collection_name="story_chunks",
+        vector_size=3072,
+        embedding_client=UnreachableEmbeddingClient(),
+    )
+
+    assert store.embedding_dimension == 3072
 
 
 def test_qdrant_store_init_fails_on_empty_embedding_probe(monkeypatch) -> None:

@@ -1108,6 +1108,28 @@ class GraphQueryRequest(BaseModel):
     )
 
 
+class GraphRAGAskRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=4000)
+    active_epoch_id: str = "epoch_present"
+    pov_character_id: str = "char_public_observer"
+    top_k: int = Field(default=5, ge=1, le=20)
+    context_hop_tier: int = Field(default=2, ge=0, le=2)
+
+
+class GraphRAGEvaluateRequest(BaseModel):
+    condition_desc: str = Field(..., min_length=1, max_length=4000)
+    active_epoch_id: str = "epoch_present"
+    pov_character_id: str = "char_public_observer"
+    top_k: int = Field(default=5, ge=1, le=20)
+    context_hop_tier: int = Field(default=2, ge=0, le=2)
+
+
+class GraphRAGEvaluateOutput(BaseModel):
+    resolved: bool
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    reasoning: str = Field(default="", max_length=4000)
+
+
 class HitlReason:
     """Stable string ids for workflow state hitl_reason (avoid magic strings scattered in code)."""
 

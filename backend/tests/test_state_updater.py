@@ -66,7 +66,7 @@ def test_state_updater_uses_whitelisted_ids(workflow_context: WorkflowContext) -
         "ground_truth_events": [
             EventOutline(event_id="event_ch1_01", description="測試事件", caused_by_event_id=None).model_dump(mode="json")
         ],
-        "current_draft": "草稿",
+        "current_draft": "測試事件出現在草稿。",
         "best_draft_content": "",
     }
 
@@ -100,7 +100,7 @@ def test_state_updater_event_node_keeps_long_description_up_to_cap(workflow_cont
                 mode="json"
             )
         ],
-        "current_draft": "草稿",
+        "current_draft": long_desc,
         "best_draft_content": "",
     }
     output = run_state_updater(state, workflow_context)
@@ -136,7 +136,7 @@ def test_state_updater_allows_required_reference_ids_when_query_context_is_spars
         "ground_truth_events": [
             EventOutline(event_id="event_sparse_01", description="稀疏圖譜事件", caused_by_event_id=None).model_dump(mode="json")
         ],
-        "current_draft": "草稿",
+        "current_draft": "稀疏圖譜事件於此發生。",
         "best_draft_content": "",
     }
 
@@ -230,7 +230,7 @@ def test_state_updater_normalizes_nonstandard_event_ids(workflow_context: Workfl
             EventOutline(event_id="event_ai_invention_04", description="舊ID事件A", caused_by_event_id=None).model_dump(mode="json"),
             EventOutline(event_id="legacy_event_beta", description="舊ID事件B", caused_by_event_id="event_ai_invention_04").model_dump(mode="json"),
         ],
-        "current_draft": "主角推進劇情。",
+        "current_draft": "舊ID事件A與舊ID事件B：主角推進劇情。",
         "best_draft_content": "",
     }
 
@@ -258,10 +258,10 @@ def test_state_updater_emits_caused_for_typed_causal_links(workflow_context: Wor
         "pov_character_id": "char_public_observer",
         "narrative_directive": "測試因果連結",
         "ground_truth_events": [
-            EventOutline(event_id="event_ch3_01", description="A").model_dump(mode="json"),
+            EventOutline(event_id="event_ch3_01", description="因果事件甲").model_dump(mode="json"),
             EventOutline(
                 event_id="event_ch3_02",
-                description="B",
+                description="因果事件乙",
                 links=[
                     EventLink(
                         target_event_id="event_ch3_01",
@@ -271,7 +271,7 @@ def test_state_updater_emits_caused_for_typed_causal_links(workflow_context: Wor
                 ],
             ).model_dump(mode="json"),
         ],
-        "current_draft": "測試草稿",
+        "current_draft": "因果事件甲直接觸發因果事件乙。",
         "best_draft_content": "",
     }
     output = run_state_updater(state, workflow_context)

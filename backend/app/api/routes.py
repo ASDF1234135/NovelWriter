@@ -8,9 +8,18 @@ from typing import AsyncIterator
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
-from app.dependencies import get_graph_store, get_story_repository, get_workflow_service, get_workflow_repository
+from app.dependencies import (
+    get_graph_rag_service,
+    get_graph_store,
+    get_story_repository,
+    get_workflow_repository,
+    get_workflow_service,
+)
 from app.domain.schema import (
     ChapterRunRequest,
+    GraphRAGAskRequest,
+    GraphRAGEvaluateOutput,
+    GraphRAGEvaluateRequest,
     GraphQueryRequest,
     HitlAnchorDelayRequest,
     HitlAnchorResolutionRequest,
@@ -27,6 +36,7 @@ from app.domain.schema import (
     StoryPatch,
 )
 from app.services.graph_store import GraphStore
+from app.services.graph_rag_service import GraphRAGService
 from app.services.llm import LLMProviderError
 from app.services.workflow.service import (
     ChapterAlreadyCompletedError,
@@ -553,6 +563,53 @@ def story_graph_full(
     if not story_repository.get_story(story_id):
         raise HTTPException(status_code=404, detail=f"Story not found: {story_id}")
     return graph_store.dump_story_graph(story_id).model_dump(mode="json")
+
+
+@router.post("/stories/{story_id}/graph-rag/ask")
+def graph_rag_ask(
+    story_id: str,
+    request: GraphRAGAskRequest,
+    graph_rag: GraphRAGService = Depends(get_graph_rag_service),
+    story_repository: StoryRepository = Depends(get_story_repository),
+) -> PlainTextResponse:
+    if not story_repository.get_story(story_id):
+        raise HTTPException(status_code=404, detail=f"Story not found: {story_id}")
+    try:
+        text = graph_rag.ask_question(
+            request.question,
+            story_id=story_id,
+            active_epoch_id=request.active_epoch_id,
+            pov_character_id=request.pov_character_id,
+            top_k=request.top_k,
+            context_hop_tier=request.context_hop_tier,
+        )
+        return PlainTextResponse(text)
+    except LLMProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/stories/{story_id}/graph-rag/evaluate")
+def graph_rag_evaluate(
+    story_id: str,
+    request: GraphRAGEvaluateRequest,
+    graph_rag: GraphRAGService = Depends(get_graph_rag_service),
+    story_repository: StoryRepository = Depends(get_story_repository),
+) -> JSONResponse:
+    if not story_repository.get_story(story_id):
+        raise HTTPException(status_code=404, detail=f"Story not found: {story_id}")
+    try:
+        parsed = graph_rag.evaluate_condition(
+            request.condition_desc,
+            story_id=story_id,
+            active_epoch_id=request.active_epoch_id,
+            pov_character_id=request.pov_character_id,
+            top_k=request.top_k,
+            context_hop_tier=request.context_hop_tier,
+            response_model=GraphRAGEvaluateOutput,
+        )
+        return JSONResponse(content=parsed.model_dump(mode="json"))
+    except LLMProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.post("/state-transactions/{transaction_id}/replay")

@@ -50,6 +50,7 @@ class AgentWorkflowState(TypedDict):
     bible_context: str
     graph_context: str
     vector_context: str
+    chunk_context: NotRequired[str]
     local_enforced_rules_context: NotRequired[str]
     previous_chapter_summary: str
     previous_chapter_tail_excerpt: NotRequired[str]
@@ -114,6 +115,10 @@ class AgentWorkflowState(TypedDict):
     normalized_length_max: NotRequired[int]
     plan_warnings: NotRequired[list[str]]
     pending_chapter_extraction: NotRequired[dict[str, Any]]
+    # Chunking / retrieval alignment (generated before extraction).
+    # Each entry is JSON-serializable with keys like:
+    # chunk_id, chunk_index, chapter_id, source_chapter_id, source_role, text_chunk
+    chapter_chunks: NotRequired[list[dict[str, Any]]]
     b_story_resolution: NotRequired[dict[str, Any]]
     pending_cast_updates: NotRequired[list[dict[str, Any]]]
     pending_cast_evolutions: NotRequired[list[dict[str, Any]]]
