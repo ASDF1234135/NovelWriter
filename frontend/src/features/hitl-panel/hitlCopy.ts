@@ -12,13 +12,16 @@ export const HITL_REASON = {
   PLAN_LOOP: "Plan_Loop_Exceeded",
   DRAFT_LOOP: "Draft_Loop_Exceeded",
   EXTRACTION_GATE: "Extraction_Gate_Failed",
-  B_STORY: "Anchor_Resolution_Failed",
+  /** Legacy: subplot/B-story HITL; kept for backward compatibility. */
+  B_STORY: "B_Story_Resolution_Failed",
   B_STORY_COOLDOWN: "B_Story_Cooldown_Violation",
   RESOLUTION_TACTIC: "Resolution_Tactic_Cooldown_Violation",
   ENDING_VIBE: "Ending_Vibe_Cooldown_Violation",
   CONTEXT: "Context_Length_Exceeded",
   ALIGNMENT_RULES_REQUIRED: "Alignment_Rules_Required",
   OUTPUT_LANGUAGE: "Output_Language_Mismatch",
+  /** Post-run milestone adjudication (anchor_resolve node). */
+  ANCHOR_RESOLVE: "Anchor_Resolution_Failed",
 } as const;
 
 export type HitlReasonValue = (typeof HITL_REASON)[keyof typeof HITL_REASON];
@@ -72,6 +75,7 @@ const REASON_TO_STEP_INDEX: Partial<Record<string, number>> = {
   [HITL_REASON.DRAFT_LOOP]: 5,
   [HITL_REASON.EXTRACTION_GATE]: 8,
   [HITL_REASON.B_STORY]: 12,
+  [HITL_REASON.ANCHOR_RESOLVE]: 12,
   [HITL_REASON.OUTPUT_LANGUAGE]: 10,
 };
 
@@ -128,6 +132,14 @@ const HITL_SITUATION_COPY: Record<string, { title: string; why: string }> = {
       "本章想走的副線類型，與近期章節用過的太接近。請微調章節方向或副線指示，讓故事節奏更有變化。",
       "本章想走的副线类型，与近期章节用过的太接近。请微调章节方向或副线指示，让节奏更有变化。",
       "The subplot type planned for this chapter is too similar to recent chapters. Tune chapter direction or subplot directive to add variation.",
+    ),
+  },
+  [HITL_REASON.ANCHOR_RESOLVE]: {
+    title: pick("里程碑達成需要您拍板", "里程碑达成需要你拍板", "Milestone Resolution Needs Decision"),
+    why: pick(
+      "系統無法自動判定本章是否確實達成（或未達成）某個里程碑。請依您的創作意圖，決定要視為已達成、要求改寫，或延後目標到之後章節再完成。",
+      "系统无法自动判定本章是否确实达成（或未达成）某个里程碑。请按你的创作意图决定要视为已达成、要求改写，或延后目标到后续章节再完成。",
+      "The system cannot confidently decide whether this chapter achieves the planned milestone. Decide whether to mark it achieved, request a rewrite, or delay the milestone to a later chapter.",
     ),
   },
   [HITL_REASON.RESOLUTION_TACTIC]: {
@@ -404,15 +416,6 @@ export function solutionsForReason(reason: string): { id: HitlSolutionId; title:
   if (reason === HITL_REASON.PLAN_LOOP) {
     return [
       {
-        id: "outline",
-        title: pick("手動調整事件大綱", "手动调整事件大纲", "Manually Edit Event Outline"),
-        blurb: pick(
-          "直接編輯事件表與表層敘事，交給系統重新規劃細節。",
-          "直接编辑事件表与表层叙事，交给系统重新规划细节。",
-          "Directly edit events and narrative script, then let system re-plan details.",
-        ),
-      },
-      {
         id: "director",
         title: pick("微調章節方向", "微调章节方向", "Tune Chapter Direction"),
         blurb: pick(
@@ -421,10 +424,24 @@ export function solutionsForReason(reason: string): { id: HitlSolutionId; title:
           "Adjust chapter type, narrative directive, and new elements.",
         ),
       },
+      {
+        id: "outline",
+        title: pick("手動調整事件大綱", "手动调整事件大纲", "Manually Edit Event Outline"),
+        blurb: pick(
+          "直接編輯事件表與表層敘事，交給系統重新規劃細節。",
+          "直接编辑事件表与表层叙事，交给系统重新规划细节。",
+          "Directly edit events and narrative script, then let system re-plan details.",
+        ),
+      },
     ];
   }
   if (isPlanFamilyReason(reason) && reason !== HITL_REASON.PLAN_LOOP) {
     return [
+      {
+        id: "director",
+        title: pick("微調章節方向", "微调章节方向", "Tune Chapter Direction"),
+        blurb: pick("從章節定位與副線指示下手，讓規劃更容易過審。", "从章节定位与副线指示下手，让规划更容易过审。", "Refine chapter positioning and subplot guidance to pass review."),
+      },
       {
         id: "outline",
         title: pick("調整大綱與敘事", "调整大纲与叙事", "Adjust Outline and Narrative"),
@@ -433,11 +450,6 @@ export function solutionsForReason(reason: string): { id: HitlSolutionId; title:
           "修改事件与叙事走向，避开重复的收尾或氛围。",
           "Adjust event flow to avoid repeated ending tactics or vibe.",
         ),
-      },
-      {
-        id: "director",
-        title: pick("微調章節方向", "微调章节方向", "Tune Chapter Direction"),
-        blurb: pick("從章節定位與副線指示下手，讓規劃更容易過審。", "从章节定位与副线指示下手，让规划更容易过审。", "Refine chapter positioning and subplot guidance to pass review."),
       },
     ];
   }
@@ -459,6 +471,19 @@ export function solutionsForReason(reason: string): { id: HitlSolutionId; title:
       },
     ];
   }
+  if (reason === HITL_REASON.OUTPUT_LANGUAGE) {
+    return [
+      {
+        id: "draft",
+        title: pick("手動修正本章內文", "手动修正本章正文", "Manually Edit Chapter Text"),
+        blurb: pick(
+          "直接在下方修改正文，然後回到語言檢查步驟繼續。",
+          "直接在下方修改正文，然后回到语言检查步骤继续。",
+          "Edit the chapter text below, then continue from the language check step.",
+        ),
+      },
+    ];
+  }
   if (reason === HITL_REASON.EXTRACTION_GATE) {
     return [
       {
@@ -473,11 +498,15 @@ export function solutionsForReason(reason: string): { id: HitlSolutionId; title:
     ];
   }
   if (reason === HITL_REASON.B_STORY) {
+    // Legacy: kept for backward compatibility but should not be triggered in current workflow.
+    return [];
+  }
+  if (reason === HITL_REASON.ANCHOR_RESOLVE) {
     return [
       {
         id: "b_story",
-        title: pick("副線是否已收尾", "副线是否已收尾", "Decide Subplot Resolution"),
-        blurb: pick("決定核銷副線或打回前段流程。", "决定核销副线或打回前段流程。", "Mark subplot as resolved or send flow back."),
+        title: pick("里程碑是否已達成", "里程碑是否已达成", "Decide Milestone Resolution"),
+        blurb: pick("決定里程碑是否視為已達成，或打回前段流程修改。", "决定里程碑是否视为已达成，或打回前段流程修改。", "Mark milestone as achieved or send flow back for revision."),
       },
     ];
   }
@@ -510,23 +539,23 @@ export const HITL_REASON_MATRIX: HitlReasonMatrixRow[] = [
   {
     reason: HITL_REASON.PLAN_LOOP,
     title: getSituationCopy(HITL_REASON.PLAN_LOOP).title,
-    defaultSolution: "outline",
-    solutionIds: ["outline", "director"],
-    optionIds: ["allow_adjust_anchor", "force_rewrite_plan", "force_approve_plan"],
+    defaultSolution: "director",
+    solutionIds: ["director", "outline"],
+    optionIds: ["force_rewrite_plan", "force_approve_plan"],
   },
   {
     reason: HITL_REASON.RESOLUTION_TACTIC,
     title: getSituationCopy(HITL_REASON.RESOLUTION_TACTIC).title,
-    defaultSolution: "outline",
-    solutionIds: ["outline", "director"],
-    optionIds: [],
+    defaultSolution: "director",
+    solutionIds: ["director", "outline"],
+    optionIds: ["force_rewrite_plan", "force_approve_plan"],
   },
   {
     reason: HITL_REASON.ENDING_VIBE,
     title: getSituationCopy(HITL_REASON.ENDING_VIBE).title,
-    defaultSolution: "outline",
-    solutionIds: ["outline", "director"],
-    optionIds: [],
+    defaultSolution: "director",
+    solutionIds: ["director", "outline"],
+    optionIds: ["force_rewrite_plan", "force_approve_plan"],
   },
   {
     reason: HITL_REASON.B_STORY_COOLDOWN,
@@ -550,11 +579,18 @@ export const HITL_REASON_MATRIX: HitlReasonMatrixRow[] = [
     optionIds: ["extraction_return_author"],
   },
   {
-    reason: HITL_REASON.B_STORY,
-    title: getSituationCopy(HITL_REASON.B_STORY).title,
+    reason: HITL_REASON.ANCHOR_RESOLVE,
+    title: getSituationCopy(HITL_REASON.ANCHOR_RESOLVE).title,
     defaultSolution: "b_story",
     solutionIds: ["b_story"],
     optionIds: ["b_story_wait_judgement"],
+  },
+  {
+    reason: HITL_REASON.B_STORY,
+    title: getSituationCopy(HITL_REASON.B_STORY).title,
+    defaultSolution: null,
+    solutionIds: [],
+    optionIds: [],
   },
   {
     reason: HITL_REASON.CONTEXT,

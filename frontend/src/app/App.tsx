@@ -47,6 +47,7 @@ import { MacroPlanPanel } from "../features/macro-plan/MacroPlanPanel";
 import { StoryLibrary } from "../features/story-library/StoryLibrary";
 import { StorySetupForm } from "../features/story-setup/StorySetupForm";
 import { WorkflowMonitor } from "../features/workflow-monitor/WorkflowMonitor";
+import { HitlDevDropdown } from "../features/workflow-monitor/HitlDevDropdown";
 import { WorkflowProgressTrack } from "../features/workflow-monitor/WorkflowProgressTrack";
 import { ExportCenter } from "../features/export-center/ExportCenter";
 import type {
@@ -65,6 +66,7 @@ import type {
   WorkflowPayload,
   WritingPreambleResponse,
 } from "../types";
+import { WORKFLOW_MOCKS } from "../dev/workflowMocks";
 import { ConfirmModal } from "../components/ConfirmModal";
 import { SetupAnchorDagDetailPanel } from "./views/SetupAnchorDagDetailPanel";
 import { AppShell, type AppView, type TaskFlowStageId } from "./AppShell";
@@ -353,6 +355,31 @@ export default function App() {
   const [selectedChapter, setSelectedChapter] = useState<ChapterContent | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>("");
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const flag = String(import.meta.env.VITE_ENABLE_DEV_TOOLS ?? "").trim();
+    const enabled = flag === "1" || flag.toLowerCase() === "true";
+    if (!enabled) return;
+
+    (window as unknown as { __NB_LIST_WORKFLOW_MOCKS?: () => string[] }).__NB_LIST_WORKFLOW_MOCKS =
+      () => Object.keys(WORKFLOW_MOCKS);
+    (window as unknown as { __NB_SET_WORKFLOW_MOCK?: (name: string) => void }).__NB_SET_WORKFLOW_MOCK =
+      (name: string) => {
+        const entry = WORKFLOW_MOCKS[String(name)];
+        if (!entry) {
+          throw new Error(`Unknown mock: ${name}. Use __NB_LIST_WORKFLOW_MOCKS()`);
+        }
+        setWorkflow(entry.workflow);
+        if (entry.graph) setGraph(entry.graph);
+      };
+
+    return () => {
+      delete (window as unknown as { __NB_LIST_WORKFLOW_MOCKS?: unknown }).__NB_LIST_WORKFLOW_MOCKS;
+      delete (window as unknown as { __NB_SET_WORKFLOW_MOCK?: unknown }).__NB_SET_WORKFLOW_MOCK;
+    };
+  }, []);
+
   function reportApiError(err: unknown, fallbackKey: string) {
     const raw = err instanceof Error ? err.message : "";
     setError(localizeUserFacingError(raw, t) || t(fallbackKey));
@@ -2036,6 +2063,7 @@ export default function App() {
                     className="flex min-w-0 flex-col gap-4"
                   >
                     <WorkflowMonitor workflow={workflow} variant="compact" />
+                    <HitlDevDropdown workflow={workflow} setWorkflow={setWorkflow} variant="compact" />
                     <HitlPanel
                       workflow={workflow}
                       graph={graph}
@@ -2302,6 +2330,7 @@ export default function App() {
               <div id="write-panel-progress" role="tabpanel" aria-labelledby="write-tab-progress" className="grid grid-cols-1 gap-6">
                 <div className="min-w-0">
                   <WorkflowMonitor workflow={workflow} />
+                  <HitlDevDropdown workflow={workflow} setWorkflow={setWorkflow} />
                   <div className="mt-4">
                     <HitlPanel
                       workflow={workflow}

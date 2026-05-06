@@ -33,7 +33,7 @@ describe("HitlPanel reason rendering", () => {
             hitl_decision_mode: "DASHBOARD",
           },
           state: {
-            pending_hitl_options: [{ id: "keep_current_logic", label: "保持邏輯並重寫" }],
+            pending_hitl_options: [{ id: "relax_word_count", label: "放寬字數要求" }],
             resume_from: "author",
           },
           steps: [],
@@ -54,11 +54,12 @@ describe("HitlPanel reason rendering", () => {
     expect(resumeValues).toEqual(expect.arrayContaining(["reader", "draft_supervisor", "author"]));
     expect(resumeValues).not.toContain("extraction_gate");
 
-    await user.click(screen.getByText("維持現有草稿（強制通過）"));
-    await waitFor(() => expect(onDecision).toHaveBeenCalledWith("keep_current_logic"));
+    await user.click(screen.getByText("放寬字數限制"));
+    await waitFor(() => expect(onDecision).toHaveBeenCalledWith("relax_word_count"));
   });
 
   it("plan loop: shows situation copy and outline panel when selected", async () => {
+    const user = userEvent.setup();
     renderPanel(
       <HitlPanel
         workflow={{
@@ -88,6 +89,7 @@ describe("HitlPanel reason rendering", () => {
     expect(screen.getByText("大綱規劃觸發安全限制，AI 無法產出符合邏輯的劇情。")).toBeInTheDocument();
     expect(screen.getByText(/無法通過原因：大綱與錨點衝突/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /手動調整事件大綱/ })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /手動調整事件大綱/ }));
     expect(screen.getByRole("button", { name: "新增事件卡片" })).toBeInTheDocument();
   });
 

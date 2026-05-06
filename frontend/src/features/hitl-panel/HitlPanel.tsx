@@ -1,5 +1,5 @@
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useFieldArray, useForm, useWatch } from "react-hook-form";
 import { z } from "zod";
 import type { GraphSnapshot, HitlContextPayload, WorkflowPayload } from "../../types";
@@ -7,11 +7,9 @@ import { fetchGraph } from "../../api";
 import { useI18n } from "../../i18n/useI18n";
 import { hitlDecisionModeLabel } from "../ui-copy/workflowDisplay";
 import {
-  B_STORY_REJECT_RESUME_OPTIONS,
   buildFeedbackSummary,
   defaultSolutionForReason,
   DRAFT_RESUME_OPTIONS,
-  formatBStoryCandidateForDisplay,
   HITL_REASON,
   type HitlSolutionId,
   isDirectorPatchReason,
@@ -79,7 +77,6 @@ type Props = {
     reject_resume_from?: string;
     reason?: string;
   }) => Promise<void>;
-  onAnchorDelay?: (payload: { anchor_id: string; new_chapter_target: number; reason?: string }) => Promise<void>;
   onContextPrune?: (payload: { graph_rag_context_tier: number; reason?: string }) => Promise<void>;
 };
 
@@ -107,18 +104,14 @@ const formSchema = z.object({
     .default([]),
   draftText: z.string().default(""),
   draftResumeFrom: z.string().default("reader"),
-  mergeHintsOnDraft: z.boolean().default(false),
   chapterType: z.string().default(""),
   bStoryDirective: z.string().default(""),
   bStoryType: z.string().default(""),
   newElementsLines: z.string().default(""),
   narrativeDirective: z.string().default(""),
-  anchorId: z.string().default(""),
-  anchorChapterInput: z.string().default("1"),
   bResolved: z.array(z.string()).default([]),
   bEvidence: z.array(z.string()).default([]),
   bAnalysis: z.string().default(""),
-  bRejectResume: z.string().default("extraction_gate"),
   pruneProductTier: z.number().min(0).max(2).default(0),
   alignmentRulesInput: z.string().default(""),
   pacingLimitInput: z.string().default(""),
@@ -133,11 +126,9 @@ const formSchema = z.object({
       }),
     )
     .default([]),
-  waiveIdsComma: z.string().default(""),
   injectionJson: z.string().default("[]"),
   advancedInjectAck: z.boolean().default(false),
   directorNotes: z.string().default(""),
-  bRejectNote: z.string().default(""),
 });
 type HitlFormValues = z.output<typeof formSchema>;
 
@@ -162,20 +153,16 @@ export function HitlPanel({
   onDirectorPatch = asyncNoop,
   onExtractionRemap = asyncNoop,
   onAnchorResolution = asyncNoop,
-  onAnchorDelay = asyncNoop,
   onContextPrune = asyncNoop,
 }: Props) {
   const { t } = useI18n();
   const [remapMissingIds, setRemapMissingIds] = useState<string[]>([]);
   const [localGraph, setLocalGraph] = useState<GraphSnapshot | null>(null);
   const [graphLoading, setGraphLoading] = useState(false);
-  const [bStoryRejectOpen, setBStoryRejectOpen] = useState(false);
   const [preview, setPreview] = useState<PreviewPayload | null>(null);
   const [selectedSolution, setSelectedSolution] = useState<HitlSolutionId | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [uiMode, setUiMode] = useState<"recommended" | "expert">("recommended");
-  const [tokenInput, setTokenInput] = useState("");
-  const [tokenInputEvidence, setTokenInputEvidence] = useState("");
+  const remapInitSigRef = useRef<string>("");
   const form = useForm<HitlFormValues>({
     resolver: zodResolver(formSchema) as never,
     mode: "onChange",
@@ -184,18 +171,14 @@ export function HitlPanel({
       outlineEvents: [{ event_id: "event_01", description: "", caused_by_event_id: "" }],
       draftText: "",
       draftResumeFrom: "reader",
-      mergeHintsOnDraft: false,
       chapterType: "",
       bStoryDirective: "",
       bStoryType: "",
       newElementsLines: "",
       narrativeDirective: "",
-      anchorId: "",
-      anchorChapterInput: "1",
       bResolved: [],
       bEvidence: [],
       bAnalysis: "",
-      bRejectResume: "author",
       pruneProductTier: 0,
       alignmentRulesInput: "",
       pacingLimitInput: "",
@@ -203,12 +186,10 @@ export function HitlPanel({
       futureAnchorDesc: "",
       futureAnchorDelay: "",
       remaps: [{ from_node_id: "ghost_01", to_node_id: "planned_01" }],
-      waiveIdsComma: "",
       injectionJson:
         '[{"action":"CREATE_NODE","node_id":"item_backup_relic","node_type":"ITEM","properties":{"canonical_name":"backup_item","description":"HITL injected"}}]',
       advancedInjectAck: false,
       directorNotes: "",
-      bRejectNote: "",
     },
   });
   const { register, watch, setValue, getValues, formState } = form;
@@ -236,8 +217,6 @@ export function HitlPanel({
     return buildFeedbackSummary(workflow.state as Record<string, unknown>, reason);
   }, [workflow?.state, reason, primaryNarrative.extraLine]);
   const solutionList = useMemo(() => solutionsForReason(reason), [reason]);
-  const bAnalysisWatch = useWatch({ control: form.control, name: "bAnalysis", defaultValue: "" });
-  const bStoryDisplay = useMemo(() => formatBStoryCandidateForDisplay(String(bAnalysisWatch ?? "")), [bAnalysisWatch]);
   const effectiveGraph = graphProp && graphProp.nodes.length > 0 ? graphProp : localGraph;
   const extractionModels = useMemo(
     () => parseExtractionRemapHints(workflow?.state?.hitl_extraction_remap_hints),
@@ -293,11 +272,6 @@ export function HitlPanel({
       setValue("narrativeScript", String(st.narrative_script ?? ""));
     }
     if (isDirectorPatchReason(reason)) {
-      const anchors = (st.unachieved_anchors as Array<{ anchor_id?: string }> | undefined) ?? [];
-      const first = anchors[0]?.anchor_id;
-      if (first) setValue("anchorId", String(first));
-      const cid = Number(st.chapter_id ?? 1);
-      setValue("anchorChapterInput", String(cid + 1));
       if (reason === HITL_REASON.B_STORY_COOLDOWN) {
         setValue("directorNotes", String(st.b_story_directive ?? ""));
       } else {
@@ -307,6 +281,11 @@ export function HitlPanel({
     if (reason === HITL_REASON.EXTRACTION_GATE) {
       const h = st.hitl_extraction_remap_hints;
       const models = parseExtractionRemapHints(h);
+      const sig = `${workflow?.run?.run_id ?? ""}::${JSON.stringify(models.map((m) => [m.missing_planned_node_id, m.fromOptions.map((x) => x.node_id)]))}`;
+      if (remapInitSigRef.current === sig) {
+        return;
+      }
+      remapInitSigRef.current = sig;
       setRemapMissingIds(models.map((m) => m.missing_planned_node_id));
       const rows = models.map((m) => ({ from_node_id: m.defaultFromId, to_node_id: "" }));
       if (rows.length) {
@@ -316,9 +295,7 @@ export function HitlPanel({
         remapArray.replace([{ from_node_id: "", to_node_id: "" }]);
       }
     }
-    if (reason === HITL_REASON.B_STORY) {
-      setBStoryRejectOpen(false);
-      setValue("bRejectNote", "");
+  if (reason === HITL_REASON.ANCHOR_RESOLVE || reason === HITL_REASON.B_STORY) {
       const cand = st.anchor_resolution_hitl_candidate ?? st.b_story_resolution_hitl_candidate;
       if (cand && typeof cand === "object") {
         setValue("bAnalysis", JSON.stringify(cand, null, 2));
@@ -357,13 +334,6 @@ export function HitlPanel({
       setValue("alignmentRulesInput", String(st.chapter_hard_rules ?? ""));
     }
   }, [hitlActive, reason, workflow?.run.run_id, workflow?.run.hitl_context, workflow?.state, remapArray, outlineArray, setValue]);
-
-  useEffect(() => {
-    if (!hitlActive) {
-      setUiMode("recommended");
-    }
-  }, [hitlActive, workflow?.run.run_id]);
-
   const shell = compact
     ? "glass-panel rounded-xl border border-outline-variant/15 p-4 shadow-glow"
     : "rounded-xl border border-outline-variant/10 bg-surface-container-low p-6 shadow-glow";
@@ -371,11 +341,17 @@ export function HitlPanel({
   const btnClass = "btn-secondary mt-2 w-full text-xs";
   const taRows = (n: number) => (compact ? Math.max(3, n - 2) : n);
 
-  const waiveList = (): string[] =>
-    String(getValues("waiveIdsComma") ?? "")
-      .split(/[,，\s]+/)
-      .map((s: string) => s.trim())
-      .filter(Boolean);
+  const autoWaiveMissingPlannedIds = (): string[] => {
+    const rows = getValues("remaps") ?? [];
+    const waive: string[] = [];
+    for (let i = 0; i < rows.length; i++) {
+      const to = String(rows[i]?.to_node_id ?? "").trim();
+      if (to && to !== "__NEW_NODE__") continue;
+      const mid = String(remapMissingIds[i] ?? "").trim();
+      if (mid) waive.push(mid);
+    }
+    return Array.from(new Set(waive));
+  };
 
   const decisionMode = String(workflow?.run.hitl_decision_mode ?? "");
 
@@ -410,38 +386,6 @@ export function HitlPanel({
         )}
       </p>
       {hitlActive ? <HitlFlowStrip reason={reason} resumeFrom={resumeHint} compact={compact} /> : null}
-      {hitlActive ? (
-        <div
-          className="mb-3 inline-flex rounded-lg border border-outline-variant/25 bg-surface-container-highest/30 p-1"
-          role="tablist"
-          aria-label={t("hitl.modeSwitchAria")}
-        >
-          <button
-            type="button"
-            id="hitl-mode-recommended"
-            role="tab"
-            aria-controls="hitl-mode-panel"
-            aria-selected={uiMode === "recommended"}
-            className={`rounded-md px-3 py-1 text-xs ${uiMode === "recommended" ? "bg-primary/20 text-primary" : "text-on-surface-variant"}`}
-            disabled={controlsLocked}
-            onClick={() => setUiMode("recommended")}
-          >
-            {t("hitl.modeRecommended")}
-          </button>
-          <button
-            type="button"
-            id="hitl-mode-expert"
-            role="tab"
-            aria-controls="hitl-mode-panel"
-            aria-selected={uiMode === "expert"}
-            className={`rounded-md px-3 py-1 text-xs ${uiMode === "expert" ? "bg-secondary/20 text-secondary" : "text-on-surface-variant"}`}
-            disabled={controlsLocked}
-            onClick={() => setUiMode("expert")}
-          >
-            {t("hitl.modeExpert")}
-          </button>
-        </div>
-      ) : null}
 
       {hitlActive ? (
         <>
@@ -474,9 +418,11 @@ export function HitlPanel({
             {hitlContext?.context_metadata?.language_detection_summary ? (
               <p className="mt-1 font-body text-xs text-on-surface-variant">{hitlContext.context_metadata.language_detection_summary}</p>
             ) : null}
-            <p className="mt-2 font-label text-xs text-on-surface-variant">
-              {t("hitl.resumeNear", "", { step: resumeNodeUserLabel(resumeHint) })}
-            </p>
+            {reason !== HITL_REASON.ANCHOR_RESOLVE ? (
+              <p className="mt-2 font-label text-xs text-on-surface-variant">
+                {t("hitl.resumeNear", "", { step: resumeNodeUserLabel(resumeHint) })}
+              </p>
+            ) : null}
           </div>
 
           {feedbackLines.length > 0 ? (
@@ -492,6 +438,9 @@ export function HitlPanel({
 
           {reason === HITL_REASON.ALIGNMENT_RULES_REQUIRED ? (
             <div className="mb-4 rounded-lg border border-warning/40 bg-warning/10 px-3 py-3" aria-live="polite">
+              <p className="mb-2 font-body text-xs text-on-surface">
+                {t("hitl.alignment.explain")}
+              </p>
               <textarea
                 className={inputClass}
                 rows={taRows(8)}
@@ -559,29 +508,6 @@ export function HitlPanel({
             </div>
           ) : null}
 
-          {reason === HITL_REASON.PLAN_LOOP ? (
-            <div className="mb-4 rounded-lg border border-outline-variant/20 bg-surface-container-highest/30 px-3 py-3">
-              <h4 className="font-headline text-xs font-bold text-on-surface">{t("hitl.anchor.sectionTitle")}</h4>
-              <p className="mt-1 font-body text-xs text-on-surface-variant">{t("hitl.anchor.hint")}</p>
-              <label className="auteur-label mt-2">{t("hitl.anchor.id")}</label>
-              <input className={inputClass} disabled={controlsLocked} {...register("anchorId")} />
-              <label className="auteur-label mt-2">{t("hitl.anchor.chapter")}</label>
-              <input type="number" min={1} className={inputClass} disabled={controlsLocked} {...register("anchorChapterInput")} />
-              <button
-                type="button"
-                className={btnClass}
-                disabled={controlsLocked || !watch("anchorId").trim()}
-                onClick={() => {
-                  const n = Number.parseInt(getValues("anchorChapterInput").trim(), 10);
-                  if (!Number.isFinite(n) || n < 1) return;
-                  void onAnchorDelay({ anchor_id: getValues("anchorId").trim(), new_chapter_target: n });
-                }}
-              >
-                {t("hitl.anchor.submit")}
-              </button>
-            </div>
-          ) : null}
-
           {solutionList.length > 0 ? (
             <div className="mb-3">
               <p className="mb-2 font-label text-[10px] uppercase tracking-wider text-on-surface-variant">{t("hitl.chooseSolution")}</p>
@@ -606,7 +532,7 @@ export function HitlPanel({
             </div>
           ) : null}
 
-          <div id="hitl-mode-panel" role="tabpanel" aria-labelledby={uiMode === "recommended" ? "hitl-mode-recommended" : "hitl-mode-expert"} className="rounded-xl border border-outline-variant/15 bg-surface-container-highest/40 p-4">
+          <div className="rounded-xl border border-outline-variant/15 bg-surface-container-highest/40 p-4">
             {selectedSolution === "outline" && isPlanFamilyReason(reason) ? (
               <>
                 <h3 className="mb-2 font-headline text-xs font-bold text-on-surface">{t("hitl.outline.title")}</h3>
@@ -708,10 +634,6 @@ export function HitlPanel({
               <>
                 <h3 className="mb-2 font-headline text-xs font-bold text-on-surface">{t("hitl.draft.title")}</h3>
                 <p className="mb-2 font-body text-xs text-on-surface-variant">{t("hitl.draft.hint")}</p>
-                <label className="flex items-center gap-2 font-label text-xs text-on-surface-variant">
-                  <input type="checkbox" disabled={controlsLocked} {...register("mergeHintsOnDraft")} />
-                  {t("hitl.draft.mergeHints")}
-                </label>
                 <label className="auteur-label">{t("hitl.draft.resumeLabel")}</label>
                 <select className={inputClass} disabled={controlsLocked} {...register("draftResumeFrom")}>
                   {DRAFT_RESUME_OPTIONS.map((o) => (
@@ -729,7 +651,7 @@ export function HitlPanel({
                     onDraftEdit({
                       chapter_content: getValues("draftText"),
                       resume_from: getValues("draftResumeFrom"),
-                      merge_extraction_hints: getValues("mergeHintsOnDraft"),
+                      merge_extraction_hints: true,
                     })
                   }
                 >
@@ -771,6 +693,7 @@ export function HitlPanel({
                         </select>
                         <select className={inputClass} disabled={controlsLocked} {...register(`remaps.${idx}.to_node_id`)}>
                           <option value="">{t("hitl.remap.rightPlaceholder")}</option>
+                          <option value="__NEW_NODE__">{t("hitl.remap.newNodeOption")}</option>
                           {rightNodes.map((n) => {
                             const nid = String(n.node_id ?? "").trim();
                             const cn = String(n.canonical_name ?? "").trim();
@@ -802,29 +725,12 @@ export function HitlPanel({
                   className={btnClass}
                   disabled={controlsLocked}
                   onClick={() => {
-                    remapArray.append({ from_node_id: "", to_node_id: "" });
-                    setRemapMissingIds((prev) => [...prev, ""]);
-                  }}
-                >
-                  {t("hitl.remap.addRow")}
-                </button>
-                {uiMode === "expert" ? (
-                  <>
-                    <label className="auteur-label mt-2">{t("hitl.remap.waiveAdvanced")}</label>
-                    <input className={inputClass} disabled={controlsLocked} {...register("waiveIdsComma")} />
-                  </>
-                ) : null}
-                <button
-                  type="button"
-                  className={btnClass}
-                  disabled={controlsLocked}
-                  onClick={() => {
                     const rows = getValues("remaps")
                       .map((r) => ({
                         from_node_id: r.from_node_id.trim(),
                         to_node_id: r.to_node_id.trim(),
                       }))
-                      .filter((r) => r.from_node_id && r.to_node_id);
+                      .filter((r) => r.from_node_id && r.to_node_id && r.to_node_id !== "__NEW_NODE__");
                     setPreview({
                       title: t("hitl.remap.previewTitle"),
                       bullets: rows
@@ -834,8 +740,8 @@ export function HitlPanel({
                       confirmLabel: t("hitl.remap.previewConfirm"),
                       onConfirm: () =>
                         void onExtractionRemap({
-                          entity_remaps: uiMode === "expert" ? rows : rows.slice(0, Math.max(1, rows.length)),
-                          waive_mandatory_node_ids: uiMode === "expert" ? waiveList() : [],
+                          entity_remaps: rows,
+                          waive_mandatory_node_ids: autoWaiveMissingPlannedIds(),
                         }),
                     });
                   }}
@@ -845,40 +751,27 @@ export function HitlPanel({
               </>
             ) : null}
 
-            {selectedSolution === "b_story" && reason === HITL_REASON.B_STORY ? (
+            {selectedSolution === "b_story" && reason === HITL_REASON.ANCHOR_RESOLVE ? (
               <>
-                <h3 className="mb-2 font-headline text-xs font-bold text-on-surface">{t("hitl.bStory.sectionTitle")}</h3>
-                {bStoryDisplay.bullets.length > 0 ? (
-                  <ul className="mb-2 list-inside list-disc font-body text-sm text-on-surface">
-                    {bStoryDisplay.bullets.map((b, i) => (
-                      <li key={i}>{b}</li>
-                    ))}
-                  </ul>
+                <h3 className="mb-2 font-headline text-xs font-bold text-on-surface">{t("hitl.anchorResolve.title")}</h3>
+                <p className="mb-2 font-body text-xs text-on-surface-variant">{t("hitl.anchorResolve.hint")}</p>
+
+                {String(hitlContext?.problematic_draft_snippet ?? "").trim() ? (
+                  <div className="mb-3 rounded-md border border-outline-variant/20 bg-surface-container-low/70 px-2 py-2">
+                    <p className="font-label text-[10px] uppercase tracking-wider text-on-surface-variant">{t("hitl.draft.title")}</p>
+                    <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap font-body text-xs text-on-surface">
+                      {String(hitlContext?.problematic_draft_snippet ?? "").trim()}
+                    </pre>
+                  </div>
                 ) : null}
-                {uiMode === "expert" ? (
-                  <>
-                    <label className="auteur-label">{t("hitl.bStory.notesExpert")}</label>
-                    <textarea className={inputClass} rows={taRows(4)} disabled={controlsLocked} {...register("bAnalysis")} />
-                    <label className="auteur-label mt-2">{t("hitl.bStory.resolvedIds")}</label>
-                    <TokenEditor
-                      values={watch("bResolved")}
-                      onAdd={(v) => setValue("bResolved", Array.from(new Set([...watch("bResolved"), v])))}
-                      onRemove={(v) => setValue("bResolved", watch("bResolved").filter((x) => x !== v))}
-                      input={tokenInput}
-                      onInput={setTokenInput}
-                      disabled={controlsLocked}
-                    />
-                    <label className="auteur-label mt-2">{t("hitl.bStory.evidenceIds")}</label>
-                    <TokenEditor
-                      values={watch("bEvidence")}
-                      onAdd={(v) => setValue("bEvidence", Array.from(new Set([...watch("bEvidence"), v])))}
-                      onRemove={(v) => setValue("bEvidence", watch("bEvidence").filter((x) => x !== v))}
-                      input={tokenInputEvidence}
-                      onInput={setTokenInputEvidence}
-                      disabled={controlsLocked}
-                    />
-                  </>
-                ) : null}
+
+                <div className="rounded-lg border border-outline-variant/15 bg-surface-container-highest/30 px-3 py-2">
+                  <p className="font-label text-[10px] uppercase tracking-wider text-on-surface-variant">{t("hitl.anchorResolve.details")}</p>
+                  <pre className="mt-1 max-h-56 overflow-auto whitespace-pre-wrap font-mono text-[11px] text-on-surface">
+                    {watch("bAnalysis").trim() || "—"}
+                  </pre>
+                </div>
+
                 <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
                   <button
                     type="button"
@@ -892,58 +785,23 @@ export function HitlPanel({
                       })
                     }
                   >
-                    {t("hitl.bStory.yes")}
+                    {t("hitl.anchorResolve.confirm")}
                   </button>
                   <button
                     type="button"
                     className="rounded-xl border border-outline-variant/30 bg-surface-container-highest/50 px-4 py-4 text-left font-label text-sm font-semibold text-on-surface transition-colors hover:border-outline-variant/50 disabled:opacity-40"
                     disabled={controlsLocked}
-                    onClick={() => setBStoryRejectOpen(true)}
+                    onClick={() =>
+                      onAnchorResolution({
+                        action: "rewrite",
+                        reject_resume_from: "planner",
+                        reason: watch("bAnalysis").slice(0, 800),
+                      })
+                    }
                   >
-                    {t("hitl.bStory.no")}
+                    {t("hitl.anchorResolve.reject")}
                   </button>
                 </div>
-                {bStoryRejectOpen ? (
-                  <div className="mt-3 rounded-lg border border-outline-variant/20 bg-surface-container-low/80 p-3">
-                    <label className="auteur-label">{t("hitl.bStory.noExpandLabel")}</label>
-                    <textarea className={inputClass} rows={taRows(3)} disabled={controlsLocked} {...register("bRejectNote")} />
-                    <label className="auteur-label mt-2">{t("hitl.bStory.rejectResume")}</label>
-                    <select className={inputClass} disabled={controlsLocked} {...register("bRejectResume")}>
-                      {B_STORY_REJECT_RESUME_OPTIONS.map((o) => (
-                        <option key={o.value} value={o.value}>
-                          {t(`hitl.bStory.resumeOption.${o.value}`, o.label)}
-                        </option>
-                      ))}
-                    </select>
-                    <div className="mt-2 flex flex-col gap-2 sm:flex-row">
-                      <button
-                        type="button"
-                        className={btnClass + " sm:flex-1"}
-                        disabled={controlsLocked}
-                        onClick={() =>
-                          void onAnchorResolution({
-                            action: "rewrite",
-                            reject_resume_from: watch("bRejectResume"),
-                            reason: (getValues("bRejectNote").trim() || getValues("bAnalysis")).slice(0, 800),
-                          })
-                        }
-                      >
-                        {t("hitl.bStory.rejectSubmit")}
-                      </button>
-                      <button
-                        type="button"
-                        className="btn-secondary mt-2 w-full text-xs sm:mt-0 sm:flex-1"
-                        disabled={controlsLocked}
-                        onClick={() => {
-                          setBStoryRejectOpen(false);
-                          setValue("bRejectNote", "");
-                        }}
-                      >
-                        {t("hitl.bStory.rejectCancel")}
-                      </button>
-                    </div>
-                  </div>
-                ) : null}
               </>
             ) : null}
 
@@ -982,6 +840,28 @@ export function HitlPanel({
               </>
             ) : null}
 
+            {selectedSolution === "draft" && reason === HITL_REASON.OUTPUT_LANGUAGE ? (
+              <>
+                <h3 className="mb-2 font-headline text-xs font-bold text-on-surface">{t("hitl.outputLanguage.editTitle")}</h3>
+                <p className="mb-2 font-body text-xs text-on-surface-variant">{t("hitl.outputLanguage.editHint")}</p>
+                <textarea className={inputClass} rows={taRows(10)} disabled={controlsLocked} {...register("draftText")} />
+                <button
+                  type="button"
+                  className={btnClass}
+                  disabled={controlsLocked}
+                  onClick={() =>
+                    onDraftEdit({
+                      chapter_content: getValues("draftText"),
+                      resume_from: "output_language_gate",
+                      merge_extraction_hints: true,
+                    })
+                  }
+                >
+                  {t("hitl.outputLanguage.editApply")}
+                </button>
+              </>
+            ) : null}
+
             {hitlActive && solutionList.length === 0 ? (
               <p className="font-body text-sm text-on-surface-variant">{t("hitl.noDedicatedForm")}</p>
             ) : null}
@@ -990,8 +870,11 @@ export function HitlPanel({
             ) : null}
           </div>
 
-          {uiMode === "expert" ? (
-            <details className="mt-4 rounded-xl border border-outline-variant/15 bg-surface-container-highest/20 p-3" open={advancedOpen} onToggle={(e) => setAdvancedOpen((e.target as HTMLDetailsElement).open)}>
+          <details
+            className="mt-4 rounded-xl border border-outline-variant/15 bg-surface-container-highest/20 p-3"
+            open={advancedOpen}
+            onToggle={(e) => setAdvancedOpen((e.target as HTMLDetailsElement).open)}
+          >
             <summary className="cursor-pointer font-label text-sm font-semibold text-on-surface-variant">
               {t("hitl.advancedSummary")}
             </summary>
@@ -1032,9 +915,10 @@ export function HitlPanel({
                       title: t("hitl.previewMutationTitle"),
                       bullets: [t("hitl.previewMutationBullets", "", { count: rows.length })],
                       confirmLabel: t("hitl.confirmWrite"),
-                      onConfirm: () => void onStateInjection({
-                        mutations: rows,
-                      }),
+                      onConfirm: () =>
+                        void onStateInjection({
+                          mutations: rows,
+                        }),
                     });
                   }}
                 >
@@ -1042,8 +926,7 @@ export function HitlPanel({
                 </button>
               </div>
             </div>
-            </details>
-          ) : null}
+          </details>
           {preview ? (
             <div className="mt-4 rounded-xl border border-secondary/30 bg-secondary/10 p-3" role="dialog" aria-live="polite">
               <p className="font-headline text-sm font-bold text-on-surface">{preview.title}</p>
@@ -1090,41 +973,5 @@ function TokenEditor({
   onInput: (v: string) => void;
   disabled: boolean;
 }) {
-  return (
-    <div className="rounded-lg border border-outline-variant/20 bg-surface-container-low p-2">
-      <div className="mb-2 flex flex-wrap gap-2">
-        {values.map((v) => (
-          <span key={v} className="inline-flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-xs text-primary">
-            {v}
-            <button
-              type="button"
-              className="text-primary/70"
-              onClick={() => onRemove(v)}
-              disabled={disabled}
-              aria-label={`Remove ${v}`}
-            >
-              ×
-            </button>
-          </span>
-        ))}
-      </div>
-      <div className="flex gap-2">
-        <input
-          className="auteur-input text-sm"
-          value={input}
-          disabled={disabled}
-          onChange={(e) => onInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key !== "Enter") return;
-            e.preventDefault();
-            const next = input.trim();
-            if (!next) return;
-            onAdd(next);
-            onInput("");
-          }}
-          placeholder="Type and press Enter to add"
-        />
-      </div>
-    </div>
-  );
+  return null;
 }

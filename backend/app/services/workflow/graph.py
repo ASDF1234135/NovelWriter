@@ -458,7 +458,6 @@ def build_chapter_graph(context: WorkflowContext):
                 "hitl_decision_mode": "MANUAL_EDIT",
                 "workflow_status": WorkflowStatus.WAITING_HITL.value,
                 "pending_hitl_options": [
-                    {"id": "allow_adjust_anchor", "label": "允許調整錨點（請另提交錨點延期）"},
                     {"id": "force_rewrite_plan", "label": "強制重寫大綱"},
                     {"id": "force_approve_plan", "label": "強制放行（以目前大綱進入 Author）"},
                 ],
@@ -473,7 +472,10 @@ def build_chapter_graph(context: WorkflowContext):
                     "hitl_reason": HitlReason.RESOLUTION_TACTIC_COOLDOWN_VIOLATION,
                     "hitl_decision_mode": "MANUAL_EDIT",
                     "workflow_status": WorkflowStatus.WAITING_HITL.value,
-                    "pending_hitl_options": [],
+                    "pending_hitl_options": [
+                        {"id": "force_rewrite_plan", "label": "重來一次（清空大綱重試計次）"},
+                        {"id": "force_approve_plan", "label": "強制放行（以目前大綱進入 Author）"},
+                    ],
                     "resume_from": "planner",
                 }
             elif not approved and "ENDING_VIBE_COOLDOWN_HARD_VIOLATION" in feedback_text:
@@ -483,7 +485,10 @@ def build_chapter_graph(context: WorkflowContext):
                     "hitl_reason": HitlReason.ENDING_VIBE_COOLDOWN_VIOLATION,
                     "hitl_decision_mode": "MANUAL_EDIT",
                     "workflow_status": WorkflowStatus.WAITING_HITL.value,
-                    "pending_hitl_options": [],
+                    "pending_hitl_options": [
+                        {"id": "force_rewrite_plan", "label": "重來一次（清空大綱重試計次）"},
+                        {"id": "force_approve_plan", "label": "強制放行（以目前大綱進入 Author）"},
+                    ],
                     "resume_from": "planner",
                 }
             else:
@@ -576,7 +581,7 @@ def build_chapter_graph(context: WorkflowContext):
                 "hitl_decision_mode": "DASHBOARD",
                 "workflow_status": WorkflowStatus.WAITING_HITL.value,
                 "pending_hitl_options": [
-                    {"id": "keep_current_logic", "label": "保持邏輯並重寫"},
+                    {"id": "keep_current_logic", "label": "維持現有草稿（強制通過）"},
                     {"id": "relax_word_count", "label": "放寬字數要求"},
                 ],
                 "resume_from": "author",
