@@ -108,7 +108,8 @@ ENTITY_EXTRACTION_GUIDELINES: list[str] = [
     "If a name/alias matches existing_node_candidates, set suggested_node_id to that node_id; otherwise leave suggested_node_id empty.",
     "Do not invent node_id values; the system assigns final ids.",
     "canonical_name must be short (within ~10 graphemes) for CHARACTER/LOCATION/ITEM/RULE/PERSONA; put longer prose in summary/metadata.",
-    "ground_truth_events lists planner beats with stable event_id hints—do NOT invent EVENT rows unless the chapter text substantiates them; align ids via suggested_node_id when an extracted EVENT matches a beat.",
+    "ground_truth_events lists expected beats. However, characters often take unexpected actions in the prose. You MUST extract ANY objectively verifiable plot-driving event (combat, discoveries, rule-breaking) present in the text, EVEN IF it is not listed in ground_truth_events.",
+    "When matching an extracted event to a ground_truth_events beat, rely on semantic meaning, not exact wording. If the text says 'two shadows leaped out', it matches the beat 'assassin attack'. Map it to the corresponding suggested_node_id.",
     "When you extract an EVENT as a graph candidate, use a short intentional title for canonical_name and put the full beat meaning in summary—do not copy arbitrary mid-sentence fragments as the title.",
     "If an existing_node_candidates row matches a ground_truth_events.event_id, set suggested_node_id to that node_id.",
     "Zero-noise rule: do not extract background decor, mundane consumables (cans, cigarettes), ambient traces (bloody fingerprints), or abstract narrative viewpoints ('the observer'). Only plot-driving entities with special function or repeated use.",
@@ -782,6 +783,12 @@ def _build_relation_prompt(ctx: ExtractionContext, canonical_rows: list[dict[str
 
 
 def _build_phase1_relation_prompt(ctx: ExtractionContext, canonical_rows: list[dict[str, str]]) -> str:
+    # Phase 1 prefers full chapter text for higher recall; only apply excerpting when the chapter is unusually long.
+    chapter_text = (
+        ctx.chapter_content_full
+        if len(ctx.chapter_content_full or "") <= 20000
+        else ctx.chapter_text_for_relations
+    )
     return json.dumps(
         {
             "story_id": ctx.state["story_id"],
@@ -793,7 +800,8 @@ def _build_phase1_relation_prompt(ctx: ExtractionContext, canonical_rows: list[d
             "graph_summary": _safe_json_dict(ctx.graph_summary_json),
             "guidelines": RELATION_EXTRACTION_GUIDELINES + PHASE1_RELATION_GUIDELINES,
             "chapter_chunks": ctx.chapter_chunks_for_prompt,
-            "chapter_excerpt": ctx.chapter_text_for_relations,
+            "chapter_excerpt": chapter_text,
+            "prompt_char_budget": len(chapter_text),
         },
         ensure_ascii=False,
     )

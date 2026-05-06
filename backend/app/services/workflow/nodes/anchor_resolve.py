@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 
-from app.domain.schema import AnchorResolutionOutput
+from app.domain.schema import AnchorResolutionOutput, GraphRAGEvaluateOutput
+from app.services.graph_rag_service import GraphRAGService
 from app.services.llm import MockLLMClient
 from app.services.workflow.context import WorkflowContext
 from app.services.workflow.output_language import augment_profile_system_prompt
@@ -143,12 +144,12 @@ def _recompute_unlocks(anchor_nodes: list[dict], resolved: set[str]) -> tuple[li
 
 
 def run_anchor_resolve(state: dict, context: WorkflowContext) -> dict:
-    chapter_text = str(state.get("current_draft") or state.get("best_draft_content") or "")
     anchor_nodes = list(state.get("anchor_nodes") or [])
     selected = [str(x).strip() for x in (state.get("selected_anchor_ids") or []) if str(x).strip()]
     node_by_id = {str(n.get("id") or ""): n for n in anchor_nodes}
     resolved = set(str(x).strip() for x in (state.get("resolved_anchors") or []) if str(x).strip())
     hitl_required = False
+    evidence_rows: list[dict] = []
 
     if not selected:
         output = AnchorResolutionOutput(
@@ -160,49 +161,86 @@ def run_anchor_resolve(state: dict, context: WorkflowContext) -> dict:
             decision_reason="No selected anchors; continue workflow.",
         )
     elif isinstance(context.llm_client, MockLLMClient):
+        chapter_text = str(state.get("current_draft") or state.get("best_draft_content") or "")
         output, hitl_required = _fallback_resolution(chapter_text, selected, node_by_id)
     else:
-        selected_rows = [
-            {
-                "anchor_id": aid,
-                "title": str((node_by_id.get(aid) or {}).get("title") or ""),
-                "description": str((node_by_id.get(aid) or {}).get("description") or ""),
-                "node_kind": str((node_by_id.get(aid) or {}).get("node_kind") or ""),
-            }
-            for aid in selected
-        ]
-        deterministic_hints = [
-            _build_anchor_evidence(chapter_text, aid, str((node_by_id.get(aid) or {}).get("description") or ""))
-            for aid in selected
-        ]
-        profile = augment_profile_system_prompt(get_profile("anchor_resolver"), context.output_language)
-        prompt = _build_anchor_resolve_prompt(chapter_text, selected_rows, deterministic_hints)
+        story_id = str(state.get("story_id") or "").strip()
+        active_epoch_id = str(state.get("active_epoch_id") or "epoch_present").strip() or "epoch_present"
+        pov_character_id = str(state.get("pov_character_id") or "char_public_observer").strip() or "char_public_observer"
+        graph_rag = GraphRAGService(
+            graph_store=context.graph_store,
+            vector_store=context.vector_store,
+            llm=context.llm_client,
+        )
         try:
-            structured, _llm_result = context.llm_client.invoke_json(prompt, AnchorResolutionOutput, profile)
-            resolved_now, unresolved = _normalize_partition(
-                selected,
-                [str(x).strip() for x in structured.resolved_anchor_ids if str(x).strip()],
-                [str(x).strip() for x in structured.unresolved_anchor_ids if str(x).strip()],
-            )
+            per_anchor: dict[str, GraphRAGEvaluateOutput] = {}
+            for aid in selected:
+                node = node_by_id.get(aid) or {}
+                title = str(node.get("title") or "").strip()
+                desc = str(node.get("description") or "").strip()
+                kind = str(node.get("node_kind") or "").strip()
+                deps = [str(x).strip() for x in (node.get("depends_on") or []) if str(x).strip()]
+
+                condition_desc = (
+                    "You are judging anchor completion.\n"
+                    f"Anchor id: {aid}\n"
+                    f"Anchor kind: {kind}\n"
+                    f"Anchor title: {title}\n"
+                    f"Anchor description: {desc}\n"
+                    f"Dependencies (must already be resolved): {deps}\n\n"
+                    "Question: Is this anchor already achieved/resolved given the current story state?\n"
+                    "Return resolved=true ONLY if the evidence pack contains objective facts proving completion.\n"
+                )
+                per_anchor[aid] = graph_rag.evaluate_condition(
+                    condition_desc,
+                    story_id=story_id,
+                    active_epoch_id=active_epoch_id,
+                    pov_character_id=pov_character_id,
+                    response_model=GraphRAGEvaluateOutput,
+                )
+
+            for aid, verdict in per_anchor.items():
+                row = {
+                    "anchor_id": aid,
+                    "resolved": bool(verdict.resolved),
+                    "confidence": float(verdict.confidence),
+                    "reasoning": str(verdict.reasoning or "").strip(),
+                }
+                evidence_rows.append(row)
+                if float(verdict.confidence) < 0.55:
+                    hitl_required = True
+                if verdict.resolved:
+                    resolved.add(aid)
+
+            resolved_now = [aid for aid in selected if aid in resolved]
+            unresolved = [aid for aid in selected if aid not in resolved]
             chapter_matches_plan = len(unresolved) == 0
+            resolver_confidence = 1.0
+            selected_conf = [r["confidence"] for r in evidence_rows if r.get("anchor_id") in set(selected)]
+            if selected_conf:
+                resolver_confidence = float(min(selected_conf))
             output = AnchorResolutionOutput(
-                resolution_analysis=str(structured.resolution_analysis or "").strip()
-                or ("Anchor resolution succeeded." if chapter_matches_plan else "Anchor resolution mismatch."),
+                resolution_analysis=(
+                    "Anchor evaluation completed via GraphRAG evidence."
+                    if not hitl_required
+                    else "Anchor evaluation uncertain: at least one anchor fell below confidence threshold."
+                ),
                 resolved_anchor_ids=resolved_now,
                 unresolved_anchor_ids=unresolved,
                 chapter_matches_plan=chapter_matches_plan,
-                evidence_summary=list(structured.evidence_summary or deterministic_hints),
-                decision_reason=str(structured.decision_reason or "").strip()
-                or ("All selected anchors are resolved." if chapter_matches_plan else "Some selected anchors are unresolved."),
-                resolver_confidence=float(structured.resolver_confidence),
-                requires_human_review=bool(structured.requires_human_review),
+                evidence_summary=evidence_rows,
+                decision_reason=(
+                    "All selected anchors are resolved."
+                    if chapter_matches_plan and not hitl_required
+                    else "Some selected anchors are unresolved or require human adjudication."
+                ),
+                resolver_confidence=resolver_confidence,
+                requires_human_review=bool(hitl_required),
             )
-            hitl_required = bool(structured.requires_human_review) or float(structured.resolver_confidence) < 0.45
         except Exception:
+            chapter_text = str(state.get("current_draft") or state.get("best_draft_content") or "")
             output, hitl_required = _fallback_resolution(chapter_text, selected, node_by_id)
 
-    for aid in output.resolved_anchor_ids:
-        resolved.add(str(aid).strip())
     next_nodes, candidates = _recompute_unlocks(anchor_nodes, resolved)
     unresolved_non_terminal = [
         n

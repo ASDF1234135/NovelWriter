@@ -108,7 +108,7 @@ const zhHant: Messages = {
   "setup.compileCancelledNotice": "已取消編譯；請先儲存設定後再試。",
 
   "compile.progress.queued": "排隊中，等待編譯任務啟動…",
-  "compile.progress.running": "正在編譯世界觀與宏觀結構…",
+  "compile.progress.running": "正在編譯世界觀與宏觀結構… (此步驟通常需5~10分鐘，請耐心等待)",
   "compile.progress.succeeded": "編譯完成。",
   "compile.progress.failed": "編譯失敗。",
 
@@ -498,7 +498,7 @@ const zhHans: Messages = {
   "setup.compileCancelledNotice": "已取消编译；请先保存设置后再试。",
 
   "compile.progress.queued": "排队中，等待编译任务启动…",
-  "compile.progress.running": "正在编译世界观与宏观结构…",
+  "compile.progress.running": "正在编译世界观与宏观结构… (此步骤通常需5~10分钟，请耐心等待)",
   "compile.progress.succeeded": "编译完成。",
   "compile.progress.failed": "编译失败。",
 
@@ -976,7 +976,7 @@ const en: Messages = {
   "setup.compileCancelledNotice": "Compile cancelled. Save settings first, then try again.",
 
   "compile.progress.queued": "Queued. Waiting for compile worker…",
-  "compile.progress.running": "Compiling world bible and macro structure…",
+  "compile.progress.running": "Compiling world bible and macro structure… (This step usually takes 5~10 minutes, please wait patiently.)",
   "compile.progress.succeeded": "Compile completed.",
   "compile.progress.failed": "Compile failed.",
 
