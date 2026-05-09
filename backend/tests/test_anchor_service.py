@@ -2,12 +2,14 @@ import json
 import pytest
 
 from app.domain.schema import (
+    AnchorNode,
     MacroCastMember,
     MacroNestedAnchorDraft,
     MacroPlanOutput,
     MacroVolumePlanDraft,
     StoryCastSeedEntry,
     StoryInput,
+    VolumePlan,
 )
 from app.services.anchor_service import AnchorService, MACRO_AUTHOR_NOTES_MAX, clamp_macro_author_notes
 from app.services.workflow.profiles import AgentPromptProfile
@@ -50,7 +52,8 @@ def _stub_slot_fill_json_responses(data: dict, response_model):
                     "description": "測試填寫的節點描述，符合前置依賴與故事線目標。",
                 }
             )
-        return response_model.model_validate({"items": items})
+        out = {"items": items, "batch_summary": "stub batch recap for tests"}
+        return response_model.model_validate(out)
     return None
 
 
@@ -156,6 +159,16 @@ class FakeStructuredLLMClient:
             (),
             {"content": "", "token_usage": 42, "latency_ms": 15},
         )()
+
+
+class RecordingFakeStructuredLLMClient(FakeStructuredLLMClient):
+    def __init__(self) -> None:
+        self.json_prompts: list[dict] = []
+
+    def invoke_json(self, prompt: str, response_model, profile: AgentPromptProfile):
+        data = _load_json_prompt_first(prompt)
+        self.json_prompts.append(data)
+        return super().invoke_json(prompt, response_model, profile)
 
 
 class FakeStructuredLLMClientWithNotesLinks(FakeStructuredLLMClient):
@@ -933,6 +946,48 @@ def test_fishbone_mainline_links_first_node_to_previous_volume_last_main() -> No
         assert last_prev_id in deps, f"{cur_vid} first main should depend on {last_prev_id}, got {deps}"
 
 
+def test_fishbone_s_tier_cross_volume_start_depends_on_previous_s_tail_and_checkpoint() -> None:
+    service = AnchorService()
+    volumes, _, _, _, bible = service.compile_macro_plan(
+        "story_cross_vol_s_tier",
+        StoryInput(
+            title="Cross-volume S tier",
+            premise="S-tier lines should bridge through volume checkpoints.",
+            target_total_words=60000,
+        ),
+        FakeStructuredLLMClient(),
+    )
+    storylines = bible.get("storylines") or []
+    anchor_nodes = bible.get("anchor_nodes") or []
+    s_ids = [str(s.get("id")) for s in storylines if str(s.get("type")) == "S_TIER"]
+    vol_ids = [v.volume_id for v in volumes]
+    assert s_ids
+    assert len(vol_ids) >= 2
+
+    for sid in s_ids:
+        by_volume: dict[str, list[dict]] = {vid: [] for vid in vol_ids}
+        for node in anchor_nodes:
+            if sid not in [str(x) for x in (node.get("storyline_ids") or [])]:
+                continue
+            if str(node.get("node_kind") or "").upper() != "NORMAL":
+                continue
+            vid = str(node.get("volume_id") or "")
+            if vid in by_volume:
+                by_volume[vid].append(node)
+
+        for i in range(1, len(vol_ids)):
+            prev_vid, cur_vid = vol_ids[i - 1], vol_ids[i]
+            prev_nodes = by_volume.get(prev_vid, [])
+            cur_nodes = by_volume.get(cur_vid, [])
+            if not prev_nodes or not cur_nodes:
+                continue
+            deps = {str(x) for x in (cur_nodes[0].get("depends_on") or [])}
+            prev_s_tail = str(prev_nodes[-1].get("id"))
+            prev_checkpoint = f"{prev_vid}_checkpoint"
+            assert prev_s_tail in deps, f"{cur_nodes[0].get('id')} should depend on {prev_s_tail}, got {deps}"
+            assert prev_checkpoint in deps, f"{cur_nodes[0].get('id')} should depend on {prev_checkpoint}, got {deps}"
+
+
 def test_fishbone_checkpoint_depends_on_storyline_tails_only() -> None:
     service = AnchorService()
     _, volumes, _, _, bible = service.compile_macro_plan(
@@ -1100,3 +1155,86 @@ def test_stage3_slot_fill_prompt_contains_fishbone_hard_rules() -> None:
     assert "No spoilers and no repetition" in prompt
     assert "must strictly match the spatiotemporal context" in prompt
     assert "No deterministic breakthrough ahead of mainline schedule" in prompt
+
+
+def test_mainline_second_batch_prompt_has_prior_summaries() -> None:
+    rec = RecordingFakeStructuredLLMClient()
+    service = AnchorService()
+    service.compile_macro_plan(
+        "story_prior_sum_accum",
+        StoryInput(title="BatchPrompt", premise="accumulate prior summaries.", target_total_words=30000),
+        rec,
+    )
+    main_prompts = [p for p in rec.json_prompts if str(p.get("stage", "")).startswith("stage3.1_mainline.batch")]
+    assert len(main_prompts) >= 2
+    assert main_prompts[0]["prior_main_batch_summaries"] == []
+    assert len(main_prompts[1]["prior_main_batch_summaries"]) == 1
+    assert main_prompts[1]["prior_main_batch_summaries"][0].get("summary")
+
+
+def test_side_prompt_has_main_batch_summaries_and_attachment_context() -> None:
+    rec = RecordingFakeStructuredLLMClient()
+    service = AnchorService()
+    service.compile_macro_plan(
+        "story_side_ctx_prompt",
+        StoryInput(title="SideCtx", premise="side attachment context.", target_total_words=30000),
+        rec,
+    )
+    side_prompts = [p for p in rec.json_prompts if p.get("stage") == "stage3.3_side_arcs"]
+    assert side_prompts
+    sp = side_prompts[-1]
+    assert sp.get("main_batch_summaries")
+    for row in sp.get("nodes") or []:
+        ac = row.get("attachment_context")
+        assert ac is not None
+        assert "spine_windows" in ac
+        assert "main_spine_mount_nodes" in ac
+
+
+def test_side_attachment_spine_window_three_or_fallback_one() -> None:
+    service = AnchorService()
+    mains = [
+        AnchorNode(id="m0", storyline_ids=["t_main"], volume_id="v1", title="M0", description="d0"),
+        AnchorNode(id="m1", storyline_ids=["t_main"], volume_id="v1", title="M1", description="d1"),
+        AnchorNode(id="m2", storyline_ids=["t_main"], volume_id="v1", title="M2", description="d2"),
+    ]
+    by_id = {n.id: n for n in mains}
+    vol = VolumePlan(
+        volume_id="v1",
+        title="",
+        summary="",
+        chapter_start=1,
+        chapter_end=5,
+    )
+    spine = AnchorService._main_spine_sequence(mains, [vol])
+    side_hi = AnchorNode(
+        id="s_hi",
+        storyline_ids=["t_s"],
+        volume_id="v1",
+        title="",
+        description="",
+        depends_on=["m2"],
+    )
+    ctx_hi = service._build_side_attachment_context(
+        side_hi,
+        by_id=by_id,
+        main_node_ids={"m0", "m1", "m2"},
+        main_spine_sequence=spine,
+    )
+    assert ctx_hi["spine_windows"][0]["window_node_ids"] == ["m0", "m1", "m2"]
+
+    side_lo = AnchorNode(
+        id="s_lo",
+        storyline_ids=["t_s"],
+        volume_id="v1",
+        title="",
+        description="",
+        depends_on=["m0"],
+    )
+    ctx_lo = service._build_side_attachment_context(
+        side_lo,
+        by_id=by_id,
+        main_node_ids={"m0", "m1", "m2"},
+        main_spine_sequence=spine,
+    )
+    assert ctx_lo["spine_windows"][0]["window_node_ids"] == ["m0"]

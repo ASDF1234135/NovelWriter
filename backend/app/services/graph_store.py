@@ -110,6 +110,16 @@ class GraphStore(Protocol):
         """Keep only reserved + current cast CHARACTER nodes for this story."""
         ...
 
+    def replace_cast_characters_and_apply_mutations(
+        self,
+        story_id: str,
+        *,
+        keep_cast_node_ids: Iterable[str] = (),
+        mutations: Iterable[NodeMutation | EdgeMutation] = (),
+    ) -> None:
+        """Atomically replace cast characters and apply mutations (Graph-internal strong consistency)."""
+        ...
+
     def list_enforced_rules_for_context(
         self,
         story_id: str,
@@ -282,6 +292,27 @@ class InMemoryGraphStore:
             if edge.source_id in removed_ids or edge.target_id in removed_ids:
                 del edges[eid]
 
+    def replace_cast_characters_and_apply_mutations(
+        self,
+        story_id: str,
+        *,
+        keep_cast_node_ids: Iterable[str] = (),
+        mutations: Iterable[NodeMutation | EdgeMutation] = (),
+    ) -> None:
+        # Best-effort in-memory "transaction": apply both steps or roll back.
+        from copy import deepcopy
+
+        self.seed_story(story_id)
+        nodes_before = deepcopy(self.story_nodes.get(story_id, {}))
+        edges_before = deepcopy(self.story_edges.get(story_id, {}))
+        try:
+            self.replace_cast_characters(story_id, keep_cast_node_ids=keep_cast_node_ids)
+            self.apply_mutations(story_id, mutations)
+        except Exception:
+            self.story_nodes[story_id] = nodes_before
+            self.story_edges[story_id] = edges_before
+            raise
+
     def remove_story(self, story_id: str) -> None:
         self.story_nodes.pop(story_id, None)
         self.story_edges.pop(story_id, None)
@@ -407,6 +438,88 @@ class Neo4jGraphStore:
                     story_id=story_id,
                     keep_ids=sorted(keep_ids),
                 )
+
+        self._run_with_retry(operation)
+
+    def replace_cast_characters_and_apply_mutations(
+        self,
+        story_id: str,
+        *,
+        keep_cast_node_ids: Iterable[str] = (),
+        mutations: Iterable[NodeMutation | EdgeMutation] = (),
+    ) -> None:
+        """
+        Graph-internal strong consistency: execute cast replacement + mutation application
+        in a single Neo4j write transaction.
+        """
+        self.seed_story(story_id)
+        keep_ids = {str(nid).strip() for nid in keep_cast_node_ids if str(nid).strip()}
+        keep_ids.update(RESERVED_CHARACTER_NODE_IDS)
+
+        def operation() -> None:
+            with self.driver.session(database=self.database) as session:
+                def _tx(tx) -> None:
+                    tx.run(
+                        """
+                        MATCH (n:StoryNode:CHARACTER {story_id: $story_id})
+                        WHERE NOT n.node_id IN $keep_ids
+                        DETACH DELETE n
+                        """,
+                        story_id=story_id,
+                        keep_ids=sorted(keep_ids),
+                    )
+                    for mutation in mutations:
+                        if isinstance(mutation, NodeMutation):
+                            node = GraphNodeAdapter.from_mutation(mutation)
+                            label = node.node_type.value
+                            props = _prepare_neo4j_node_properties(node, story_id)
+                            tx.run(
+                                f"""
+                                MERGE (n:StoryNode:{label} {{story_id: $story_id, node_id: $node_id}})
+                                SET n += $props
+                                """,
+                                story_id=story_id,
+                                node_id=node.node_id,
+                                props=props,
+                            )
+                        else:
+                            edge_id = mutation.edge_id or f"{mutation.source_id}:{mutation.relation_type}:{mutation.target_id}"
+                            if mutation.action == "DELETE_EDGE":
+                                tx.run(
+                                    """
+                                    MATCH (:StoryNode {story_id: $story_id, node_id: $source_id})-[r {story_id: $story_id, edge_id: $edge_id}]->(:StoryNode {story_id: $story_id, node_id: $target_id})
+                                    DELETE r
+                                    """,
+                                    story_id=story_id,
+                                    source_id=mutation.source_id,
+                                    target_id=mutation.target_id,
+                                    edge_id=edge_id,
+                                )
+                                continue
+
+                            rel_type = mutation.relation_type.value
+                            attributes = dict(mutation.attributes)
+                            attributes["edge_id"] = edge_id
+                            attributes["story_id"] = story_id
+                            attributes["source_id"] = mutation.source_id
+                            attributes["target_id"] = mutation.target_id
+                            attributes["relation_type"] = rel_type
+                            attributes = _prepare_neo4j_rel_attributes(attributes)
+                            tx.run(
+                                f"""
+                                MATCH (s:StoryNode {{story_id: $story_id, node_id: $source_id}})
+                                MATCH (t:StoryNode {{story_id: $story_id, node_id: $target_id}})
+                                MERGE (s)-[r:{rel_type} {{story_id: $story_id, edge_id: $edge_id}}]->(t)
+                                SET r += $attributes
+                                """,
+                                story_id=story_id,
+                                source_id=mutation.source_id,
+                                target_id=mutation.target_id,
+                                edge_id=edge_id,
+                                attributes=attributes,
+                            )
+
+                session.execute_write(_tx)
 
         self._run_with_retry(operation)
 

@@ -36,6 +36,7 @@ from app.services.workflow.profiles import get_profile
 
 logger = logging.getLogger(__name__)
 _BIBLE_PRIMARY_OPTIONAL_KEYS = frozenset({"theme", "narrative_pov", "writing_style"})
+MAIN_SLOT_BATCH_SUMMARY_MAX = 500
 
 
 class _LLMStorylineDraft(BaseModel):
@@ -69,6 +70,7 @@ class _LLMSlotFillItem(BaseModel):
 
 class _LLMSlotFillOutput(BaseModel):
     items: list[_LLMSlotFillItem] = Field(default_factory=list)
+    batch_summary: str = ""
 
 
 class _LLMStorylineSlotItem(BaseModel):
@@ -389,6 +391,7 @@ class AnchorService:
             volume_last_main[vol.volume_id] = main_rows[-1].anchor_id
             prev_volume_last_main = main_rows[-1].anchor_id
 
+        prev_checkpoint_id: str | None = None
         for vol in volumes:
             start_main = volume_start_main.get(vol.volume_id)
             last_main = volume_last_main.get(vol.volume_id)
@@ -397,10 +400,14 @@ class AnchorService:
             s_tail_ids: list[str] = []
             for s_idx, sid in enumerate(s_ids, start=1):
                 count = rng.randint(1, 3)
-                prev = prev_s_tail.get(sid, start_main)
+                prior_s_tail = prev_s_tail.get(sid)
+                prev = prior_s_tail or start_main
                 for i in range(count):
                     nid = f"{vol.volume_id}_s{s_idx:02d}_{i+1:02d}"
                     deps = [prev] if prev else []
+                    if i == 0 and prior_s_tail and prev_checkpoint_id:
+                        deps.append(prev_checkpoint_id)
+                    deps = list(dict.fromkeys([d for d in deps if d]))
                     if not deps:
                         roots.add(nid)
                     nodes.append(
@@ -460,6 +467,7 @@ class AnchorService:
                     status=AnchorStatus.LOCKED,
                 )
             )
+            prev_checkpoint_id = cp
 
         if b_ids:
             main_all = [a.anchor_id for a in sorted(anchors, key=lambda x: (x.priority, x.anchor_id))]
@@ -1527,6 +1535,8 @@ class AnchorService:
             s_deps = [fork_id]
             if prev_s_node:
                 s_deps.append(prev_s_node)
+            if prev_s_node and prev_checkpoint:
+                s_deps.append(prev_checkpoint)
             if s_tier_id:
                 nodes.append(
                     AnchorNode(
@@ -1539,7 +1549,7 @@ class AnchorService:
                             thread_desc.get("s_thread_desc")
                             or f"Advance a long-horizon S-tier thread through {volume_id}."
                         ),
-                        depends_on=s_deps,
+                        depends_on=list(dict.fromkeys(s_deps)),
                         status=AnchorStatus.LOCKED,
                     )
                 )
@@ -1816,32 +1826,156 @@ class AnchorService:
         node_rows: list[dict[str, Any]],
         context_summary: str = "",
         narrative_context: dict[str, Any] | None = None,
+        prior_main_batch_summaries: list[dict[str, Any]] | None = None,
+        batch_hint: dict[str, Any] | None = None,
+        main_batch_summaries: list[dict[str, Any]] | None = None,
+        expect_batch_summary: bool = False,
     ) -> str:
+        base_rules = [
+            "You can only fill title and description.",
+            "Do not invent or modify node_id, depends_on, node_kind, storyline_ids, volume_id.",
+            "Return one item for each input node_id.",
+            "Use narrative_context (storylines, bible_excerpt, volumes, cast) to keep anchors aligned with the macro plan and each storyline's overall_goal.",
+            "S_TIER is a book-spanning important side arc (identity mystery, long-term growth) and must serve the mainline.",
+            "A_TIER is a volume-scoped side arc (e.g., key item/ability acquisition) and must serve this volume mainline.",
+            "B_TIER is a short side beat for texture and character charm, never a decisive plotline.",
+            "No spoilers and no repetition: side-arc content must not duplicate mainline events.",
+            "Each node description must strictly match the spatiotemporal context implied by its depends_on predecessors.",
+            "No deterministic breakthrough ahead of mainline schedule.",
+            "If any rule is violated, rewrite the offending item and keep topology unchanged.",
+        ]
+        rules = list(base_rules)
+        output_shape: dict[str, Any] = {
+            "items": [{"node_id": "string", "title": "string", "description": "string"}]
+        }
+
+        if expect_batch_summary:
+            rules.extend([
+                "Additionally output batch_summary: one concise recap of the mainline beats filled in THIS batch only.",
+                f"batch_summary must be under ~{MAIN_SLOT_BATCH_SUMMARY_MAX} characters and in output_language.",
+                "prior_main_batch_summaries summarizes earlier mainline batches; stay consistent with it.",
+            ])
+            output_shape["batch_summary"] = (
+                f"string (concise recap of this batch mainline beats, max ~{MAIN_SLOT_BATCH_SUMMARY_MAX} chars)"
+            )
+
+        if main_batch_summaries is not None:
+            rules.extend([
+                "main_batch_summaries lists recap per completed mainline batch (batch_index, volume_id, summary). Honor series pacing.",
+                "Each node row includes attachment_context (program-supplied): use spine_windows, main_spine_mount_nodes, and depends_on_context together.",
+                "Do not contradict attachment_context mount windows or earlier batch summaries.",
+            ])
+
         payload: dict[str, Any] = {
             "task": "Fill content slots only; never modify topology fields.",
             "stage": stage_label,
             "output_language": normalize_output_language(story_input.output_language),
-            "rules": [
-                "You can only fill title and description.",
-                "Do not invent or modify node_id, depends_on, node_kind, storyline_ids, volume_id.",
-                "Return one item for each input node_id.",
-                "Use narrative_context (storylines, bible_excerpt, volumes, cast) to keep anchors aligned with the macro plan and each storyline's overall_goal.",
-                "S_TIER is a book-spanning important side arc (identity mystery, long-term growth) and must serve the mainline.",
-                "A_TIER is a volume-scoped side arc (e.g., key item/ability acquisition) and must serve this volume mainline.",
-                "B_TIER is a short side beat for texture and character charm, never a decisive plotline.",
-                "No spoilers and no repetition: side-arc content must not duplicate mainline events.",
-                "Each node description must strictly match the spatiotemporal context implied by its depends_on predecessors.",
-                "No deterministic breakthrough ahead of mainline schedule.",
-                "If any rule is violated, rewrite the offending item and keep topology unchanged.",
-            ],
+            "rules": rules,
             "context_summary": context_summary,
             "narrative_context": narrative_context or {},
             "nodes": node_rows,
-            "output_shape": {
-                "items": [{"node_id": "string", "title": "string", "description": "string"}]
-            },
+            "output_shape": output_shape,
         }
+        if prior_main_batch_summaries is not None:
+            payload["prior_main_batch_summaries"] = prior_main_batch_summaries
+        if batch_hint is not None:
+            payload["batch_hint"] = batch_hint
+        if main_batch_summaries is not None:
+            payload["main_batch_summaries"] = main_batch_summaries
         return json.dumps(payload, ensure_ascii=False)
+
+    @staticmethod
+    def _partition_mainline_batches(
+        main_nodes: list[AnchorNode], volumes: list[VolumePlan]
+    ) -> list[list[AnchorNode]]:
+        by_vol: dict[str, list[AnchorNode]] = {}
+        for n in main_nodes:
+            by_vol.setdefault(n.volume_id, []).append(n)
+        return [by_vol[v.volume_id] for v in volumes if v.volume_id in by_vol]
+
+    @staticmethod
+    def _main_spine_sequence(main_nodes: list[AnchorNode], volumes: list[VolumePlan]) -> list[str]:
+        vol_rank = {v.volume_id: i for i, v in enumerate(volumes)}
+        indices = sorted(range(len(main_nodes)), key=lambda i: (vol_rank.get(main_nodes[i].volume_id, 9999), i))
+        return [main_nodes[i].id for i in indices]
+
+    def _fallback_batch_summary_for_nodes(self, batch: list[AnchorNode], by_id: dict[str, AnchorNode]) -> str:
+        titles: list[str] = []
+        for n in batch:
+            row = by_id.get(n.id)
+            if row and str(row.title or "").strip():
+                titles.append(str(row.title).strip())
+        s = "; ".join(titles) if titles else "Mainline batch pacing recap."
+        return s[:MAIN_SLOT_BATCH_SUMMARY_MAX]
+
+    def _build_side_attachment_context(
+        self,
+        node: AnchorNode,
+        *,
+        by_id: dict[str, AnchorNode],
+        main_node_ids: set[str],
+        main_spine_sequence: list[str],
+    ) -> dict[str, Any]:
+        mount_ids = [str(d).strip() for d in (node.depends_on or []) if str(d).strip() in main_node_ids]
+        spine_windows: list[dict[str, Any]] = []
+        idx_map = {nid: i for i, nid in enumerate(main_spine_sequence)}
+
+        def snapshot(nid: str) -> dict[str, str]:
+            row = by_id.get(nid)
+            if not row:
+                return {"node_id": nid, "title": "", "description": "", "volume_id": ""}
+            return {
+                "node_id": row.id,
+                "title": str(row.title or ""),
+                "description": str(row.description or ""),
+                "volume_id": str(row.volume_id or ""),
+            }
+
+        for m in mount_ids:
+            idx = idx_map.get(m)
+            if idx is None:
+                spine_windows.append({"mount_id": m, "window_node_ids": [m], "nodes": [snapshot(m)]})
+                continue
+            if idx >= 2:
+                wids = main_spine_sequence[idx - 2 : idx + 1]
+            else:
+                wids = [m]
+            spine_windows.append(
+                {"mount_id": m, "window_node_ids": wids, "nodes": [snapshot(x) for x in wids if x in by_id]}
+            )
+
+        flat_mount_nodes: list[dict[str, str]] = []
+        seen_flat: set[str] = set()
+        for w in spine_windows:
+            for node_row in w.get("nodes") or []:
+                nid = str(node_row.get("node_id") or "")
+                if nid and nid not in seen_flat:
+                    seen_flat.add(nid)
+                    flat_mount_nodes.append(node_row)
+
+        non_main = [
+            str(d).strip()
+            for d in (node.depends_on or [])
+            if str(d).strip() and str(d).strip() not in main_node_ids
+        ]
+        attachment_summary = ""
+        if mount_ids:
+            attachment_summary = (
+                f"Side beat in volume {node.volume_id}; main spine mount ids: {', '.join(mount_ids)}."
+            )
+        elif non_main:
+            attachment_summary = (
+                f"Side beat in volume {node.volume_id}; depends on non-main predecessors only."
+            )
+
+        return {
+            "spine_windows": spine_windows,
+            "main_spine_mount_nodes": flat_mount_nodes,
+            "non_main_predecessors": non_main,
+            "storyline_ids": list(node.storyline_ids or []),
+            "volume_id": str(node.volume_id or ""),
+            "attachment_summary": attachment_summary,
+        }
 
     def _slot_fill_policy_violations(self, text: str) -> int:
         t = (text or "").strip().lower()
@@ -1872,22 +2006,39 @@ class AnchorService:
             return anchor_nodes, {"slot_fill_skipped": True, "slot_fill_retries": 0}
         profile = augment_profile_system_prompt(get_profile("macro_planner"), story_input.output_language)
         by_id = {n.id: n for n in anchor_nodes}
-        main_nodes = [n for n in anchor_nodes if n.node_kind == "NORMAL" and any(sid.endswith("_main") for sid in n.storyline_ids)]
+        main_nodes = [
+            n
+            for n in anchor_nodes
+            if n.node_kind == "NORMAL" and any(sid.endswith("_main") for sid in n.storyline_ids)
+        ]
         side_nodes = [n for n in anchor_nodes if n.node_kind == "NORMAL" and n.id not in {m.id for m in main_nodes}]
+        main_node_ids = {n.id for n in main_nodes}
         narrative_block: dict[str, Any] | None = None
         if storylines is not None and bible is not None and volumes is not None and cast_stored is not None:
             narrative_block = self._build_macro_narrative_context(
                 storylines=storylines, bible=bible, volumes=volumes, cast_stored=cast_stored
             )
 
-        def _fill_batch(stage: str, batch: list[AnchorNode], context_summary: str = "") -> tuple[int, int]:
+        vol_list = volumes or []
+        main_batches = (
+            self._partition_mainline_batches(main_nodes, vol_list) if vol_list else ([main_nodes] if main_nodes else [])
+        )
+        main_spine_sequence = (
+            self._main_spine_sequence(main_nodes, vol_list) if vol_list else [n.id for n in main_nodes]
+        )
+
+        prior_summaries: list[dict[str, Any]] = []
+        batch_summary_fallback_flags: list[bool] = []
+        retries_main = 0
+        violations_main = 0
+
+        for batch_index, batch in enumerate(main_batches):
             if not batch:
-                return 0, 0
-            retries = 0
-            violations = 0
+                continue
             pending_ids = {n.id for n in batch}
-            for _ in range(2):
-                payload = [
+            structured_out: _LLMSlotFillOutput | None = None
+            for _attempt in range(2):
+                payload_rows = [
                     {
                         "node_id": n.id,
                         "title": n.title,
@@ -1907,47 +2058,125 @@ class AnchorService:
                     for n in batch
                     if n.id in pending_ids
                 ]
-                if not payload:
+                if not payload_rows:
                     break
+                vol_hint = str(batch[0].volume_id or "") if batch else ""
                 prompt = self._slot_fill_prompt(
                     story_input=story_input,
-                    stage_label=stage,
-                    node_rows=payload,
-                    context_summary=context_summary,
+                    stage_label=f"stage3.1_mainline.batch{batch_index}",
+                    node_rows=payload_rows,
+                    context_summary="",
                     narrative_context=narrative_block,
+                    prior_main_batch_summaries=list(prior_summaries),
+                    batch_hint={"batch_index": batch_index, "volume_id": vol_hint},
+                    expect_batch_summary=True,
                 )
                 try:
-                    structured, _ = llm_client.invoke_json(prompt, _LLMSlotFillOutput, profile)
+                    structured_out, _ = llm_client.invoke_json(prompt, _LLMSlotFillOutput, profile)
                 except Exception:
-                    # Keep deterministic skeleton content if slot-filling model/path is unavailable.
+                    structured_out = None
                     break
-                for item in structured.items:
+                if structured_out:
+                    for item in structured_out.items:
+                        node_id = (item.node_id or "").strip()
+                        if node_id not in pending_ids or node_id not in by_id:
+                            continue
+                        title = (item.title or "").strip()
+                        desc = (item.description or "").strip()
+                        policy_hits = self._slot_fill_policy_violations(f"{title}\n{desc}")
+                        if policy_hits > 0:
+                            violations_main += policy_hits
+                            continue
+                        if title and desc:
+                            by_id[node_id] = by_id[node_id].model_copy(update={"title": title, "description": desc})
+                            pending_ids.discard(node_id)
+                if not pending_ids:
+                    break
+                retries_main += 1
+
+            summary_fallback = False
+            bs = (structured_out.batch_summary or "").strip() if structured_out else ""
+            if not bs:
+                bs = self._fallback_batch_summary_for_nodes(batch, by_id)
+                summary_fallback = True
+            else:
+                bs = bs[:MAIN_SLOT_BATCH_SUMMARY_MAX]
+            vol_hint = str(batch[0].volume_id or "") if batch else ""
+            prior_summaries.append({"batch_index": batch_index, "volume_id": vol_hint, "summary": bs})
+            batch_summary_fallback_flags.append(summary_fallback)
+
+        side_context = " ".join([n.description for n in main_nodes[:8]])
+        retries_side = 0
+        violations_side = 0
+        if side_nodes:
+            pending_side = {n.id for n in side_nodes}
+            for _attempt in range(2):
+                side_payload = [
+                    {
+                        "node_id": n.id,
+                        "title": n.title,
+                        "description": n.description,
+                        "volume_id": n.volume_id,
+                        "depends_on": list(n.depends_on or []),
+                        "depends_on_context": [
+                            {
+                                "node_id": dep,
+                                "title": str((by_id.get(dep) or n).title or ""),
+                                "description": str((by_id.get(dep) or n).description or ""),
+                            }
+                            for dep in (n.depends_on or [])
+                            if dep in by_id
+                        ],
+                        "attachment_context": self._build_side_attachment_context(
+                            n,
+                            by_id=by_id,
+                            main_node_ids=main_node_ids,
+                            main_spine_sequence=main_spine_sequence,
+                        ),
+                    }
+                    for n in side_nodes
+                    if n.id in pending_side
+                ]
+                if not side_payload:
+                    break
+                side_prompt = self._slot_fill_prompt(
+                    story_input=story_input,
+                    stage_label="stage3.3_side_arcs",
+                    node_rows=side_payload,
+                    context_summary=side_context[:2000],
+                    narrative_context=narrative_block,
+                    main_batch_summaries=list(prior_summaries),
+                )
+                try:
+                    structured_side, _ = llm_client.invoke_json(side_prompt, _LLMSlotFillOutput, profile)
+                except Exception:
+                    break
+                for item in structured_side.items:
                     node_id = (item.node_id or "").strip()
-                    if node_id not in pending_ids or node_id not in by_id:
+                    if node_id not in pending_side or node_id not in by_id:
                         continue
                     title = (item.title or "").strip()
                     desc = (item.description or "").strip()
                     policy_hits = self._slot_fill_policy_violations(f"{title}\n{desc}")
                     if policy_hits > 0:
-                        violations += policy_hits
+                        violations_side += policy_hits
                         continue
                     if title and desc:
                         by_id[node_id] = by_id[node_id].model_copy(update={"title": title, "description": desc})
-                        pending_ids.remove(node_id)
-                if not pending_ids:
+                        pending_side.discard(node_id)
+                if not pending_side:
                     break
-                retries += 1
-            return retries, violations
+                retries_side += 1
 
-        retries_main, violations_main = _fill_batch("stage3.1_mainline", main_nodes)
-        side_context = " ".join([n.description for n in main_nodes[:8]])
-        retries_side, violations_side = _fill_batch("stage3.3_side_arcs", side_nodes, context_summary=side_context[:2000])
         return [by_id[n.id] for n in anchor_nodes], {
             "slot_fill_skipped": False,
             "slot_fill_retries": retries_main + retries_side,
             "slot_fill_policy_violations": violations_main + violations_side,
             "slot_fill_mainline_count": len(main_nodes),
             "slot_fill_side_count": len(side_nodes),
+            "main_batch_summaries": prior_summaries,
+            "main_batch_count": len(prior_summaries),
+            "batch_summary_fallback_flags": batch_summary_fallback_flags,
         }
 
     def compile_macro_plan(

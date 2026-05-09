@@ -89,12 +89,17 @@ _ALLOWED_HITL_RESUME_NODES = frozenset(
 )
 
 
+def _is_terminal_anchor_node(row: dict) -> bool:
+    return str(row.get("node_kind") or "").upper() in {"CHECKPOINT", "ENDING"}
+
+
 def _refresh_anchor_runtime_state(story_repository: StoryRepository, state: dict) -> None:
     story_id = str(state["story_id"])
     story = story_repository.get_story(story_id) or {}
     nodes = [dict(n) for n in (story.get("anchor_nodes_json") or []) if isinstance(n, dict)]
     state["anchor_nodes"] = nodes
     node_ids = {str(n.get("id") or "").strip() for n in nodes if str(n.get("id") or "").strip()}
+    node_by_id = {str(n.get("id") or "").strip(): n for n in nodes if str(n.get("id") or "").strip()}
     bible = story.get("bible_json") if isinstance(story.get("bible_json"), dict) else {}
     resolved_raw = state.get("resolved_anchors")
     if resolved_raw is None:
@@ -108,13 +113,15 @@ def _refresh_anchor_runtime_state(story_repository: StoryRepository, state: dict
         candidates_raw = [
             str(n.get("id") or "").strip()
             for n in nodes
-            if str(n.get("status") or "").upper() == "UNLOCKED"
+            if str(n.get("status") or "").upper() == "UNLOCKED" and not _is_terminal_anchor_node(n)
         ]
     resolved_set = set(state["resolved_anchors"])
     state["anchor_candidates"] = [
         str(x).strip()
         for x in candidates_raw
-        if str(x).strip() in node_ids and str(x).strip() not in resolved_set
+        if str(x).strip() in node_ids
+        and str(x).strip() not in resolved_set
+        and not _is_terminal_anchor_node(node_by_id[str(x).strip()])
     ]
     canonicalize_workflow_state_contract(state)
 
@@ -215,6 +222,9 @@ def _validate_anchor_selection_guardrails(
         raise ValueError("invalid next_anchor_ids: unknown anchor id")
     if selected_ids and not next_ids:
         raise ValueError("next_anchor_ids is required when selected_anchor_ids is provided")
+    for nid in selected_ids:
+        if _is_terminal_anchor_node(by_id[nid]):
+            raise ValueError(f"selected_anchor {nid} cannot directly target checkpoint/ending")
 
     children: dict[str, list[str]] = {nid: [] for nid in by_id.keys()}
     for node in by_id.values():
@@ -738,9 +748,10 @@ class WorkflowService:
             volumes, cast, _b_seed_unused, bible_generated = compile_out
         storylines = list((bible_generated or {}).get("storylines") or [])
         anchor_nodes = list((bible_generated or {}).get("anchor_nodes") or [])
-        self.story_repository.update_story_bible_json(story_id, bible_generated)
-        self.story_repository.update_story_macro_topology(
+        protagonist_id = next((c.node_id for c in cast if c.role == "protagonist"), "")
+        self.story_repository.store_macro_plan_snapshot(
             story_id,
+            bible=bible_generated or {},
             storylines=[
                 s.model_dump(mode="json") if hasattr(s, "model_dump") else dict(s)
                 for s in storylines
@@ -751,13 +762,9 @@ class WorkflowService:
                 for n in anchor_nodes
                 if isinstance(n, dict) or hasattr(n, "model_dump")
             ],
-        )
-        self.story_repository.store_volumes(story_id, volumes)
-        protagonist_id = next((c.node_id for c in cast if c.role == "protagonist"), "")
-        self.story_repository.update_story_cast(story_id, cast, protagonist_id)
-        self.graph_store.replace_cast_characters(
-            story_id,
-            keep_cast_node_ids=[member.node_id for member in cast],
+            volumes=volumes,
+            cast=list(cast),
+            protagonist_character_id=protagonist_id,
         )
         cast_mutations = [
             NodeMutation(
@@ -773,7 +780,11 @@ class WorkflowService:
             )
             for member in cast
         ]
-        self.graph_store.apply_mutations(story_id, cast_mutations)
+        self.graph_store.replace_cast_characters_and_apply_mutations(
+            story_id,
+            keep_cast_node_ids=[member.node_id for member in cast],
+            mutations=cast_mutations,
+        )
         story_after = self.story_repository.get_story(story_id) or {}
         storylines = list(story_after.get("storylines_json") or [])
         anchor_nodes = list(story_after.get("anchor_nodes_json") or [])
@@ -846,20 +857,17 @@ class WorkflowService:
         _validate_macro_plan_put(body)
         try:
             bible_out = dict(body.bible or {})
-            self.story_repository.update_story_bible_json(story_id, bible_out)
-            self.story_repository.update_story_macro_topology(
-                story_id,
-                storylines=[s.model_dump(mode="json") for s in body.storylines],
-                anchor_nodes=[n.model_dump(mode="json") for n in body.anchor_nodes],
-            )
-            self.story_repository.store_volumes(story_id, list(body.volumes))
             protagonist_id = (body.protagonist_character_id or "").strip()
             if not protagonist_id:
                 protagonist_id = next((c.node_id for c in body.cast if c.role == "protagonist"), "")
-            self.story_repository.update_story_cast(story_id, list(body.cast), protagonist_id)
-            self.graph_store.replace_cast_characters(
+            self.story_repository.store_macro_plan_snapshot(
                 story_id,
-                keep_cast_node_ids=[member.node_id for member in body.cast],
+                bible=bible_out,
+                storylines=[s.model_dump(mode="json") for s in body.storylines],
+                anchor_nodes=[n.model_dump(mode="json") for n in body.anchor_nodes],
+                volumes=list(body.volumes),
+                cast=list(body.cast),
+                protagonist_character_id=protagonist_id,
             )
             cast_mutations = [
                 NodeMutation(
@@ -875,7 +883,11 @@ class WorkflowService:
                 )
                 for member in body.cast
             ]
-            self.graph_store.apply_mutations(story_id, cast_mutations)
+            self.graph_store.replace_cast_characters_and_apply_mutations(
+                story_id,
+                keep_cast_node_ids=[member.node_id for member in body.cast],
+                mutations=cast_mutations,
+            )
         except sqlite3.IntegrityError as exc:
             raise MacroPlanValidationError(
                 "Macro plan contains IDs that violate DB uniqueness constraints "
@@ -1035,16 +1047,22 @@ class WorkflowService:
         initial_state["anchor_candidates"] = list(bible.get("anchor_candidates") or [])
         # Canonical runtime source is anchor_nodes. Normalize legacy fields for consistency.
         node_ids = {str(n.get("id") or "").strip() for n in initial_state["anchor_nodes"] if str(n.get("id") or "").strip()}
+        initial_node_by_id = {
+            str(n.get("id") or "").strip(): n for n in initial_state["anchor_nodes"] if str(n.get("id") or "").strip()
+        }
         initial_state["resolved_anchors"] = [x for x in initial_state["resolved_anchors"] if str(x).strip() in node_ids]
         if not initial_state["anchor_candidates"] and initial_state["anchor_nodes"]:
             initial_state["anchor_candidates"] = [
                 str(n.get("id"))
                 for n in initial_state["anchor_nodes"]
-                if str(n.get("status") or "").upper() == "UNLOCKED"
+                if str(n.get("status") or "").upper() == "UNLOCKED" and not _is_terminal_anchor_node(n)
             ]
         else:
             initial_state["anchor_candidates"] = [
-                x for x in initial_state["anchor_candidates"] if str(x).strip() in node_ids
+                x
+                for x in initial_state["anchor_candidates"]
+                if str(x).strip() in node_ids
+                and not _is_terminal_anchor_node(initial_node_by_id[str(x).strip()])
             ]
         initial_state["active_anchors"] = []
         initial_state["state_version"] = 2

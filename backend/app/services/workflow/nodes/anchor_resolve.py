@@ -127,8 +127,23 @@ def _normalize_partition(selected: list[str], resolved_now: list[str], unresolve
     return sorted(set(r)), sorted(set(u))
 
 
+def _is_terminal_anchor(row: dict) -> bool:
+    return str(row.get("node_kind") or "").upper() in {"CHECKPOINT", "ENDING"}
+
+
 def _recompute_unlocks(anchor_nodes: list[dict], resolved: set[str]) -> tuple[list[dict], list[str]]:
     by_id = {str(n.get("id") or ""): dict(n) for n in anchor_nodes if str(n.get("id") or "").strip()}
+    changed = True
+    while changed:
+        changed = False
+        for node_id, row in by_id.items():
+            if node_id in resolved or not _is_terminal_anchor(row):
+                continue
+            deps = [str(x) for x in (row.get("depends_on") or []) if str(x).strip()]
+            if all(dep in resolved for dep in deps):
+                resolved.add(node_id)
+                changed = True
+
     candidates: list[str] = []
     for node_id, row in by_id.items():
         deps = [str(x) for x in (row.get("depends_on") or []) if str(x).strip()]
@@ -137,7 +152,8 @@ def _recompute_unlocks(anchor_nodes: list[dict], resolved: set[str]) -> tuple[li
             continue
         if all(dep in resolved for dep in deps):
             row["status"] = "UNLOCKED"
-            candidates.append(node_id)
+            if not _is_terminal_anchor(row):
+                candidates.append(node_id)
         else:
             row["status"] = "LOCKED"
     return list(by_id.values()), sorted(set(candidates))

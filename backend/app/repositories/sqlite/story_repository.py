@@ -212,6 +212,66 @@ class StoryRepository:
                 (self.db.dumps(clean_bible), story_id),
             )
 
+    def store_macro_plan_snapshot(
+        self,
+        story_id: str,
+        *,
+        bible: dict,
+        storylines: list[dict[str, Any]],
+        anchor_nodes: list[dict[str, Any]],
+        volumes: list[VolumePlan],
+        cast: list[StoryCastMemberStored],
+        protagonist_character_id: str,
+    ) -> None:
+        """
+        Persist a complete macro plan snapshot in a single SQLite transaction.
+
+        This makes the SQLite side internally strongly consistent: either all macro-plan
+        writes (bible/topology/volumes/cast) commit together or none do.
+        """
+        clean_bible = self._strip_macro_topology_from_bible(dict(bible or {}))
+        clean_storylines = self._coerce_json_list(storylines)
+        clean_anchor_nodes = self._coerce_json_list(anchor_nodes)
+        cast_payload = [self._sanitize_cast_row(member.model_dump(mode="json")) for member in cast]
+        prot = str(protagonist_character_id or "").strip()
+        with self.db.connection() as conn:
+            conn.execute(
+                """
+                UPDATE stories
+                SET bible_json = ?,
+                    storylines_json = ?,
+                    anchor_nodes_json = ?,
+                    cast_json = ?,
+                    protagonist_character_id = ?
+                WHERE story_id = ?
+                """,
+                (
+                    self.db.dumps(clean_bible),
+                    self.db.dumps(clean_storylines),
+                    self.db.dumps(clean_anchor_nodes),
+                    self.db.dumps(cast_payload),
+                    prot,
+                    story_id,
+                ),
+            )
+            conn.execute("DELETE FROM volumes WHERE story_id = ?", (story_id,))
+            for volume in volumes:
+                conn.execute(
+                    """
+                    INSERT INTO volumes (volume_id, story_id, title, summary, chapter_start, chapter_end, target_volume_words)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        volume.volume_id,
+                        story_id,
+                        volume.title,
+                        volume.summary,
+                        volume.chapter_start,
+                        volume.chapter_end,
+                        volume.target_volume_words,
+                    ),
+                )
+
     def update_story_macro_topology(
         self,
         story_id: str,

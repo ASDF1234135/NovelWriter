@@ -570,7 +570,10 @@ export default function App() {
 
   const chapterAnchorCandidates = useMemo(() => {
     const nodes = macroData?.anchor_nodes ?? [];
-    return nodes.filter((n) => n.status === "UNLOCKED");
+    return nodes.filter((n) => {
+      const kind = String(n.node_kind ?? "").toUpperCase();
+      return n.status === "UNLOCKED" && kind !== "CHECKPOINT" && kind !== "ENDING";
+    });
   }, [macroData?.anchor_nodes]);
   const setupAnchorNodes = useMemo(() => macroData?.anchor_nodes ?? [], [macroData?.anchor_nodes]);
   const setupSelectedAnchorNode = useMemo(() => {
