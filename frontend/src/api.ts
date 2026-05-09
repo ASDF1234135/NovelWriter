@@ -163,6 +163,8 @@ export async function macroCompile(
         anchor_nodes: snap.anchor_nodes,
         macro_topology_mode: snap.macro_topology_mode,
         topology_locked: snap.topology_locked,
+        has_completed_chapter: snap.has_completed_chapter,
+        macro_edit_locked: snap.macro_edit_locked,
       };
     }
     if (st === "FAILED") {

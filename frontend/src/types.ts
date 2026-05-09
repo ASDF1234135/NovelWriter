@@ -157,6 +157,10 @@ export type MacroCompileData = {
   }>;
   macro_topology_mode?: string;
   topology_locked?: boolean;
+  /** True iff at least one chapter for this story is `completed`; freezes bible/cast/volumes/compile. */
+  has_completed_chapter?: boolean;
+  /** Same signal as has_completed_chapter, exposed for UI gating clarity. */
+  macro_edit_locked?: boolean;
 };
 
 /** Row from GET /api/stories (lightweight list). */
@@ -188,6 +192,10 @@ export type StoryDetailResponse = StoryInput & {
   macro_compile_error?: string;
   macro_topology_mode?: string;
   topology_locked?: boolean;
+  /** True iff at least one chapter for this story is `completed`. */
+  has_completed_chapter?: boolean;
+  /** Same as has_completed_chapter; convenience flag for the macro editor UI. */
+  macro_edit_locked?: boolean;
 };
 
 /** GET /stories/:id/chapters/:n/writing-preamble */

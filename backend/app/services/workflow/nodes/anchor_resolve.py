@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from app.core.config import get_settings
 from app.domain.schema import AnchorResolutionOutput, GraphRAGEvaluateOutput
 from app.services.graph_rag_service import GraphRAGService
 from app.services.llm import MockLLMClient
@@ -189,14 +191,12 @@ def run_anchor_resolve(state: dict, context: WorkflowContext) -> dict:
             llm=context.llm_client,
         )
         try:
-            per_anchor: dict[str, GraphRAGEvaluateOutput] = {}
-            for aid in selected:
+            def _evaluate_anchor(aid: str) -> tuple[str, GraphRAGEvaluateOutput]:
                 node = node_by_id.get(aid) or {}
                 title = str(node.get("title") or "").strip()
                 desc = str(node.get("description") or "").strip()
                 kind = str(node.get("node_kind") or "").strip()
                 deps = [str(x).strip() for x in (node.get("depends_on") or []) if str(x).strip()]
-
                 condition_desc = (
                     "You are judging anchor completion.\n"
                     f"Anchor id: {aid}\n"
@@ -207,15 +207,25 @@ def run_anchor_resolve(state: dict, context: WorkflowContext) -> dict:
                     "Question: Is this anchor already achieved/resolved given the current story state?\n"
                     "Return resolved=true ONLY if the evidence pack contains objective facts proving completion.\n"
                 )
-                per_anchor[aid] = graph_rag.evaluate_condition(
+                verdict = graph_rag.evaluate_condition(
                     condition_desc,
                     story_id=story_id,
                     active_epoch_id=active_epoch_id,
                     pov_character_id=pov_character_id,
                     response_model=GraphRAGEvaluateOutput,
                 )
+                return aid, verdict
 
-            for aid, verdict in per_anchor.items():
+            _ar_workers = max(1, min(len(selected), get_settings().side_slot_fill_max_workers))
+            per_anchor: dict[str, GraphRAGEvaluateOutput] = {}
+            with ThreadPoolExecutor(max_workers=_ar_workers) as pool:
+                futs = [pool.submit(_evaluate_anchor, aid) for aid in selected]
+                for fut in as_completed(futs):
+                    aid, verdict = fut.result()
+                    per_anchor[aid] = verdict
+
+            for aid in selected:
+                verdict = per_anchor[aid]
                 row = {
                     "anchor_id": aid,
                     "resolved": bool(verdict.resolved),

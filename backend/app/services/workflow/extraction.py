@@ -998,37 +998,46 @@ def extract_chapter_artifacts(
         phase2_merged: list[ExtractedRelation] = []
         batch_records: list[dict[str, object]] = []
 
-        # Phase 1: entity↔event/thing relations (chunk-evidenced)
-        phase1_failed = True
-        for idx, batch_rows in enumerate(batches):
+        # Phase 1: entity↔event/thing relations (chunk-evidenced); batches run in parallel (capped).
+        phase1_batch_records: list[dict[str, object]] = []
+
+        def _phase1_batch_job(idx: int, batch_rows: list[dict[str, Any]]) -> tuple[int, list[ExtractedRelation], dict[str, object]]:
             try:
                 rel_prompt = _build_phase1_relation_prompt(ctx, batch_rows)
                 rel_out, rel_res = context.llm_client.invoke_json(rel_prompt, RelationExtractionOutput, rel_profile)
-                phase1_merged.extend(list(rel_out.relations or []))
-                phase1_failed = False
-                batch_records.append(
-                    {
-                        "phase": 1,
-                        "index": idx,
-                        "entity_count": len(batch_rows),
-                        "latency_ms": rel_res.latency_ms,
-                        "token_usage": rel_res.token_usage,
-                    }
-                )
+                rec: dict[str, object] = {
+                    "phase": 1,
+                    "index": idx,
+                    "entity_count": len(batch_rows),
+                    "latency_ms": rel_res.latency_ms,
+                    "token_usage": rel_res.token_usage,
+                }
+                return idx, list(rel_out.relations or []), rec
             except Exception as exc:
                 logger.error(
                     "relation_extractor phase1 batch failed",
                     extra={"extra_payload": {"batch_index": idx, "error": str(exc)}},
                 )
-                batch_records.append(
-                    {
-                        "phase": 1,
-                        "index": idx,
-                        "entity_count": len(batch_rows),
-                        "error": str(exc),
-                        "fallback": True,
-                    }
-                )
+                rec = {
+                    "phase": 1,
+                    "index": idx,
+                    "entity_count": len(batch_rows),
+                    "error": str(exc),
+                    "fallback": True,
+                }
+                return idx, [], rec
+
+        _p1_workers = max(1, min(len(batches), settings.side_slot_fill_max_workers))
+        with ThreadPoolExecutor(max_workers=_p1_workers) as pool:
+            futs = [pool.submit(_phase1_batch_job, idx, br) for idx, br in enumerate(batches)]
+            for fut in as_completed(futs):
+                _, rels, rec = fut.result()
+                phase1_merged.extend(rels)
+                phase1_batch_records.append(rec)
+
+        phase1_batch_records.sort(key=lambda r: int(r.get("index", 0)))
+        batch_records.extend(phase1_batch_records)
+        phase1_failed = not any("latency_ms" in r for r in phase1_batch_records)
 
         # Phase 2: event↔event links only (single pass over full canonical list)
         phase2_failed = True

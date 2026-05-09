@@ -545,6 +545,20 @@ class StoryRepository:
             ).fetchall()
             return list(rows)
 
+    def has_completed_chapter(self, story_id: str) -> bool:
+        """True iff at least one chapter row is committed as 'completed' for this story."""
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM chapters
+                WHERE story_id = ? AND status = 'completed'
+                LIMIT 1
+                """,
+                (story_id,),
+            ).fetchone()
+        return row is not None
+
     def upsert_chapter_summary(
         self,
         story_id: str,

@@ -214,4 +214,43 @@ describe("MacroPlanPanel", () => {
     );
     expect(screen.queryByRole("button", { name: "情節節點" })).not.toBeInTheDocument();
   });
+
+  it("hides bible / volumes / cast edit affordances when editLocked is true", () => {
+    renderMacro(
+      <MacroPlanPanel
+        macroData={{
+          story_id: "s1",
+          bible: { genre: "奇幻", general_world_lore: "鎖定後仍可閱覽" },
+          volumes: [{ volume_id: "v1", title: "卷一", summary: "摘要", chapter_start: 1, chapter_end: 3 }],
+          anchors: [{ anchor_id: "a1", volume_id: "v1", title: "錨點", description: "描述", chapter_target: 2, target_state: {}, priority: 1 }],
+          anchor_nodes: [
+            {
+              id: "n1",
+              storyline_ids: ["s_main"],
+              volume_id: "v1",
+              node_kind: "NORMAL",
+              title: "N1",
+              description: "D1",
+              depends_on: [],
+              status: "UNLOCKED",
+            },
+          ],
+          cast: [{ node_id: "char_1", canonical_name: "主角", role: "protagonist" }],
+        }}
+        storyId="s1"
+        editLocked
+        onMacroDataUpdate={vi.fn()}
+        onBusy={vi.fn()}
+        onError={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(/已有完成章節/);
+    expect(screen.queryByRole("button", { name: "編輯世界觀總表" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "分卷" }));
+    expect(screen.queryByRole("button", { name: "新增分卷" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "編輯" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "人物" }));
+    expect(screen.queryByRole("button", { name: "新增人物" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "編輯" })).not.toBeInTheDocument();
+  });
 });

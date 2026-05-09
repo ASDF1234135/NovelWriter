@@ -1180,15 +1180,19 @@ def test_side_prompt_has_main_batch_summaries_and_attachment_context() -> None:
         StoryInput(title="SideCtx", premise="side attachment context.", target_total_words=30000),
         rec,
     )
-    side_prompts = [p for p in rec.json_prompts if p.get("stage") == "stage3.3_side_arcs"]
+    side_prompts = [
+        p
+        for p in rec.json_prompts
+        if str(p.get("stage") or "").startswith("stage3.3_side_arcs")
+    ]
     assert side_prompts
-    sp = side_prompts[-1]
-    assert sp.get("main_batch_summaries")
-    for row in sp.get("nodes") or []:
-        ac = row.get("attachment_context")
-        assert ac is not None
-        assert "spine_windows" in ac
-        assert "main_spine_mount_nodes" in ac
+    for sp in side_prompts:
+        assert sp.get("main_batch_summaries")
+        for row in sp.get("nodes") or []:
+            ac = row.get("attachment_context")
+            assert ac is not None
+            assert "spine_windows" in ac
+            assert "main_spine_mount_nodes" in ac
 
 
 def test_side_attachment_spine_window_three_or_fallback_one() -> None:

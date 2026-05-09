@@ -389,6 +389,16 @@ class MacroPlanValidationError(ValueError):
     """Raised when manual macro plan payload fails structural checks."""
 
 
+class MacroPlanCompletedChapterLockError(RuntimeError):
+    """Raised when macro compile / disallowed macro edits are attempted after a chapter has been committed.
+
+    Once any chapter is `completed`, only the plot DAG (anchor_nodes) remains editable
+    for LOCKED / UNLOCKED nodes, plus addition of new nodes. Bible / volumes / cast / storyline
+    metadata / protagonist must stay frozen so the committed manuscript stays consistent with
+    its macro plan.
+    """
+
+
 class ChapterSummaryRegenerateFailed(RuntimeError):
     """Raised when POST regenerate-summary cannot persist an LLM-backed chapter summary."""
 
@@ -551,6 +561,202 @@ def _validate_macro_plan_put(body: MacroPlanPut) -> None:
         raise MacroPlanValidationError(
             "anchor_nodes form disconnected subgraphs (multiple weakly connected components)"
         )
+
+
+def _normalize_for_compare(value: object) -> object:
+    """Order-insensitive, JSON-friendly normalization used for completed-chapter lock diffs."""
+    if isinstance(value, dict):
+        return {str(k): _normalize_for_compare(v) for k, v in sorted(value.items(), key=lambda kv: str(kv[0]))}
+    if isinstance(value, list):
+        return [_normalize_for_compare(v) for v in value]
+    if isinstance(value, tuple):
+        return [_normalize_for_compare(v) for v in value]
+    return value
+
+
+# Bible payload fields that are populated by compile / runtime (not user-editable in the bible UI),
+# stored in dedicated DB columns or derived state. The frontend may round-trip them inside
+# `bible` (e.g. straight from a macro_compile response) so they must be stripped before diffing.
+_BIBLE_NON_USER_KEYS = (
+    "storylines",
+    "anchor_nodes",
+    "branch_count_final",
+    "llm_weave_debug",
+    "compile_warnings",
+    "compile_config",
+    "resolved_anchors",
+    "anchor_candidates",
+)
+
+
+def _bible_user_view(bible: dict) -> dict:
+    out = dict(bible or {})
+    for key in _BIBLE_NON_USER_KEYS:
+        out.pop(key, None)
+    return out
+
+
+def _volume_compare_key(v: dict) -> dict:
+    """Volume identity for diff: id, title, summary, chapter range, target words."""
+    return {
+        "volume_id": str(v.get("volume_id") or ""),
+        "title": str(v.get("title") or ""),
+        "summary": str(v.get("summary") or ""),
+        "chapter_start": int(v.get("chapter_start") or 0),
+        "chapter_end": int(v.get("chapter_end") or 0),
+        "target_volume_words": int(v.get("target_volume_words") or 0),
+    }
+
+
+def _cast_compare_key(c: dict) -> dict:
+    """Cast member identity for diff: drop volatile / derived fields, keep authored profile."""
+    fields = (
+        "node_id",
+        "canonical_name",
+        "role",
+        "short_bio",
+        "aliases",
+        "age",
+        "personality",
+        "speech_style",
+        "core_motivation",
+        "core_value",
+        "fatal_flaw",
+        "quirks_and_habits",
+    )
+    out: dict = {}
+    for f in fields:
+        out[f] = c.get(f)
+    return out
+
+
+def _storyline_compare_key(s: dict) -> dict:
+    return {
+        "id": str(s.get("id") or ""),
+        "type": str(s.get("type") or ""),
+        "title": str(s.get("title") or ""),
+        "overall_goal": str(s.get("overall_goal") or ""),
+        "involved_entities": list(s.get("involved_entities") or []),
+    }
+
+
+def _anchor_node_resolved_key(n: dict) -> dict:
+    """RESOLVED anchor identity: every authored field that downstream chapters depend on."""
+    return {
+        "id": str(n.get("id") or ""),
+        "storyline_ids": sorted(str(x) for x in (n.get("storyline_ids") or [])),
+        "volume_id": str(n.get("volume_id") or ""),
+        "node_kind": str(n.get("node_kind") or "NORMAL"),
+        "title": str(n.get("title") or ""),
+        "description": str(n.get("description") or ""),
+        "depends_on": sorted(str(x) for x in (n.get("depends_on") or [])),
+        "status": str(n.get("status") or ""),
+    }
+
+
+def _build_macro_lock_error(detail: str) -> MacroPlanCompletedChapterLockError:
+    return MacroPlanCompletedChapterLockError(
+        "Story is locked because at least one chapter is completed: "
+        + detail
+        + " Only LOCKED/UNLOCKED plot DAG nodes can be edited, deleted, or added."
+    )
+
+
+def _validate_macro_plan_put_under_completed_lock(
+    body: MacroPlanPut, current_snapshot: dict
+) -> None:
+    """Reject changes to bible / volumes / cast / storylines / protagonist or to RESOLVED anchor nodes.
+
+    LOCKED / UNLOCKED anchor nodes may be added, removed, or edited freely (subject to the
+    structural validation in `_validate_macro_plan_put`). New USER_EDIT storylines may be added
+    when they are referenced by newly created anchor nodes.
+    """
+    body_bible = _normalize_for_compare(_bible_user_view(dict(body.bible or {})))
+    cur_bible = _normalize_for_compare(_bible_user_view(dict(current_snapshot.get("bible") or {})))
+    if body_bible != cur_bible:
+        raise _build_macro_lock_error("bible cannot be edited.")
+
+    body_vols = sorted(
+        (_volume_compare_key(v.model_dump(mode="json")) for v in body.volumes),
+        key=lambda v: v["volume_id"],
+    )
+    cur_vols = sorted(
+        (_volume_compare_key(dict(v)) for v in (current_snapshot.get("volumes") or [])),
+        key=lambda v: v["volume_id"],
+    )
+    if body_vols != cur_vols:
+        raise _build_macro_lock_error("volumes cannot be edited.")
+
+    body_cast = sorted(
+        (_cast_compare_key(c.model_dump(mode="json")) for c in body.cast),
+        key=lambda c: str(c.get("node_id") or ""),
+    )
+    cur_cast = sorted(
+        (_cast_compare_key(dict(c)) for c in (current_snapshot.get("cast") or [])),
+        key=lambda c: str(c.get("node_id") or ""),
+    )
+    if _normalize_for_compare(body_cast) != _normalize_for_compare(cur_cast):
+        raise _build_macro_lock_error("cast cannot be edited.")
+
+    body_prot = (body.protagonist_character_id or "").strip()
+    cur_prot = str(current_snapshot.get("protagonist_character_id") or "").strip()
+    if body_prot != cur_prot:
+        raise _build_macro_lock_error("POV protagonist cannot be changed.")
+
+    cur_storylines_by_id = {
+        str(s.get("id") or ""): _storyline_compare_key(dict(s))
+        for s in (current_snapshot.get("storylines") or [])
+    }
+    body_storylines_by_id = {
+        str(s.id): _storyline_compare_key(s.model_dump(mode="json")) for s in body.storylines
+    }
+    for sid, prev in cur_storylines_by_id.items():
+        nxt = body_storylines_by_id.get(sid)
+        if nxt is None:
+            raise _build_macro_lock_error(
+                f"existing storyline {sid!r} cannot be removed."
+            )
+        if _normalize_for_compare(prev) != _normalize_for_compare(nxt):
+            raise _build_macro_lock_error(
+                f"existing storyline {sid!r} cannot be modified."
+            )
+    for sid, nxt in body_storylines_by_id.items():
+        if sid in cur_storylines_by_id:
+            continue
+        if str(nxt.get("type") or "").upper() != "USER_EDIT":
+            raise _build_macro_lock_error(
+                f"new storyline {sid!r} must be USER_EDIT (only user-edit branches can be added)."
+            )
+
+    cur_nodes_by_id = {
+        str(n.get("id") or ""): dict(n) for n in (current_snapshot.get("anchor_nodes") or [])
+    }
+    body_nodes_by_id = {str(n.id): n.model_dump(mode="json") for n in body.anchor_nodes}
+    for nid, prev in cur_nodes_by_id.items():
+        prev_status = str(prev.get("status") or "").upper()
+        nxt = body_nodes_by_id.get(nid)
+        if prev_status == "RESOLVED":
+            if nxt is None:
+                raise _build_macro_lock_error(
+                    f"resolved plot node {nid!r} cannot be deleted."
+                )
+            if _anchor_node_resolved_key(prev) != _anchor_node_resolved_key(nxt):
+                raise _build_macro_lock_error(
+                    f"resolved plot node {nid!r} cannot be edited."
+                )
+        else:
+            if nxt is not None and str(nxt.get("status") or "").upper() == "RESOLVED":
+                raise _build_macro_lock_error(
+                    f"plot node {nid!r} cannot be promoted to RESOLVED via macro PUT."
+                )
+    for nid, nxt in body_nodes_by_id.items():
+        if nid in cur_nodes_by_id:
+            continue
+        new_status = str(nxt.get("status") or "").upper()
+        if new_status == "RESOLVED":
+            raise _build_macro_lock_error(
+                f"new plot node {nid!r} cannot start as RESOLVED."
+            )
 
 
 def _cast_graph_description(member: StoryCastMemberStored) -> str:
@@ -727,6 +933,11 @@ class WorkflowService:
         story = self.story_repository.get_story(story_id)
         if not story:
             raise KeyError(f"Story not found: {story_id}")
+        if self.story_repository.has_completed_chapter(story_id):
+            raise MacroPlanCompletedChapterLockError(
+                "Macro compile is disabled because at least one chapter is already completed. "
+                "Editing the plot DAG (LOCKED/UNLOCKED nodes) remains available."
+            )
         raw_lang = str(story.get("output_language") or "").strip()
         ol: StoryOutputLanguage = normalize_output_language(raw_lang)
         story_input = StoryInput(
@@ -788,6 +999,7 @@ class WorkflowService:
         story_after = self.story_repository.get_story(story_id) or {}
         storylines = list(story_after.get("storylines_json") or [])
         anchor_nodes = list(story_after.get("anchor_nodes_json") or [])
+        has_completed = self.story_repository.has_completed_chapter(story_id)
         return {
             "story_id": story_id,
             "bible": bible_generated,
@@ -802,6 +1014,8 @@ class WorkflowService:
             "anchor_nodes": anchor_nodes,
             "macro_topology_mode": "fixed_fishbone",
             "topology_locked": True,
+            "has_completed_chapter": has_completed,
+            "macro_edit_locked": has_completed,
         }
 
     def get_macro_snapshot(self, story_id: str) -> dict:
@@ -831,6 +1045,7 @@ class WorkflowService:
                 continue
         protagonist_id = str(story.get("protagonist_character_id") or "").strip()
         bible_out = story.get("bible_json") if isinstance(story.get("bible_json"), dict) else {}
+        has_completed = self.story_repository.has_completed_chapter(story_id)
         return {
             "story_id": story_id,
             "bible": bible_out,
@@ -847,6 +1062,8 @@ class WorkflowService:
             "macro_compile_error": str(story.get("macro_compile_error") or ""),
             "macro_topology_mode": "fixed_fishbone",
             "topology_locked": True,
+            "has_completed_chapter": has_completed,
+            "macro_edit_locked": has_completed,
         }
 
     def put_macro_plan(self, story_id: str, body: MacroPlanPut) -> dict:
@@ -855,6 +1072,9 @@ class WorkflowService:
             raise KeyError(f"Story not found: {story_id}")
         body = _repair_macro_plan_mainline_cross_volume(body)
         _validate_macro_plan_put(body)
+        if self.story_repository.has_completed_chapter(story_id):
+            current_snapshot = self.get_macro_snapshot(story_id)
+            _validate_macro_plan_put_under_completed_lock(body, current_snapshot)
         try:
             bible_out = dict(body.bible or {})
             protagonist_id = (body.protagonist_character_id or "").strip()
@@ -896,9 +1116,14 @@ class WorkflowService:
         return self.get_macro_snapshot(story_id)
 
     def begin_macro_compile_async(self, story_id: str) -> None:
-        """Acquire RUNNING lock or raise KeyError / MacroCompileAlreadyRunningError."""
+        """Acquire RUNNING lock or raise KeyError / MacroCompileAlreadyRunningError / MacroPlanCompletedChapterLockError."""
         if not self.story_repository.get_story(story_id):
             raise KeyError(f"Story not found: {story_id}")
+        if self.story_repository.has_completed_chapter(story_id):
+            raise MacroPlanCompletedChapterLockError(
+                "Macro compile is disabled because at least one chapter is already completed. "
+                "Editing the plot DAG (LOCKED/UNLOCKED nodes) remains available."
+            )
         if not self.story_repository.try_begin_macro_compile(story_id):
             raise MacroCompileAlreadyRunningError(
                 "Macro compile is already running for this story."

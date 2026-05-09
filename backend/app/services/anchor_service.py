@@ -5,6 +5,7 @@ import re
 import json
 import logging
 import random
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Literal
 from pydantic import BaseModel, Field
 
@@ -469,6 +470,7 @@ class AnchorService:
             )
             prev_checkpoint_id = cp
 
+        b_tails_by_volume: dict[str, list[str]] = {}
         if b_ids:
             main_all = [a.anchor_id for a in sorted(anchors, key=lambda x: (x.priority, x.anchor_id))]
             rng.shuffle(main_all)
@@ -496,6 +498,18 @@ class AnchorService:
                         )
                     )
                     prev = nid
+                b_tails_by_volume.setdefault(target_vol, []).append(prev)
+
+        # Wire each B-tier chain tail into that volume's checkpoint (nearest convergence point).
+        if b_tails_by_volume:
+            for i, n in enumerate(nodes):
+                if n.node_kind != "CHECKPOINT":
+                    continue
+                extras = b_tails_by_volume.get(n.volume_id) or []
+                if not extras:
+                    continue
+                merged = list(dict.fromkeys([*(n.depends_on or []), *extras]))
+                nodes[i] = n.model_copy(update={"depends_on": merged})
 
         checkpoints = [n.id for n in nodes if n.node_kind == "CHECKPOINT"]
         if checkpoints:
@@ -1899,6 +1913,21 @@ class AnchorService:
         indices = sorted(range(len(main_nodes)), key=lambda i: (vol_rank.get(main_nodes[i].volume_id, 9999), i))
         return [main_nodes[i].id for i in indices]
 
+    @staticmethod
+    def _chunk_list_evenly(items: list[Any], max_chunks: int) -> list[list[Any]]:
+        if not items:
+            return []
+        k = min(max(max_chunks, 1), len(items))
+        n = len(items)
+        base, rem = divmod(n, k)
+        chunks: list[list[Any]] = []
+        idx = 0
+        for i in range(k):
+            sz = base + (1 if i < rem else 0)
+            chunks.append(items[idx : idx + sz])
+            idx += sz
+        return chunks
+
     def _fallback_batch_summary_for_nodes(self, batch: list[AnchorNode], by_id: dict[str, AnchorNode]) -> str:
         titles: list[str] = []
         for n in batch:
@@ -2108,10 +2137,17 @@ class AnchorService:
         side_context = " ".join([n.description for n in main_nodes[:8]])
         retries_side = 0
         violations_side = 0
+        side_parallel_chunks_max = 0
+        side_slot_workers_cap = get_settings().side_slot_fill_max_workers
         if side_nodes:
             pending_side = {n.id for n in side_nodes}
-            for _attempt in range(2):
-                side_payload = [
+
+            def _run_side_slot_chunk(
+                chunk_idx: int, chunk: list[AnchorNode]
+            ) -> tuple[list[tuple[str, str, str]], int]:
+                """Returns accepted (node_id, title, desc) pairs and policy violation count."""
+                violations_local = 0
+                payload = [
                     {
                         "node_id": n.id,
                         "title": n.title,
@@ -2134,15 +2170,14 @@ class AnchorService:
                             main_spine_sequence=main_spine_sequence,
                         ),
                     }
-                    for n in side_nodes
-                    if n.id in pending_side
+                    for n in chunk
                 ]
-                if not side_payload:
-                    break
+                if not payload:
+                    return [], 0
                 side_prompt = self._slot_fill_prompt(
                     story_input=story_input,
-                    stage_label="stage3.3_side_arcs",
-                    node_rows=side_payload,
+                    stage_label=f"stage3.3_side_arcs.p{chunk_idx}",
+                    node_rows=payload,
                     context_summary=side_context[:2000],
                     narrative_context=narrative_block,
                     main_batch_summaries=list(prior_summaries),
@@ -2150,18 +2185,48 @@ class AnchorService:
                 try:
                     structured_side, _ = llm_client.invoke_json(side_prompt, _LLMSlotFillOutput, profile)
                 except Exception:
-                    break
+                    logger.exception("side slot-fill invoke_json failed chunk_index=%s", chunk_idx)
+                    return [], 0
+                accepted: list[tuple[str, str, str]] = []
                 for item in structured_side.items:
                     node_id = (item.node_id or "").strip()
-                    if node_id not in pending_side or node_id not in by_id:
-                        continue
                     title = (item.title or "").strip()
                     desc = (item.description or "").strip()
                     policy_hits = self._slot_fill_policy_violations(f"{title}\n{desc}")
                     if policy_hits > 0:
-                        violations_side += policy_hits
+                        violations_local += policy_hits
                         continue
                     if title and desc:
+                        accepted.append((node_id, title, desc))
+                return accepted, violations_local
+
+            for _attempt in range(2):
+                if not pending_side:
+                    break
+                pending_ordered = [n for n in side_nodes if n.id in pending_side]
+                chunk_lists = self._chunk_list_evenly(pending_ordered, side_slot_workers_cap)
+                side_parallel_chunks_max = max(side_parallel_chunks_max, len(chunk_lists))
+                merged_updates: list[tuple[list[tuple[str, str, str]], int]] = []
+                with ThreadPoolExecutor(max_workers=len(chunk_lists)) as executor:
+                    futures = [
+                        executor.submit(_run_side_slot_chunk, idx, ch)
+                        for idx, ch in enumerate(chunk_lists)
+                    ]
+                    for fut in as_completed(futures):
+                        try:
+                            merged_updates.append(fut.result())
+                        except Exception:
+                            logger.exception("side slot-fill worker raised")
+                            merged_updates.append(([], 0))
+                for updates, vloc in merged_updates:
+                    violations_side += vloc
+                    for node_id, title, desc in updates:
+                        if node_id not in pending_side or node_id not in by_id:
+                            continue
+                        policy_hits = self._slot_fill_policy_violations(f"{title}\n{desc}")
+                        if policy_hits > 0:
+                            violations_side += policy_hits
+                            continue
                         by_id[node_id] = by_id[node_id].model_copy(update={"title": title, "description": desc})
                         pending_side.discard(node_id)
                 if not pending_side:
@@ -2177,6 +2242,8 @@ class AnchorService:
             "main_batch_summaries": prior_summaries,
             "main_batch_count": len(prior_summaries),
             "batch_summary_fallback_flags": batch_summary_fallback_flags,
+            "side_slot_fill_parallel_workers_cap": side_slot_workers_cap,
+            "side_slot_fill_parallel_chunks_max": side_parallel_chunks_max,
         }
 
     def compile_macro_plan(

@@ -128,6 +128,10 @@ const zhHant: Messages = {
   "app.setup.rerunCompileBody":
     "會覆寫自動產生的角色節點，以及目前儲存的世界觀總表、分卷與里程碑；若你曾在圖譜上手動改過這些自動產生的角色，那些修改會消失。",
   "app.setup.compileCta": "產生世界觀與結構",
+  "app.setup.macroLockedTitle": "已有完成章節，世界觀與結構已凍結",
+  "app.setup.macroLockedBody":
+    "為避免與已完成的章節對不上，編譯、世界觀總表、人物、分卷皆已停用。劇情 DAG 仍可編輯與刪除「LOCKED / UNLOCKED」節點，並新增節點。",
+  "app.setup.macroLockedShortNotice": "已有完成章節：僅劇情 DAG 的 LOCKED／UNLOCKED 節點可編輯／新增／刪除。",
   "app.setup.storyIdLabel": "故事編號",
   "app.setup.storyIdMissing": "未建立",
   "app.setup.worldEditorTitle": "世界觀與結構編修",
@@ -528,6 +532,10 @@ const zhHans: Messages = {
   "app.setup.rerunCompileBody":
     "会覆写自动生成的角色节点，以及当前保存的世界观总表、分卷与里程碑；若你曾在图谱手动修改这些自动生成角色，这些改动会消失。",
   "app.setup.compileCta": "生成世界观与结构",
+  "app.setup.macroLockedTitle": "已有完成章节，世界观与结构已冻结",
+  "app.setup.macroLockedBody":
+    "为避免与已完成章节对不上，编译、世界观总表、人物、分卷皆已停用。剧情 DAG 仍可编辑与删除「LOCKED / UNLOCKED」节点，并新增节点。",
+  "app.setup.macroLockedShortNotice": "已有完成章节：仅剧情 DAG 的 LOCKED／UNLOCKED 节点可编辑／新增／删除。",
   "app.setup.storyIdLabel": "故事编号",
   "app.setup.storyIdMissing": "未建立",
   "app.setup.worldEditorTitle": "世界观与结构编修",
@@ -1018,6 +1026,11 @@ const en: Messages = {
   "app.setup.rerunCompileBody":
     "This overwrites auto-generated cast nodes and the saved world bible, volumes, and milestones; manual edits on those generated nodes will be lost.",
   "app.setup.compileCta": "Compile World & Structure",
+  "app.setup.macroLockedTitle": "Macro plan frozen — at least one chapter is committed",
+  "app.setup.macroLockedBody":
+    "Compile, World Bible, Cast, and Volumes are disabled to keep them aligned with the committed manuscript. You can still edit, delete, and add LOCKED / UNLOCKED plot DAG nodes.",
+  "app.setup.macroLockedShortNotice":
+    "A chapter is already completed: only LOCKED / UNLOCKED plot DAG nodes may be edited, added, or removed.",
   "app.setup.storyIdLabel": "Story ID",
   "app.setup.storyIdMissing": "Not created",
   "app.setup.worldEditorTitle": "World & Structure Editor",

@@ -25,6 +25,7 @@ from app.services.graph_store import InMemoryGraphStore
 from app.services.llm import MockLLMClient
 from app.services.vector_store import InMemoryVectorStore
 from app.services.workflow.service import (
+    MacroPlanCompletedChapterLockError,
     MacroPlanValidationError,
     WorkflowService,
     _unachieved_from_anchor_nodes,
@@ -291,3 +292,176 @@ def test_unachieved_anchor_nodes_respects_dependency_order() -> None:
     }
     rows = _unachieved_from_anchor_nodes(story_row, chapter_id=1)
     assert [r["anchor_id"] for r in rows] == ["parent", "child"]
+
+
+def _bootstrap_locked_story(svc: WorkflowService) -> tuple[str, dict]:
+    """Compile a fresh story, mark chapter 1 as 'completed' to engage the macro lock."""
+    sid = svc.create_story(
+        StoryInput(title="T", premise="p", bible={}, target_total_words=30_000),
+    )["story_id"]
+    macro = svc.macro_compile(sid)
+    svc.story_repository.upsert_chapter_content(
+        sid, chapter_id=1, title="Chapter 1", content="committed body", status="completed"
+    )
+    assert svc.story_repository.has_completed_chapter(sid)
+    return sid, macro
+
+
+def test_macro_compile_blocked_after_chapter_completed(tmp_path) -> None:
+    svc = _service(str(tmp_path / "lock_compile.sqlite3"))
+    sid, _macro = _bootstrap_locked_story(svc)
+    with pytest.raises(MacroPlanCompletedChapterLockError):
+        svc.macro_compile(sid)
+    with pytest.raises(MacroPlanCompletedChapterLockError):
+        svc.begin_macro_compile_async(sid)
+
+
+def test_put_macro_plan_blocks_bible_edit_when_chapter_completed(tmp_path) -> None:
+    svc = _service(str(tmp_path / "lock_bible.sqlite3"))
+    sid, macro = _bootstrap_locked_story(svc)
+    body = _macro_to_put(macro)
+    body = body.model_copy(update={"bible": {**(body.bible or {}), "genre": "manually_changed"}})
+    with pytest.raises(MacroPlanCompletedChapterLockError):
+        svc.put_macro_plan(sid, body)
+
+
+def test_put_macro_plan_blocks_volume_edit_when_chapter_completed(tmp_path) -> None:
+    svc = _service(str(tmp_path / "lock_vol.sqlite3"))
+    sid, macro = _bootstrap_locked_story(svc)
+    body = _macro_to_put(macro)
+    renamed = body.volumes[0].model_copy(update={"title": "renamed"})
+    bad_body = body.model_copy(update={"volumes": [renamed, *body.volumes[1:]]})
+    with pytest.raises(MacroPlanCompletedChapterLockError):
+        svc.put_macro_plan(sid, bad_body)
+
+
+def test_put_macro_plan_blocks_cast_edit_when_chapter_completed(tmp_path) -> None:
+    svc = _service(str(tmp_path / "lock_cast.sqlite3"))
+    sid, macro = _bootstrap_locked_story(svc)
+    body = _macro_to_put(macro)
+    new_first = body.cast[0].model_copy(update={"canonical_name": "renamed_hero"})
+    bad_body = body.model_copy(update={"cast": [new_first, *body.cast[1:]]})
+    with pytest.raises(MacroPlanCompletedChapterLockError):
+        svc.put_macro_plan(sid, bad_body)
+
+
+def test_put_macro_plan_blocks_protagonist_swap_when_chapter_completed(tmp_path) -> None:
+    svc = _service(str(tmp_path / "lock_prot.sqlite3"))
+    sid, macro = _bootstrap_locked_story(svc)
+    body = _macro_to_put(macro)
+    if len(body.cast) < 2:
+        pytest.skip("Bootstrap macro has no alternate cast member to swap into protagonist slot.")
+    other_id = body.cast[1].node_id
+    bad_body = body.model_copy(update={"protagonist_character_id": other_id})
+    with pytest.raises(MacroPlanCompletedChapterLockError):
+        svc.put_macro_plan(sid, bad_body)
+
+
+def test_put_macro_plan_allows_unlocked_node_edit_when_chapter_completed(tmp_path) -> None:
+    svc = _service(str(tmp_path / "lock_unlocked_edit.sqlite3"))
+    sid, macro = _bootstrap_locked_story(svc)
+    body = _macro_to_put(macro)
+    target_idx = next(
+        (i for i, n in enumerate(body.anchor_nodes) if str(n.status).upper() != "RESOLVED"),
+        None,
+    )
+    assert target_idx is not None, "Need at least one non-resolved anchor in compiled fixture."
+    edited = body.anchor_nodes[target_idx].model_copy(update={"description": "human-edited"})
+    new_nodes = [*body.anchor_nodes]
+    new_nodes[target_idx] = edited
+    out = svc.put_macro_plan(sid, body.model_copy(update={"anchor_nodes": new_nodes}))
+    edited_id = str(edited.id)
+    out_node = next(n for n in out["anchor_nodes"] if str(n["id"]) == edited_id)
+    assert str(out_node["description"]) == "human-edited"
+
+
+def test_put_macro_plan_allows_new_locked_node_when_chapter_completed(tmp_path) -> None:
+    svc = _service(str(tmp_path / "lock_add_node.sqlite3"))
+    sid, macro = _bootstrap_locked_story(svc)
+    body = _macro_to_put(macro)
+    user_edit_sid = f"{sid}_user_edit"
+    new_storylines = [
+        *body.storylines,
+        Storyline(
+            id=user_edit_sid,
+            type=StorylineTier.USER_EDIT,
+            title="user-edit branch",
+            overall_goal="",
+            involved_entities=[],
+        ),
+    ]
+    parent = body.anchor_nodes[0]
+    new_node_id = f"{sid}_user_added_1"
+    new_node = AnchorNode(
+        id=new_node_id,
+        storyline_ids=[user_edit_sid],
+        volume_id=parent.volume_id,
+        node_kind="NORMAL",
+        title="hand-added",
+        description="appended after writing chapter 1",
+        depends_on=[parent.id],
+        status=AnchorStatus.LOCKED,
+    )
+    next_body = body.model_copy(
+        update={
+            "storylines": new_storylines,
+            "anchor_nodes": [*body.anchor_nodes, new_node],
+        }
+    )
+    out = svc.put_macro_plan(sid, next_body)
+    out_ids = {str(n["id"]) for n in out["anchor_nodes"]}
+    assert new_node_id in out_ids
+    out_storyline_ids = {str(s["id"]) for s in out["storylines"]}
+    assert user_edit_sid in out_storyline_ids
+
+
+def test_put_macro_plan_blocks_resolved_node_edit_when_chapter_completed(tmp_path) -> None:
+    svc = _service(str(tmp_path / "lock_resolved.sqlite3"))
+    sid = svc.create_story(
+        StoryInput(title="T", premise="p", bible={}, target_total_words=30_000),
+    )["story_id"]
+    macro = svc.macro_compile(sid)
+    body = _macro_to_put(macro)
+    target_idx = next(
+        (i for i, n in enumerate(body.anchor_nodes) if str(n.status).upper() != "RESOLVED"),
+        None,
+    )
+    assert target_idx is not None
+    promoted = body.anchor_nodes[target_idx].model_copy(update={"status": AnchorStatus.RESOLVED})
+    promoted_id = str(promoted.id)
+    new_nodes = [*body.anchor_nodes]
+    new_nodes[target_idx] = promoted
+    svc.put_macro_plan(sid, body.model_copy(update={"anchor_nodes": new_nodes}))
+    svc.story_repository.upsert_chapter_content(
+        sid, chapter_id=1, title="Chapter 1", content="committed body", status="completed"
+    )
+    snapshot = svc.get_macro_snapshot(sid)
+    locked_body = _macro_to_put(snapshot)
+    resolved_idx = next(
+        i for i, n in enumerate(locked_body.anchor_nodes) if str(n.id) == promoted_id
+    )
+    edited = locked_body.anchor_nodes[resolved_idx].model_copy(
+        update={"description": "should-not-stick"}
+    )
+    next_nodes = [*locked_body.anchor_nodes]
+    next_nodes[resolved_idx] = edited
+    with pytest.raises(MacroPlanCompletedChapterLockError):
+        svc.put_macro_plan(sid, locked_body.model_copy(update={"anchor_nodes": next_nodes}))
+
+
+def test_put_macro_plan_allows_no_op_save_when_chapter_completed(tmp_path) -> None:
+    svc = _service(str(tmp_path / "lock_noop.sqlite3"))
+    sid, macro = _bootstrap_locked_story(svc)
+    body = _macro_to_put(macro)
+    out = svc.put_macro_plan(sid, body)
+    assert out["story_id"] == sid
+    assert out["has_completed_chapter"] is True
+    assert out["macro_edit_locked"] is True
+
+
+def test_macro_snapshot_reports_completed_chapter_lock(tmp_path) -> None:
+    svc = _service(str(tmp_path / "snapshot_lock_flags.sqlite3"))
+    sid, _macro = _bootstrap_locked_story(svc)
+    snapshot = svc.get_macro_snapshot(sid)
+    assert snapshot["has_completed_chapter"] is True
+    assert snapshot["macro_edit_locked"] is True

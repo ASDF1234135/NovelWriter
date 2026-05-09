@@ -931,6 +931,10 @@ export default function App() {
 
   async function handleMacroCompile() {
     if (!storyId) return;
+    if (hasCompletedChapter) {
+      setError(t("app.setup.macroLockedShortNotice"));
+      return;
+    }
     setBusy(true);
     setCompileInProgress(true);
     setCompileProgress({ status: "QUEUED", percent: 5, message: "Macro compile queued..." });
@@ -1302,6 +1306,10 @@ export default function App() {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file || !storyId) return;
+    if (hasCompletedChapter) {
+      setError(t("app.setup.macroLockedShortNotice"));
+      return;
+    }
     setError("");
     try {
       const text = await file.text();
@@ -1634,6 +1642,15 @@ export default function App() {
       macroData.volumes.length > 0 &&
       (((macroData.anchor_nodes ?? []).length > 0) || ((macroData.anchors ?? []).length > 0)),
   );
+  /**
+   * True iff at least one chapter for the active story has status `completed`. Combines
+   * server-side flags from macro snapshot with the locally cached chapters list so the
+   * UI reacts immediately after a chapter run finishes (before the snapshot is refetched).
+   */
+  const hasCompletedChapter = useMemo(() => {
+    if (macroData?.has_completed_chapter || macroData?.macro_edit_locked) return true;
+    return chapters.some((c) => String(c.status ?? "").toLowerCase() === "completed");
+  }, [macroData?.has_completed_chapter, macroData?.macro_edit_locked, chapters]);
   const hasChapterRun = Boolean(workflow || chapters.length > 0);
   const hasReviewed = Boolean(selectedChapter || chapters.length > 0);
   const hasExported = hasExportedChapter || hasExportedProject;
@@ -1812,10 +1829,17 @@ export default function App() {
             <p className="max-w-2xl font-body text-lg italic text-on-surface-variant">{t("app.setup.subtitle")}</p>
           </div>
 
-          {storyId ? (
+          {storyId && !hasCompletedChapter ? (
             <div className="mb-4 max-w-7xl rounded-xl border border-tertiary/25 bg-tertiary/5 px-4 py-3 font-body text-sm leading-relaxed text-on-surface">
               <span className="font-headline font-bold text-tertiary">{t("app.setup.rerunCompileTitle")}</span>
               {t("app.setup.rerunCompileBody")}
+            </div>
+          ) : null}
+
+          {storyId && hasCompletedChapter ? (
+            <div className="mb-4 max-w-7xl rounded-xl border border-warning/35 bg-warning/10 px-4 py-3 font-body text-sm leading-relaxed text-on-surface">
+              <span className="mr-2 font-headline font-bold text-warning">{t("app.setup.macroLockedTitle")}</span>
+              {t("app.setup.macroLockedBody")}
             </div>
           ) : null}
 
@@ -1825,7 +1849,8 @@ export default function App() {
                 type="button"
                 className="btn-primary-gradient flex items-center gap-2 text-sm"
                 onClick={handleMacroCompile}
-                disabled={!storyId || busy || workflowConflictLocked}
+                disabled={!storyId || busy || workflowConflictLocked || hasCompletedChapter}
+                title={hasCompletedChapter ? t("app.setup.macroLockedShortNotice") : undefined}
               >
                 <span className="material-symbols-outlined text-lg">auto_awesome</span>
                 {t("app.setup.compileCta")}
@@ -1837,7 +1862,8 @@ export default function App() {
                 type="button"
                 className="btn-secondary"
                 onClick={() => toolbarImportInputRef.current?.click()}
-                disabled={!storyId || busy}
+                disabled={!storyId || busy || hasCompletedChapter}
+                title={hasCompletedChapter ? t("app.setup.macroLockedShortNotice") : undefined}
               >
                 {t("setup.importProjectJson")}
               </button>
@@ -1880,8 +1906,8 @@ export default function App() {
                 onSaveSettings={storyId ? handleSaveStorySettings : undefined}
                 showCreateButton={!storyId}
                 onExportProjectBundle={storyId ? exportProjectBundle : undefined}
-                onImportProjectBundle={storyId ? applyImportProjectBundle : undefined}
-                getImportBundlePreview={storyId ? buildImportBundlePreviewLines : undefined}
+                onImportProjectBundle={storyId && !hasCompletedChapter ? applyImportProjectBundle : undefined}
+                getImportBundlePreview={storyId && !hasCompletedChapter ? buildImportBundlePreviewLines : undefined}
                 onBusy={setBusy}
                 onError={setError}
                 disabled={busy}
@@ -1900,6 +1926,7 @@ export default function App() {
                   onMacroDataUpdate={setMacroData}
                   onBusy={setBusy}
                   onError={setError}
+                  editLocked={hasCompletedChapter}
                 />
               </div>
             </div>

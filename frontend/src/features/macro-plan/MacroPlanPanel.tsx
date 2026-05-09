@@ -24,6 +24,13 @@ type Props = {
   onMacroDataUpdate: (next: MacroCompileData) => void;
   onBusy: (busy: boolean) => void;
   onError: (msg: string) => void;
+  /**
+   * When true, the bible / volumes / cast tabs render in read-only mode and the
+   * "Add", "Edit", "Delete" controls are hidden. Use this once the story has at
+   * least one committed chapter so the macro plan stays aligned with the manuscript.
+   * Plot DAG node editing remains available via the dedicated DAG view.
+   */
+  editLocked?: boolean;
 };
 
 type MacroTab = "bible" | "volumes" | "cast" | "storylines";
@@ -147,9 +154,10 @@ export function MacroPlanPanel({
   onMacroDataUpdate,
   onBusy,
   onError,
+  editLocked = false,
 }: Props) {
   const { locale } = useI18n();
-  const canEdit = Boolean(storyId);
+  const canEdit = Boolean(storyId) && !editLocked;
 
   const [tab, setTab] = useState<MacroTab>("bible");
   const [editSurface, setEditSurface] = useState<EditSurface>("off");
@@ -636,6 +644,20 @@ export function MacroPlanPanel({
           ))}
         </div>
       </div>
+
+      {editLocked ? (
+        <div
+          role="status"
+          className="mb-4 rounded-lg border border-amber-400/40 bg-amber-500/10 px-3 py-2 font-body text-xs text-amber-100"
+        >
+          {tr(
+            locale,
+            "已有完成章節：世界觀總表、人物與分卷已凍結；請改在劇情 DAG 編輯／新增／刪除 LOCKED／UNLOCKED 節點。",
+            "已有完成章节：世界观总表、人物与分卷已冻结；请改在剧情 DAG 编辑／新增／删除 LOCKED／UNLOCKED 节点。",
+            "A chapter is already completed: world bible, cast, and volumes are frozen. Use the plot DAG to edit, add, or delete LOCKED / UNLOCKED nodes.",
+          )}
+        </div>
+      ) : null}
 
       {inlineError ? (
         <div

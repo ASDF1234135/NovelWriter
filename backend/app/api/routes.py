@@ -43,6 +43,7 @@ from app.services.workflow.service import (
     ChapterSummaryRegenerateFailed,
     HitlNotWaitingError,
     MacroCompileAlreadyRunningError,
+    MacroPlanCompletedChapterLockError,
     MacroPlanValidationError,
     StoryConfigurationLockedError,
     WorkflowService,
@@ -84,6 +85,7 @@ def get_story_detail(
         raise HTTPException(status_code=404, detail=f"Story not found: {story_id}")
     # Workflow runs no longer imply configuration lock (macro/story edits allowed after runs).
     locked = False
+    has_completed = story_repository.has_completed_chapter(story_id)
     return {
         "story_id": row["story_id"],
         "title": row["title"],
@@ -104,6 +106,8 @@ def get_story_detail(
         "configuration_locked": locked,
         "macro_topology_mode": "fixed_fishbone",
         "topology_locked": True,
+        "has_completed_chapter": has_completed,
+        "macro_edit_locked": has_completed,
     }
 
 
@@ -112,6 +116,7 @@ def patch_story(
     story_id: str,
     patch: StoryPatch,
     workflow_service: WorkflowService = Depends(get_workflow_service),
+    story_repository: StoryRepository = Depends(get_story_repository),
 ) -> dict:
     try:
         row = workflow_service.patch_story(story_id, patch)
@@ -120,6 +125,7 @@ def patch_story(
     except StoryConfigurationLockedError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     locked = False
+    has_completed = story_repository.has_completed_chapter(story_id)
     return {
         "story_id": row["story_id"],
         "title": row["title"],
@@ -140,6 +146,8 @@ def patch_story(
         "configuration_locked": locked,
         "macro_topology_mode": "fixed_fishbone",
         "topology_locked": True,
+        "has_completed_chapter": has_completed,
+        "macro_edit_locked": has_completed,
     }
 
 
@@ -178,6 +186,8 @@ def put_macro_plan(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except StoryConfigurationLockedError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except MacroPlanCompletedChapterLockError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except MacroPlanValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -193,6 +203,8 @@ def macro_compile(
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except MacroCompileAlreadyRunningError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except MacroPlanCompletedChapterLockError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     background_tasks.add_task(workflow_service.execute_macro_compile_background, story_id)
     return JSONResponse(

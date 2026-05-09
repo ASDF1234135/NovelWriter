@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
@@ -292,7 +293,26 @@ def build_chapter_graph(context: WorkflowContext):
         vibe_cooldown = state.get("ending_vibe_cooldown_constraint") or {}
         narrative = str(merged_planner.get("narrative_script") or "")
         boundary = str(merged_planner.get("ending_boundary_rule") or "")
-        if cooldown.get("active") and _semantic_resolution_cooldown_hitl(context, narrative):
+        res_precheck = bool(cooldown.get("active"))
+        vibe_precheck = bool(
+            vibe_cooldown.get("active")
+            and "SAFE_ROOM_EXPOSITION" in str(vibe_cooldown.get("forbidden_vibes") or [])
+        )
+        resolution_hitl = False
+        vibe_hitl = False
+        if res_precheck and vibe_precheck:
+            _gate_workers = max(1, min(2, get_settings().side_slot_fill_max_workers))
+            with ThreadPoolExecutor(max_workers=_gate_workers) as pool:
+                fut_res = pool.submit(_semantic_resolution_cooldown_hitl, context, narrative)
+                fut_vibe = pool.submit(_semantic_vibe_cooldown_hitl, context, boundary, narrative)
+                resolution_hitl = bool(fut_res.result())
+                vibe_hitl = bool(fut_vibe.result())
+        elif res_precheck:
+            resolution_hitl = _semantic_resolution_cooldown_hitl(context, narrative)
+        elif vibe_precheck:
+            vibe_hitl = _semantic_vibe_cooldown_hitl(context, boundary, narrative)
+
+        if resolution_hitl:
             merged_planner.update(
                 {
                     "requires_hitl": True,
@@ -302,11 +322,7 @@ def build_chapter_graph(context: WorkflowContext):
                     "resume_from": "planner",
                 }
             )
-        if (
-            vibe_cooldown.get("active")
-            and "SAFE_ROOM_EXPOSITION" in str(vibe_cooldown.get("forbidden_vibes") or [])
-            and _semantic_vibe_cooldown_hitl(context, boundary, narrative)
-        ):
+        if vibe_hitl:
             merged_planner.update(
                 {
                     "requires_hitl": True,

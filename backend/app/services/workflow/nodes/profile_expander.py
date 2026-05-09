@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import UTC, datetime
 from typing import Any
-from datetime import datetime, UTC
+
+from app.core.config import get_settings
 
 from pydantic import BaseModel, Field
 
@@ -189,6 +192,7 @@ def run_profile_expander(state: dict, context: WorkflowContext) -> dict:
     pending = state.get("pending_chapter_extraction") or {}
     entities = pending.get("entities") or []
     chapter_content = str(state.get("best_draft_content") or state.get("current_draft") or "")
+    extraction_entities: list[dict[str, Any]] = []
     for raw in entities:
         if not isinstance(raw, dict):
             continue
@@ -197,12 +201,25 @@ def run_profile_expander(state: dict, context: WorkflowContext) -> dict:
             continue
         if str(raw.get("node_type") or "") != NodeType.CHARACTER.value:
             continue
-        member = _compile_from_extraction(state, context, raw, chapter_content)
-        if member is not None:
-            updates_by_node[node_id] = {
-                "update_mode": "fill_empty",
-                "member": member.model_dump(mode="json"),
-            }
+        extraction_entities.append(raw)
+
+    def _extraction_update(raw_ent: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+        member = _compile_from_extraction(state, context, raw_ent, chapter_content)
+        if member is None:
+            return None
+        return member.node_id, {
+            "update_mode": "fill_empty",
+            "member": member.model_dump(mode="json"),
+        }
+
+    _pe_workers = max(1, min(len(extraction_entities), get_settings().side_slot_fill_max_workers))
+    if extraction_entities:
+        with ThreadPoolExecutor(max_workers=_pe_workers) as pool:
+            futs = [pool.submit(_extraction_update, raw_ent) for raw_ent in extraction_entities]
+            for fut in as_completed(futs):
+                out = fut.result()
+                if out:
+                    updates_by_node[out[0]] = out[1]
 
     story = context.story_repository.get_story(state["story_id"]) or {}
     cast_rows = story.get("cast_json") or []
@@ -217,6 +234,7 @@ def run_profile_expander(state: dict, context: WorkflowContext) -> dict:
         cast_index[member.node_id] = member
 
     now_iso = datetime.now(UTC).isoformat()
+    evolution_jobs: list[tuple[CharacterEvolutionRequest, StoryCastMemberStored]] = []
     for raw_req in list(state.get("pending_cast_evolutions") or []):
         if not isinstance(raw_req, dict):
             continue
@@ -227,6 +245,10 @@ def run_profile_expander(state: dict, context: WorkflowContext) -> dict:
         current_member = cast_index.get(req.node_id)
         if current_member is None:
             continue
+        evolution_jobs.append((req, current_member))
+
+    def _evolution_update(job: tuple[CharacterEvolutionRequest, StoryCastMemberStored]) -> tuple[str, dict[str, Any]]:
+        req, current_member = job
         new_personality = (req.new_personality or "").strip()
         new_speech_style = (req.new_speech_style or "").strip()
         if (not new_personality or not new_speech_style) and not isinstance(context.llm_client, MockLLMClient):
@@ -267,11 +289,19 @@ def run_profile_expander(state: dict, context: WorkflowContext) -> dict:
                 "arc_history": [*current_member.arc_history, milestone],
             }
         ).model_dump(mode="json")
-        updates_by_node[req.node_id] = {
+        return req.node_id, {
             "update_mode": "evolution",
             "member": member_payload,
             "milestone": milestone.model_dump(mode="json"),
         }
+
+    _evo_workers = max(1, min(len(evolution_jobs), get_settings().side_slot_fill_max_workers))
+    if evolution_jobs:
+        with ThreadPoolExecutor(max_workers=_evo_workers) as pool:
+            futs = [pool.submit(_evolution_update, job) for job in evolution_jobs]
+            for fut in as_completed(futs):
+                nid, payload = fut.result()
+                updates_by_node[nid] = payload
 
     return {
         "pending_cast_updates": list(updates_by_node.values()),

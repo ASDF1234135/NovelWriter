@@ -85,6 +85,8 @@ class Settings(BaseSettings):
     macro_chapters_per_volume: int = 10
     # Macro compile for English only: chapter divisor for target_total_words (legacy ~alnum-per-chapter scale; decoupled from workflow word targets).
     macro_english_chapter_unit: int = 1800
+    # Macro compile anchor slot-fill: after mainline batches, run side-arc slot-fill LLM calls in parallel (ThreadPoolExecutor). 1 = serial.
+    side_slot_fill_max_workers: int = Field(default=3, ge=1, le=16)
     # Plan supervisor: heuristic min normalized words per must_include_beat.
     plan_supervisor_words_per_beat_floor: int = 200
     cors_origins: str = Field(default="http://localhost:5173")
