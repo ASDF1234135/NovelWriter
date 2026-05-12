@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
 
+from app.core.concurrency import ContextThreadPoolExecutor as ThreadPoolExecutor
 from app.core.config import get_settings
 from app.domain.schema import AnchorResolutionOutput, GraphRAGEvaluateOutput
 from app.domain.story_runtime import recompute_anchor_unlocks

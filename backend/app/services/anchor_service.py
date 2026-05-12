@@ -5,8 +5,10 @@ import re
 import json
 import logging
 import random
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
 from typing import Any, Literal
+
+from app.core.concurrency import ContextThreadPoolExecutor as ThreadPoolExecutor
 from pydantic import BaseModel, Field
 
 from app.domain.schema import (

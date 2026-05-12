@@ -2,6 +2,8 @@ import json
 import logging
 from datetime import datetime, UTC
 
+from app.core.story_logger import get_story_log_router
+
 
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
@@ -17,13 +19,14 @@ class JsonFormatter(logging.Formatter):
 
 
 def configure_logging() -> None:
-    handler = logging.StreamHandler()
-    handler.setFormatter(JsonFormatter())
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(JsonFormatter())
 
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
     root_logger.handlers.clear()
-    root_logger.addHandler(handler)
+    root_logger.addHandler(stream_handler)
+    root_logger.addHandler(get_story_log_router())
 
 
 def get_logger(name: str) -> logging.Logger:

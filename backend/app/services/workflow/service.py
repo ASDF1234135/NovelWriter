@@ -71,6 +71,7 @@ from app.services.workflow.graph import WorkflowNodeTimeoutError
 from app.services.workflow.hitl_payload import build_hitl_context_payload, should_expose_hitl_context
 from app.services.workflow.metrics import WorkflowMetricsResponse, build_single_run_metrics, rollup_metrics
 from app.services.workflow.outline_binding import compute_outline_binding_mode
+from app.core.story_logger import bind_story_context, delete_story_logs
 
 _ALLOWED_HITL_RESUME_NODES = frozenset(
     {
@@ -920,19 +921,34 @@ class WorkflowService:
         story_id = f"story_{uuid4().hex[:10]}"
         story = self.story_repository.create_story(story_id, story_input)
         self.graph_store.seed_story(story_id)
+        logger.info(
+            "Story created",
+            extra={
+                "story_id": story_id,
+                "source": "workflow.create_story",
+                "title": story_input.title,
+                "target_total_words": story_input.target_total_words,
+            },
+        )
         return story
 
     def patch_story(self, story_id: str, patch: StoryPatch) -> dict:
         return self.story_repository.patch_story(story_id, patch)
 
     def delete_story(self, story_id: str) -> None:
-        """Remove story from SQLite, workflow tables, in-memory/Neo4j graph, and vector index."""
+        """Remove story from SQLite, workflow tables, in-memory/Neo4j graph, vector index, and log file."""
         if not self.story_repository.get_story(story_id):
             raise KeyError(f"Story not found: {story_id}")
+        logger.info(
+            "Story delete requested",
+            extra={"story_id": story_id, "source": "workflow.delete_story"},
+        )
         self.workflow_repository.delete_all_for_story(story_id)
         self.story_repository.delete_story_cascade(story_id)
         self.graph_store.remove_story(story_id)
         self.vector_store.remove_story(story_id)
+        # Remove the per-story log file last so the lines above are persisted before unlink.
+        delete_story_logs(story_id)
 
     def macro_compile(self, story_id: str) -> dict:
         story = self.story_repository.get_story(story_id)
@@ -1138,15 +1154,31 @@ class WorkflowService:
 
     def execute_macro_compile_background(self, story_id: str) -> None:
         """Run macro_compile and persist terminal status (BackgroundTasks entry point)."""
-        try:
-            self.macro_compile(story_id)
-        except Exception as exc:
-            self.story_repository.finish_macro_compile(
-                story_id, success=False, error_message=str(exc)[:500]
+        with bind_story_context(story_id=story_id):
+            logger.info(
+                "Macro compile started",
+                extra={"story_id": story_id, "source": "workflow.macro_compile"},
             )
-            logger.exception("macro_compile background failed for %s", story_id)
-            return
-        self.story_repository.finish_macro_compile(story_id, success=True)
+            try:
+                self.macro_compile(story_id)
+            except Exception as exc:
+                self.story_repository.finish_macro_compile(
+                    story_id, success=False, error_message=str(exc)[:500]
+                )
+                logger.exception(
+                    "Macro compile failed",
+                    extra={
+                        "story_id": story_id,
+                        "source": "workflow.macro_compile",
+                        "error": str(exc)[:500],
+                    },
+                )
+                return
+            self.story_repository.finish_macro_compile(story_id, success=True)
+            logger.info(
+                "Macro compile succeeded",
+                extra={"story_id": story_id, "source": "workflow.macro_compile"},
+            )
 
     def run_chapter(
         self,
@@ -1333,46 +1365,73 @@ class WorkflowService:
     def execute_stored_run(self, run_id: str) -> None:
         """Resume graph from DB state (used after start_run_chapter or HITL)."""
         state = normalize_workflow_state(self.workflow_repository.get_run_state(run_id))
-        if int(state.get("state_version") or 1) < 2:
-            state["workflow_status"] = WorkflowStatus.FAILED.value
-            state["requires_hitl"] = False
-            state["hitl_reason"] = "Legacy run is readonly after Anchor DAG V2 migration."
-            self.workflow_repository.update_run(run_id, state)
-            return
-        if str(state.get("workflow_status") or "") == WorkflowStatus.CANCELLED.value:
-            # Run was abandoned by the user; do not resume execution.
-            return
+        story_id = str(state.get("story_id") or "")
         try:
-            self._execute_workflow(run_id, state)
-        except Exception as exc:
-            try:
-                state = self.workflow_repository.get_run_state(run_id)
+            chapter_id = int(state.get("chapter_id") or 0) or None
+        except (TypeError, ValueError):
+            chapter_id = None
+        with bind_story_context(story_id=story_id or None, run_id=run_id, chapter_id=chapter_id):
+            if int(state.get("state_version") or 1) < 2:
                 state["workflow_status"] = WorkflowStatus.FAILED.value
                 state["requires_hitl"] = False
-                state["hitl_reason"] = str(exc)[:500]
-                state["failure_type"] = "TIMEOUT" if isinstance(exc, WorkflowNodeTimeoutError) else "ERROR"
-                if isinstance(exc, WorkflowNodeTimeoutError):
-                    node_name = str(exc.node_name or "").strip().lower()
-                    state["timeout_bucket"] = "llm" if node_name in {"director", "planner", "author", "reader"} else "logic"
-                else:
-                    state["timeout_bucket"] = ""
-                state["thread_reset_done"] = True
-                state["workflow_thread_id"] = str(uuid4())
-                state["pending_db_commit"] = {}
-                state["commit_executed"] = False
+                state["hitl_reason"] = "Legacy run is readonly after Anchor DAG V2 migration."
                 self.workflow_repository.update_run(run_id, state)
-            except Exception:
-                logger.exception(
-                    "execute_stored_run could not persist FAILED state (run_id=%s)",
-                    run_id,
+                logger.warning(
+                    "Workflow run skipped (legacy state_version)",
+                    extra={"source": "workflow.execute_stored_run", "run_id": run_id},
                 )
-                raise
-            # Do not re-raise: Starlette BackgroundTasks would log it as an ASGI error
-            # even though the run is already marked FAILED in SQLite.
-            logger.error(
-                "Workflow run failed (run_id=%s)",
-                run_id,
-                exc_info=exc,
+                return
+            if str(state.get("workflow_status") or "") == WorkflowStatus.CANCELLED.value:
+                # Run was abandoned by the user; do not resume execution.
+                logger.info(
+                    "Workflow run skipped (cancelled)",
+                    extra={"source": "workflow.execute_stored_run", "run_id": run_id},
+                )
+                return
+            logger.info(
+                "Workflow run started",
+                extra={"source": "workflow.execute_stored_run", "run_id": run_id},
+            )
+            try:
+                self._execute_workflow(run_id, state)
+            except Exception as exc:
+                try:
+                    state = self.workflow_repository.get_run_state(run_id)
+                    state["workflow_status"] = WorkflowStatus.FAILED.value
+                    state["requires_hitl"] = False
+                    state["hitl_reason"] = str(exc)[:500]
+                    state["failure_type"] = "TIMEOUT" if isinstance(exc, WorkflowNodeTimeoutError) else "ERROR"
+                    if isinstance(exc, WorkflowNodeTimeoutError):
+                        node_name = str(exc.node_name or "").strip().lower()
+                        state["timeout_bucket"] = "llm" if node_name in {"director", "planner", "author", "reader"} else "logic"
+                    else:
+                        state["timeout_bucket"] = ""
+                    state["thread_reset_done"] = True
+                    state["workflow_thread_id"] = str(uuid4())
+                    state["pending_db_commit"] = {}
+                    state["commit_executed"] = False
+                    self.workflow_repository.update_run(run_id, state)
+                except Exception:
+                    logger.exception(
+                        "execute_stored_run could not persist FAILED state",
+                        extra={"source": "workflow.execute_stored_run", "run_id": run_id},
+                    )
+                    raise
+                # Do not re-raise: Starlette BackgroundTasks would log it as an ASGI error
+                # even though the run is already marked FAILED in SQLite.
+                logger.error(
+                    "Workflow run failed",
+                    extra={
+                        "source": "workflow.execute_stored_run",
+                        "run_id": run_id,
+                        "error": str(exc)[:500],
+                    },
+                    exc_info=exc,
+                )
+                return
+            logger.info(
+                "Workflow run finished",
+                extra={"source": "workflow.execute_stored_run", "run_id": run_id},
             )
 
     def get_workflow(self, run_id: str) -> dict:
@@ -1498,11 +1557,30 @@ class WorkflowService:
             "plot_summary_source": result.get("plot_summary_source", ""),
         }
 
+    def _log_hitl_action(self, run_id: str, action_type: str, state: dict) -> None:
+        """Emit a per-story INFO line describing a HITL action received from the user."""
+        story_id = str(state.get("story_id") or "")
+        try:
+            chapter_id = int(state.get("chapter_id") or 0) or None
+        except (TypeError, ValueError):
+            chapter_id = None
+        logger.info(
+            "HITL action received",
+            extra={
+                "source": "workflow.hitl",
+                "story_id": story_id or None,
+                "run_id": run_id,
+                "chapter_id": chapter_id,
+                "action_type": action_type,
+            },
+        )
+
     def apply_hitl_decision(self, run_id: str, request: HitlDecisionRequest) -> None:
         state = normalize_workflow_state(self.workflow_repository.get_run_state(run_id))
         _ensure_hitl_waiting(state)
         prev_hitl_reason = str(state.get("hitl_reason", "") or "")
         self.workflow_repository.append_hitl_action(run_id, "decision", request.model_dump(mode="json"))
+        self._log_hitl_action(run_id, "decision", state)
 
         if request.option_id == "ABORT_AND_RESTART":
             _apply_abort_and_restart_chapter_state(self.story_repository, state)
@@ -1626,6 +1704,7 @@ class WorkflowService:
         else:
             state["resume_from"] = "author"
         self.workflow_repository.append_hitl_action(run_id, "outline_edit", request.model_dump(mode="json"))
+        self._log_hitl_action(run_id, "outline_edit", state)
         self.workflow_repository.update_run(run_id, state)
 
     def handle_hitl_outline_edit(self, run_id: str, request: HitlOutlineEditRequest) -> dict:
@@ -1675,6 +1754,7 @@ class WorkflowService:
         else:
             state["resume_from"] = resume
         self.workflow_repository.append_hitl_action(run_id, "state_injection", request.model_dump(mode="json"))
+        self._log_hitl_action(run_id, "state_injection", state)
         self.workflow_repository.update_run(run_id, state)
 
     def handle_hitl_state_injection(self, run_id: str, request: HitlStateInjectionRequest) -> dict:
@@ -1700,6 +1780,7 @@ class WorkflowService:
         state["workflow_status"] = WorkflowStatus.RUNNING.value
         state["resume_from"] = resume
         self.workflow_repository.append_hitl_action(run_id, "draft_edit", request.model_dump(mode="json"))
+        self._log_hitl_action(run_id, "draft_edit", state)
         self.workflow_repository.update_run(run_id, state)
 
     def handle_hitl_draft_edit(self, run_id: str, request: HitlDraftEditRequest) -> dict:
@@ -1735,6 +1816,7 @@ class WorkflowService:
         else:
             state["resume_from"] = "planner"
         self.workflow_repository.append_hitl_action(run_id, "director_patch", request.model_dump(mode="json"))
+        self._log_hitl_action(run_id, "director_patch", state)
         self.workflow_repository.update_run(run_id, state)
 
     def handle_hitl_director_patch(self, run_id: str, request: HitlDirectorPatchRequest) -> dict:
@@ -1777,6 +1859,7 @@ class WorkflowService:
         state["workflow_status"] = WorkflowStatus.RUNNING.value
         state["resume_from"] = "extraction_gate"
         self.workflow_repository.append_hitl_action(run_id, "extraction_remap", request.model_dump(mode="json"))
+        self._log_hitl_action(run_id, "extraction_remap", state)
         self.workflow_repository.update_run(run_id, state)
 
     def handle_hitl_extraction_remap(self, run_id: str, request: HitlExtractionRemapRequest) -> dict:
@@ -1835,6 +1918,7 @@ class WorkflowService:
         state["pending_hitl_options"] = []
         state["workflow_status"] = WorkflowStatus.RUNNING.value
         self.workflow_repository.append_hitl_action(run_id, "anchor_resolution", request.model_dump(mode="json"))
+        self._log_hitl_action(run_id, "anchor_resolution", state)
         self.workflow_repository.update_run(run_id, state)
 
     def handle_hitl_anchor_resolution(self, run_id: str, request: HitlAnchorResolutionRequest) -> dict:
@@ -1871,6 +1955,7 @@ class WorkflowService:
         state["workflow_status"] = WorkflowStatus.RUNNING.value
         state["resume_from"] = "planner"
         self.workflow_repository.append_hitl_action(run_id, "anchor_delay", request.model_dump(mode="json"))
+        self._log_hitl_action(run_id, "anchor_delay", state)
         self.workflow_repository.update_run(run_id, state)
 
     def handle_hitl_anchor_delay(self, run_id: str, request: HitlAnchorDelayRequest) -> dict:
@@ -1890,6 +1975,7 @@ class WorkflowService:
         state["workflow_status"] = WorkflowStatus.RUNNING.value
         state["resume_from"] = "graph_rag"
         self.workflow_repository.append_hitl_action(run_id, "context_prune", request.model_dump(mode="json"))
+        self._log_hitl_action(run_id, "context_prune", state)
         self.workflow_repository.update_run(run_id, state)
 
     def handle_hitl_context_prune(self, run_id: str, request: HitlContextPruneRequest) -> dict:

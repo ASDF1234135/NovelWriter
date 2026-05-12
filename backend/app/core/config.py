@@ -109,10 +109,19 @@ class Settings(BaseSettings):
     # Second-pass Author call: extraction surface hints (lightweight model recommended).
     author_hints_llm_model: str = ""
     author_hints_temperature: float = 0.1
+    # Per-story logging: JSON-Lines file under story_log_dir, deleted on story cascade-delete.
+    story_log_dir: str = "./data/logs"
+    story_log_level: str = "INFO"
+    story_log_max_bytes: int = 10_000_000
+    story_log_backup_count: int = 3
 
     @property
     def sqlite_file(self) -> Path:
         return Path(self.sqlite_path).resolve()
+
+    @property
+    def story_log_dir_path(self) -> Path:
+        return Path(self.story_log_dir).resolve()
 
     @property
     def cors_origin_list(self) -> list[str]:
@@ -151,4 +160,5 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     settings = Settings()
     settings.sqlite_file.parent.mkdir(parents=True, exist_ok=True)
+    settings.story_log_dir_path.mkdir(parents=True, exist_ok=True)
     return settings

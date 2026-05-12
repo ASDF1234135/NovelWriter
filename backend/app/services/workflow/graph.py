@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
-from concurrent.futures import ThreadPoolExecutor
+import time
 from typing import Any
+
+from app.core.concurrency import ContextThreadPoolExecutor as ThreadPoolExecutor
+
+logger = logging.getLogger(__name__)
 
 from langgraph.graph import END, START, StateGraph
 
@@ -78,11 +83,45 @@ def _timeout_ms_for_node(node_name: str) -> int:
 
 
 def _run_with_timeout(node_name: str, fn: Any, state: AgentWorkflowState) -> dict:
-    timeout_s = _timeout_ms_for_node(node_name) / 1000.0
+    timeout_ms = _timeout_ms_for_node(node_name)
+    timeout_s = timeout_ms / 1000.0
+    story_id = str(state.get("story_id") or "") or None
     try:
-        return asyncio.run(asyncio.wait_for(asyncio.to_thread(fn, state), timeout=timeout_s))
+        chapter_id_val = int(state.get("chapter_id") or 0) or None
+    except (TypeError, ValueError):
+        chapter_id_val = None
+    log_extra = {
+        "source": f"node.{node_name}",
+        "story_id": story_id,
+        "chapter_id": chapter_id_val,
+    }
+    logger.info("Node started", extra=log_extra)
+    start = time.perf_counter()
+    try:
+        result = asyncio.run(
+            asyncio.wait_for(asyncio.to_thread(fn, state), timeout=timeout_s)
+        )
     except TimeoutError as exc:
-        raise WorkflowNodeTimeoutError(node_name=node_name, timeout_ms=_timeout_ms_for_node(node_name)) from exc
+        elapsed = int((time.perf_counter() - start) * 1000)
+        logger.error(
+            "Node timed out",
+            extra={**log_extra, "elapsed_ms": elapsed, "timeout_ms": timeout_ms},
+        )
+        raise WorkflowNodeTimeoutError(node_name=node_name, timeout_ms=timeout_ms) from exc
+    except Exception as exc:
+        elapsed = int((time.perf_counter() - start) * 1000)
+        logger.error(
+            "Node failed",
+            extra={**log_extra, "elapsed_ms": elapsed, "error": str(exc)[:500]},
+            exc_info=exc,
+        )
+        raise
+    elapsed = int((time.perf_counter() - start) * 1000)
+    logger.info(
+        "Node finished",
+        extra={**log_extra, "elapsed_ms": elapsed},
+    )
+    return result
 
 
 def _promote_planned_characters_to_cast(story_repository: Any, story_id: str, planned_nodes: list[dict[str, Any]]) -> None:

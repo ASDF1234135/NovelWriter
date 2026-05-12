@@ -14,3 +14,5 @@ frontend/coverage/
 *.db
 .env
 frontend/.env.local
+backend/data/logs/
+data/logs/

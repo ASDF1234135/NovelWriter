@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
 from datetime import UTC, datetime
 from typing import Any
 
+from app.core.concurrency import ContextThreadPoolExecutor as ThreadPoolExecutor
 from app.core.config import get_settings
 
 from pydantic import BaseModel, Field

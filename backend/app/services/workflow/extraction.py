@@ -6,7 +6,9 @@ import re
 import unicodedata
 from collections.abc import Iterable
 from typing import Any
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
+
+from app.core.concurrency import ContextThreadPoolExecutor as ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from app.core.config import get_settings
