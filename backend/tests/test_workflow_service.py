@@ -186,7 +186,7 @@ def test_draft_and_reader_share_combined_retry_limit(tmp_path, monkeypatch) -> N
     assert final_state["draft_retry_count"] == 1
     assert final_state["reader_retry_count"] == 1
     assert final_state["draft_loop_retry_count"] == 2
-    assert final_state["reader_route"] == "extraction_gate"
+    assert final_state["reader_route"] == "chapter_review_gate"
     assert final_state["reader_feedback"] == [
         {
             "score": 55,
@@ -252,7 +252,7 @@ def test_reader_pass_does_not_append_feedback_or_return_author(tmp_path, monkeyp
     final_state = build_chapter_graph(service._build_context(run.run_id)).invoke(initial_state)
 
     assert final_state["workflow_status"] == "COMPLETED"
-    assert final_state["reader_route"] == "extraction_gate"
+    assert final_state["reader_route"] == "chapter_review_gate"
     assert final_state["reader_feedback"] == []
 
 

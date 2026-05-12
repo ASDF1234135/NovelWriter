@@ -828,7 +828,7 @@ class GraphNodeAdapter:
     def event(node_id: str, canonical_name: str) -> GraphNode:
         from app.domain.schema import EventNode
 
-        return EventNode(node_id=node_id, canonical_name=canonical_name)
+        return EventNode(node_id=node_id, canonical_name=canonical_name, chunk_ids=[])
 
     @staticmethod
     def generic(node_id: str, node_type: NodeType, properties: dict) -> GraphNode:
@@ -909,10 +909,15 @@ class GraphNodeAdapter:
                 metadata=meta,
             )
         if mutation.node_type == NodeType.EVENT:
+            chunk_raw = mutation.properties.get("chunk_ids") or []
+            if isinstance(chunk_raw, str):
+                chunk_raw = [chunk_raw]
+            chunk_ids = [str(x).strip() for x in chunk_raw if str(x).strip()] if isinstance(chunk_raw, list) else []
             return EventNode(
                 node_id=mutation.node_id,
                 canonical_name=mutation.properties.get("canonical_name", mutation.node_id),
                 aliases=mutation.properties.get("aliases", []),
+                chunk_ids=chunk_ids,
                 tags=tags,
                 metadata=meta,
             )
@@ -964,7 +969,11 @@ class GraphNodeAdapter:
         if node_type == NodeType.EPOCH:
             return EpochNode(node_type=node_type, order_index=props.get("order_index", 0), **base)
         if node_type == NodeType.EVENT:
-            return EventNode(node_type=node_type, **base)
+            chunk_raw = props.get("chunk_ids") or []
+            if isinstance(chunk_raw, str):
+                chunk_raw = [chunk_raw]
+            chunk_ids = [str(x).strip() for x in chunk_raw if str(x).strip()] if isinstance(chunk_raw, list) else []
+            return EventNode(node_type=node_type, chunk_ids=chunk_ids, **base)
         if node_type == NodeType.RULE:
             pen = props.get("penalty")
             if pen is not None:

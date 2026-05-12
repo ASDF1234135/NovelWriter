@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from app.domain.schema import (
@@ -33,6 +35,7 @@ from app.services.workflow.context import WorkflowContext
 from app.core.config import get_settings
 from app.services.workflow.extraction import (
     _validation_gate,
+    _validation_gate_with_retries,
     build_extraction_context,
     canonicalize_entity_candidates,
     extract_chapter_artifacts,
@@ -378,3 +381,63 @@ def test_validation_gate_allows_caused_when_ai_invention_involved() -> None:
     )
     validated = _validation_gate(output, state, GraphSnapshot(nodes=[], edges=[]), events)
     assert len(validated.relations) == 1
+
+
+def test_validation_gate_align_retry_repairs_bad_endpoint_ids(monkeypatch) -> None:
+    state = {
+        "chapter_id": 1,
+        "active_epoch_id": "epoch_present",
+        "pov_character_id": "char_alice",
+        "story_id": "story_z",
+    }
+    entities = [
+        ExtractedEntity(node_id="char_alice", node_type=NodeType.CHARACTER, canonical_name="Alice", summary=""),
+        ExtractedEntity(node_id="event_ch1_01", node_type=NodeType.EVENT, canonical_name="Ambush", summary=""),
+    ]
+    bad = ExtractedRelation(
+        source_node_id="not_a_real_id",
+        target_node_id="also_bad",
+        relation_type=EdgeType.PARTICIPATED_IN,
+        context_details="x",
+        is_truth=True,
+        is_public=True,
+    )
+    output = ChapterExtractionOutput(
+        entities=entities,
+        relations=[bad],
+        chapter_memory=ChapterMemory(),
+    )
+
+    def fake_repair(ctx, st, align_failed, ents, snap, evs, round_diag):
+        round_diag["latency_ms"] = 1
+        round_diag["token_usage"] = 0
+        return [
+            align_failed[0].model_copy(
+                update={
+                    "source_node_id": "char_alice",
+                    "target_node_id": "event_ch1_01",
+                    "source_name": "",
+                    "target_name": "",
+                }
+            )
+        ]
+
+    monkeypatch.setattr(
+        "app.services.workflow.extraction._invoke_relation_align_repair",
+        fake_repair,
+    )
+
+    ctx = SimpleNamespace(llm_client=object())
+    validated, diag = _validation_gate_with_retries(
+        output,
+        state,
+        GraphSnapshot(nodes=[], edges=[]),
+        [],
+        ctx,
+        max_align_retries=2,
+    )
+    assert len(validated.relations) == 1
+    assert validated.relations[0].source_node_id == "char_alice"
+    assert validated.relations[0].target_node_id == "event_ch1_01"
+    assert diag["align_retry_attempts"] == 1
+    assert diag["align_failed_remaining_count"] == 0

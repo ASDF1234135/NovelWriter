@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -16,7 +16,9 @@ describe("HitlPanel mode switching", () => {
     window.localStorage.setItem("nb.ui.locale", "zh-Hant");
   });
 
-  it("switches to expert mode tab", async () => {
+  it("expands the advanced (expert) section when its summary is clicked", async () => {
+    // The panel used to expose a tablist; it now hides advanced controls
+    // behind a native <details> element keyed by hitl.advancedSummary.
     const user = userEvent.setup();
     renderPanel(
       <HitlPanel
@@ -39,7 +41,16 @@ describe("HitlPanel mode switching", () => {
         onDraftEdit={noopAsync}
       />,
     );
-    await user.click(screen.getByRole("tab", { name: "專家模式" }));
-    expect(screen.getByRole("tab", { name: "專家模式" })).toHaveAttribute("aria-selected", "true");
+
+    const summary = screen.getByText("進階：僅在熟悉系統時使用");
+    const details = summary.closest("details");
+    expect(details).not.toBeNull();
+    expect(details).not.toHaveAttribute("open");
+
+    await user.click(summary);
+
+    await waitFor(() => expect(details).toHaveAttribute("open"));
+    // Once expanded, the inner JSON-injection controls become visible.
+    expect(screen.getByText("直接寫入故事資料（進階結構化）")).toBeInTheDocument();
   });
 });

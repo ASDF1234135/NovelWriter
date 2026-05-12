@@ -26,9 +26,11 @@ from app.domain.schema import (
     GraphSnapshot,
     NodeType,
     EdgeType,
+    RelationAlignRepairOutput,
     RelationExtractionOutput,
 )
 from app.services.llm import MockLLMClient
+from app.services.vector_store import VectorStore, cosine_similarity
 from app.services.workflow.context import WorkflowContext
 from app.services.workflow.event_normalization import is_standard_event_id
 from app.services.workflow.output_language import augment_profile_system_prompt
@@ -101,6 +103,7 @@ PHASE2_RELATION_GUIDELINES: list[str] = [
     "PHASE 2 (event links only): Extract ONLY event↔event links: HAPPENED_BEFORE and CAUSED.",
     "Each link must have direct textual support in the provided chunks; include metadata.evidence_chunk_ids.",
     "Prev-tail policy: if evidence comes from a chunk with source_role=prev_tail, try to LINK current chapter events to prior existing events, not create new events.",
+    "canonical_entities may end with bridge EVENT rows (same-epoch neighbors via Phase 1 hubs, ranked by stored-vector similarity + participant overlap); still require chunk evidence—do not invent events.",
 ]
 
 ENTITY_EXTRACTION_GUIDELINES: list[str] = [
@@ -577,12 +580,29 @@ def _resolve_relation_endpoint(
     return ""
 
 
-def _validation_gate(
+_FIGURATIVE_RELATION_TOKENS = ("像", "彷彿", "宛如", "如同", "好似", "仿佛", "as if", "like a")
+
+
+@dataclass
+class _RelationGatePack:
+    resolved_name_index: dict[str, str]
+    extracted_event_ids: set[str]
+    entity_ids: set[str]
+    existing_ids: set[str]
+    known_ids: set[str]
+    node_types: dict[str, NodeType]
+    planner_event_ids: set[str]
+    event_by_id: dict[str, EventOutline]
+    allowed_causal_pairs: set[tuple[str, str]]
+    allowed_temporal_pairs: set[tuple[str, str]]
+
+
+def _make_relation_gate_pack(
     output: ChapterExtractionOutput,
     state: dict,
     graph_snapshot: GraphSnapshot,
     events: list[EventOutline],
-) -> ChapterExtractionOutput:
+) -> _RelationGatePack:
     existing_ids = {n.node_id for n in graph_snapshot.nodes}
     entity_ids = {e.node_id for e in output.entities}
     chapter_id = int(state.get("chapter_id") or 0)
@@ -622,54 +642,83 @@ def _validation_gate(
     for ent in output.entities:
         node_types[ent.node_id] = ent.node_type
 
+    return _RelationGatePack(
+        resolved_name_index=resolved_name_index,
+        extracted_event_ids=extracted_event_ids,
+        entity_ids=entity_ids,
+        existing_ids=existing_ids,
+        known_ids=known_ids,
+        node_types=node_types,
+        planner_event_ids=planner_event_ids,
+        event_by_id=event_by_id,
+        allowed_causal_pairs=allowed_causal_pairs,
+        allowed_temporal_pairs=allowed_temporal_pairs,
+    )
+
+
+def _partition_relations_validation(
+    relations: list[ExtractedRelation],
+    pack: _RelationGatePack,
+) -> tuple[list[ExtractedRelation], list[ExtractedRelation], list[ExtractedRelation]]:
+    """Split relations into kept, align_failed (retry candidates), dropped_other."""
     kept: list[ExtractedRelation] = []
-    figurative_tokens = ("像", "彷彿", "宛如", "如同", "好似", "仿佛", "as if", "like a")
-    for rel in output.relations:
+    align_failed: list[ExtractedRelation] = []
+    dropped_other: list[ExtractedRelation] = []
+    for rel in relations:
         sid = _resolve_relation_endpoint(
             rel.source_node_id,
             rel.source_name,
-            resolved_name_index,
-            extracted_event_ids,
-            entity_ids,
-            existing_ids,
+            pack.resolved_name_index,
+            pack.extracted_event_ids,
+            pack.entity_ids,
+            pack.existing_ids,
         )
         tid = _resolve_relation_endpoint(
             rel.target_node_id,
             rel.target_name,
-            resolved_name_index,
-            extracted_event_ids,
-            entity_ids,
-            existing_ids,
+            pack.resolved_name_index,
+            pack.extracted_event_ids,
+            pack.entity_ids,
+            pack.existing_ids,
         )
         if not sid or not tid or sid == tid:
+            align_failed.append(rel)
             continue
-        if sid not in known_ids or tid not in known_ids:
+        if sid not in pack.known_ids or tid not in pack.known_ids:
+            align_failed.append(rel)
             continue
-        if not relation_direction_is_valid(rel.relation_type, sid, tid, node_types):
+        if not relation_direction_is_valid(rel.relation_type, sid, tid, pack.node_types):
+            dropped_other.append(rel)
             continue
         if (
             rel.relation_type in {EdgeType.CAUSED, EdgeType.HAPPENED_BEFORE}
-            and sid in extracted_event_ids
-            and tid in extracted_event_ids
-            and sid in planner_event_ids
-            and tid in planner_event_ids
+            and sid in pack.extracted_event_ids
+            and tid in pack.extracted_event_ids
+            and sid in pack.planner_event_ids
+            and tid in pack.planner_event_ids
         ):
-            src_event = event_by_id.get(sid)
-            tgt_event = event_by_id.get(tid)
+            src_event = pack.event_by_id.get(sid)
+            tgt_event = pack.event_by_id.get(tid)
             involves_ai_invention = bool(
                 (src_event and src_event.is_ai_invention)
                 or (tgt_event and tgt_event.is_ai_invention)
             )
             if not involves_ai_invention:
                 pair = (sid, tid)
-                if rel.relation_type == EdgeType.CAUSED and pair not in allowed_causal_pairs:
+                if rel.relation_type == EdgeType.CAUSED and pair not in pack.allowed_causal_pairs:
+                    dropped_other.append(rel)
                     continue
-                if rel.relation_type == EdgeType.HAPPENED_BEFORE and pair not in allowed_temporal_pairs:
+                if rel.relation_type == EdgeType.HAPPENED_BEFORE and pair not in pack.allowed_temporal_pairs:
+                    dropped_other.append(rel)
                     continue
         details = (rel.context_details or "").casefold()
-        if rel.relation_type in {EdgeType.BELIEVED_AS, EdgeType.HAS_ATTRIBUTE} and any(t in details for t in figurative_tokens):
+        if rel.relation_type in {EdgeType.BELIEVED_AS, EdgeType.HAS_ATTRIBUTE} and any(
+            t in details for t in _FIGURATIVE_RELATION_TOKENS
+        ):
+            dropped_other.append(rel)
             continue
-        if rel.relation_type == EdgeType.HAS_ATTRIBUTE and node_types.get(tid) != NodeType.CONCEPT:
+        if rel.relation_type == EdgeType.HAS_ATTRIBUTE and pack.node_types.get(tid) != NodeType.CONCEPT:
+            dropped_other.append(rel)
             continue
         kept.append(
             ExtractedRelation(
@@ -681,11 +730,137 @@ def _validation_gate(
                 context_details=rel.context_details,
                 is_truth=rel.is_truth,
                 is_public=rel.is_public,
+                tags=list(rel.tags or []),
+                metadata=dict(rel.metadata or {}),
             )
         )
+    return kept, align_failed, dropped_other
 
+
+def _allowed_endpoints_for_repair(
+    entities: list[ExtractedEntity],
+    graph_snapshot: GraphSnapshot,
+    *,
+    cap: int = 120,
+) -> tuple[list[dict[str, str]], set[str]]:
+    seen: set[str] = set()
+    rows: list[dict[str, str]] = []
+    id_set: set[str] = set()
+    for e in entities:
+        nid = (e.node_id or "").strip()
+        if not nid or nid in seen:
+            continue
+        seen.add(nid)
+        id_set.add(nid)
+        rows.append({"node_id": nid, "canonical_name": e.canonical_name, "node_type": str(e.node_type)})
+        if len(rows) >= cap:
+            return rows, id_set
+    for n in graph_snapshot.nodes:
+        nid = (n.node_id or "").strip()
+        if not nid or nid in seen:
+            continue
+        seen.add(nid)
+        id_set.add(nid)
+        rows.append({"node_id": nid, "canonical_name": n.canonical_name, "node_type": str(n.node_type)})
+        if len(rows) >= cap:
+            break
+    return rows, id_set
+
+
+def _build_relation_align_repair_prompt(
+    *,
+    state: dict[str, Any],
+    align_failed: list[ExtractedRelation],
+    allowed_rows: list[dict[str, str]],
+    events: list[EventOutline],
+) -> str:
+    failed_payload = []
+    for idx, rel in enumerate(align_failed):
+        failed_payload.append(
+            {
+                "failure_index": idx,
+                "relation_type": rel.relation_type.value if hasattr(rel.relation_type, "value") else str(rel.relation_type),
+                "source_node_id": rel.source_node_id,
+                "source_name": rel.source_name,
+                "target_node_id": rel.target_node_id,
+                "target_name": rel.target_name,
+                "context_details": (rel.context_details or "")[:800],
+            }
+        )
+    return json.dumps(
+        {
+            "story_id": state.get("story_id"),
+            "chapter_id": state.get("chapter_id"),
+            "active_epoch_id": state.get("active_epoch_id"),
+            "ground_truth_events": [e.model_dump(mode="json") for e in events],
+            "failed_relations": failed_payload,
+            "allowed_endpoints": allowed_rows,
+            "guidelines": [
+                "Emit RelationAlignRepairOutput: repairs[].failure_index matches failed_relations.failure_index.",
+                "source_node_id and target_node_id must both be non-empty and appear in allowed_endpoints.node_id.",
+                "Preserve narrative intent; only fix endpoint identifiers.",
+            ],
+        },
+        ensure_ascii=False,
+    )
+
+
+def _invoke_relation_align_repair(
+    context: WorkflowContext,
+    state: dict[str, Any],
+    align_failed: list[ExtractedRelation],
+    entities: list[ExtractedEntity],
+    graph_snapshot: GraphSnapshot,
+    events: list[EventOutline],
+    round_diag: dict[str, Any],
+) -> list[ExtractedRelation]:
+    allowed_rows, allowed_ids = _allowed_endpoints_for_repair(entities, graph_snapshot)
+    prompt = _build_relation_align_repair_prompt(
+        state=state,
+        align_failed=align_failed,
+        allowed_rows=allowed_rows,
+        events=events,
+    )
+    profile = augment_profile_system_prompt(get_profile("relation_endpoint_repair"), context.output_language)
+    out, res = context.llm_client.invoke_json(prompt, RelationAlignRepairOutput, profile)
+    round_diag["latency_ms"] = res.latency_ms
+    round_diag["token_usage"] = res.token_usage
+    round_diag["repair_count"] = len(out.repairs or [])
+    by_idx = {r.failure_index: r for r in (out.repairs or [])}
+    merged: list[ExtractedRelation] = []
+    for i, rel in enumerate(align_failed):
+        patch = by_idx.get(i)
+        if patch is None:
+            merged.append(rel)
+            continue
+        ns = (patch.source_node_id or "").strip()
+        nt = (patch.target_node_id or "").strip()
+        if ns in allowed_ids and nt in allowed_ids and ns != nt:
+            merged.append(
+                rel.model_copy(
+                    update={
+                        "source_node_id": ns,
+                        "target_node_id": nt,
+                        "source_name": "",
+                        "target_name": "",
+                    }
+                )
+            )
+        else:
+            merged.append(rel)
+    return merged
+
+
+def _validation_gate_apply_memory(
+    output: ChapterExtractionOutput,
+    state: dict,
+    pack: _RelationGatePack,
+    relations: list[ExtractedRelation],
+) -> ChapterExtractionOutput:
     mem = output.chapter_memory
     latest = (mem.latest_location or "").strip()
+    node_types = pack.node_types
+    resolved_name_index = pack.resolved_name_index
     if latest:
         nid = resolved_name_index.get(latest.casefold())
         loc_ok = nid and node_types.get(nid) == NodeType.LOCATION
@@ -707,7 +882,7 @@ def _validation_gate(
 
     return ChapterExtractionOutput(
         entities=output.entities,
-        relations=kept,
+        relations=relations,
         chapter_memory=ChapterMemory(
             summary=mem.summary,
             unresolved_threads=mem.unresolved_threads,
@@ -716,6 +891,85 @@ def _validation_gate(
             ending_vibe=mem.ending_vibe,
         ),
     )
+
+
+def _validation_gate_with_retries(
+    output: ChapterExtractionOutput,
+    state: dict,
+    graph_snapshot: GraphSnapshot,
+    events: list[EventOutline],
+    context: WorkflowContext | None,
+    *,
+    max_align_retries: int,
+) -> tuple[ChapterExtractionOutput, dict[str, Any]]:
+    pack = _make_relation_gate_pack(output, state, graph_snapshot, events)
+    diag: dict[str, Any] = {
+        "align_retry_max": max_align_retries,
+        "align_retry_attempts": 0,
+        "align_failed_remaining_count": 0,
+        "dropped_non_align_count": 0,
+        "repair_rounds": [],
+    }
+
+    relations_batch = list(output.relations)
+    all_kept: list[ExtractedRelation] = []
+    retry_round = 0
+
+    while True:
+        kept, align_fail, other_drop = _partition_relations_validation(relations_batch, pack)
+        all_kept.extend(kept)
+        diag["dropped_non_align_count"] += len(other_drop)
+
+        if not align_fail:
+            diag["align_failed_remaining_count"] = 0
+            break
+
+        if retry_round >= max_align_retries:
+            diag["align_failed_remaining"] = [r.model_dump(mode="json") for r in align_fail]
+            diag["align_failed_remaining_count"] = len(align_fail)
+            break
+
+        if context is None or isinstance(context.llm_client, MockLLMClient):
+            diag["align_failed_remaining"] = [r.model_dump(mode="json") for r in align_fail]
+            diag["align_failed_remaining_count"] = len(align_fail)
+            diag["repair_skipped"] = True
+            break
+
+        round_diag: dict[str, Any] = {"round": retry_round + 1}
+        relations_batch = _invoke_relation_align_repair(
+            context,
+            state,
+            align_fail,
+            output.entities,
+            graph_snapshot,
+            events,
+            round_diag,
+        )
+        retry_round += 1
+        diag["align_retry_attempts"] = retry_round
+        diag["repair_rounds"].append(round_diag)
+
+    final_relations = _dedupe_extracted_relations(all_kept)
+    gated = _validation_gate_apply_memory(output, state, pack, final_relations)
+    return gated, diag
+
+
+def _validation_gate(
+    output: ChapterExtractionOutput,
+    state: dict,
+    graph_snapshot: GraphSnapshot,
+    events: list[EventOutline],
+) -> ChapterExtractionOutput:
+    """Legacy entry (tests): no LLM repair retries."""
+    gated, _diag = _validation_gate_with_retries(
+        output,
+        state,
+        graph_snapshot,
+        events,
+        context=None,
+        max_align_retries=0,
+    )
+    return gated
 
 
 def _build_entity_prompt(ctx: ExtractionContext) -> str:
@@ -861,6 +1115,292 @@ def _dedupe_extracted_relations(relations: list[ExtractedRelation]) -> list[Extr
         seen.add(key)
         out.append(rel)
     return out
+
+
+_OVERLAP_NODE_TYPES = frozenset({NodeType.CHARACTER, NodeType.PERSONA, NodeType.LOCATION, NodeType.ITEM})
+
+
+def _merged_node_types(entities: list[ExtractedEntity], snapshot: GraphSnapshot) -> dict[str, NodeType]:
+    out: dict[str, NodeType] = {}
+    for n in snapshot.nodes:
+        out[n.node_id] = n.node_type
+    for e in entities:
+        out[e.node_id] = e.node_type
+    return out
+
+
+def _add_undirected_edge(adj: dict[str, set[str]], u: str, v: str) -> None:
+    u, v = u.strip(), v.strip()
+    if not u or not v or u == v:
+        return
+    adj.setdefault(u, set()).add(v)
+    adj.setdefault(v, set()).add(u)
+
+
+def _build_undirected_adjacency(edges: list[GraphEdge], phase1: list[ExtractedRelation]) -> dict[str, set[str]]:
+    adj: dict[str, set[str]] = {}
+    for e in edges:
+        _add_undirected_edge(adj, e.source_id, e.target_id)
+    for r in phase1:
+        _add_undirected_edge(adj, r.source_node_id, r.target_node_id)
+    return adj
+
+
+def _is_ev(nt: NodeType | None) -> bool:
+    return nt == NodeType.EVENT
+
+
+def _collect_phase1_hubs(
+    phase1: list[ExtractedRelation],
+    chapter_events: set[str],
+    node_types: dict[str, NodeType],
+) -> set[str]:
+    hubs: set[str] = set()
+    for r in phase1:
+        sid = (r.source_node_id or "").strip()
+        tid = (r.target_node_id or "").strip()
+        if not sid or not tid:
+            continue
+        tt = node_types.get(tid)
+        ts = node_types.get(sid)
+        if sid in chapter_events and not _is_ev(tt):
+            hubs.add(tid)
+        if tid in chapter_events and not _is_ev(ts):
+            hubs.add(sid)
+    return hubs
+
+
+def _bridge_event_pool(
+    hubs: set[str],
+    adj: dict[str, set[str]],
+    chapter_events: set[str],
+    node_types: dict[str, NodeType],
+) -> set[str]:
+    pool: set[str] = set()
+    for h in hubs:
+        for v in adj.get(h, ()):
+            if node_types.get(v) == NodeType.EVENT and v not in chapter_events:
+                pool.add(v)
+    return pool
+
+
+def _event_passes_epoch_filter(event_id: str, edges: list[GraphEdge], active_epoch_id: str) -> bool:
+    ae = (active_epoch_id or "").strip()
+    if not ae:
+        return True
+    for e in edges:
+        if e.relation_type == EdgeType.BELONGS_TO_EPOCH and e.source_id == event_id and e.target_id == ae:
+            return True
+    for e in edges:
+        if event_id not in (e.source_id, e.target_id):
+            continue
+        if (e.valid_epoch or "").strip() == ae:
+            return True
+    return False
+
+
+def _neighbor_overlap_nodes(
+    event_ids: Iterable[str],
+    adj: dict[str, set[str]],
+    node_types: dict[str, NodeType],
+) -> set[str]:
+    out: set[str] = set()
+    for eid in event_ids:
+        for nb in adj.get(eid, ()):
+            nt = node_types.get(nb)
+            if nt in _OVERLAP_NODE_TYPES:
+                out.add(nb)
+    return out
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    if not a and not b:
+        return 0.0
+    union = len(a | b)
+    return len(a & b) / union if union else 0.0
+
+
+def _current_chapter_event_chunk_ids(
+    entities: list[ExtractedEntity],
+    chapter_chunks: list[Any],
+    chapter_id: int,
+) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for ent in entities:
+        if ent.node_type != NodeType.EVENT:
+            continue
+        key = (ent.canonical_name or "").strip()[:30]
+        if not key:
+            continue
+        got = 0
+        for raw in chapter_chunks:
+            if not isinstance(raw, dict):
+                continue
+            if str(raw.get("source_role") or "") != "current_body":
+                continue
+            if int(raw.get("source_chapter_id") or chapter_id) != chapter_id:
+                continue
+            cid = str(raw.get("chunk_id") or "").strip()
+            txt = str(raw.get("text_chunk") or "")
+            if cid and key in txt:
+                if cid not in seen:
+                    seen.add(cid)
+                    ordered.append(cid)
+                got += 1
+                if got >= 4:
+                    break
+    return ordered
+
+
+def _max_cosine_between_vector_maps(
+    left: dict[str, list[float]],
+    right: dict[str, list[float]],
+) -> float:
+    vecs_l = list(left.values())
+    vecs_r = list(right.values())
+    if not vecs_l or not vecs_r:
+        return -1.0
+    best = -1.0
+    for va in vecs_l:
+        for vb in vecs_r:
+            c = cosine_similarity(va, vb)
+            if c > best:
+                best = c
+    return best
+
+
+def _norm_cosine_to_unit_interval(c: float) -> float:
+    if c < -1.0:
+        return 0.0
+    return (c + 1.0) / 2.0
+
+
+def _snapshot_event_chunk_ids(snapshot: GraphSnapshot, event_id: str) -> list[str]:
+    for n in snapshot.nodes:
+        if n.node_id != event_id:
+            continue
+        if n.node_type != NodeType.EVENT:
+            return []
+        cids = getattr(n, "chunk_ids", None) or []
+        if isinstance(cids, str):
+            cids = [cids]
+        if not isinstance(cids, list):
+            return []
+        return [str(x).strip() for x in cids if str(x).strip()]
+    return []
+
+
+def _canonical_display_row(snapshot: GraphSnapshot, event_id: str) -> dict[str, str] | None:
+    for n in snapshot.nodes:
+        if n.node_id == event_id:
+            return {
+                "node_id": n.node_id,
+                "canonical_name": n.canonical_name,
+                "node_type": str(n.node_type),
+            }
+    return None
+
+
+def _phase2_canonical_with_bridge_events(
+    *,
+    state: dict[str, Any],
+    entities: list[ExtractedEntity],
+    canonical_rows: list[dict[str, str]],
+    graph_snapshot: GraphSnapshot,
+    phase1_relations: list[ExtractedRelation],
+    vector_store: VectorStore,
+    settings: Any,
+) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    diag: dict[str, Any] = {
+        "enabled": True,
+        "bridge_pool_size": 0,
+        "after_epoch_filter": 0,
+        "after_pool_cap": 0,
+        "top_k": int(settings.extraction_phase2_bridge_top_k),
+        "sim_missing_chunks": 0,
+        "injected_bridge_events": 0,
+    }
+    top_k = int(settings.extraction_phase2_bridge_top_k)
+    if top_k <= 0:
+        return list(canonical_rows), {**diag, "enabled": False, "reason": "top_k_zero"}
+
+    retrieve = getattr(vector_store, "retrieve_vectors_by_chunk_ids", None)
+    if not callable(retrieve):
+        return list(canonical_rows), {**diag, "skipped": True, "reason": "no_retrieve_vectors_by_chunk_ids"}
+
+    chapter_events = {e.node_id for e in entities if e.node_type == NodeType.EVENT}
+    if not chapter_events:
+        return list(canonical_rows), {**diag, "skipped": True, "reason": "no_chapter_events"}
+
+    node_types = _merged_node_types(entities, graph_snapshot)
+    adj = _build_undirected_adjacency(graph_snapshot.edges, phase1_relations)
+    hubs = _collect_phase1_hubs(phase1_relations, chapter_events, node_types)
+    pool = _bridge_event_pool(hubs, adj, chapter_events, node_types)
+    diag["bridge_pool_size"] = len(pool)
+
+    active_epoch = str(state.get("active_epoch_id") or "")
+    epoch_kept = {eid for eid in pool if _event_passes_epoch_filter(eid, graph_snapshot.edges, active_epoch)}
+    diag["after_epoch_filter"] = len(epoch_kept)
+
+    pool_cap = int(settings.extraction_phase2_bridge_pool_cap)
+    pool_list = sorted(epoch_kept)
+    if len(pool_list) > pool_cap:
+        pool_list = pool_list[:pool_cap]
+    diag["after_pool_cap"] = len(pool_list)
+
+    story_id = str(state.get("story_id") or "")
+    chapter_id = int(state.get("chapter_id") or 0)
+    raw_chunks = list(state.get("chapter_chunks") or [])
+    new_chunk_ids = _current_chapter_event_chunk_ids(entities, raw_chunks, chapter_id)
+    requested_new = list(dict.fromkeys(new_chunk_ids))
+    vec_new = retrieve(story_id, requested_new)
+    missing_new = max(0, len(requested_new) - len(vec_new))
+    diag["sim_missing_chunks"] += missing_new
+
+    s_new = _neighbor_overlap_nodes(chapter_events, adj, node_types)
+
+    w_sim = float(settings.extraction_phase2_bridge_sim_weight)
+    w_ov = float(settings.extraction_phase2_bridge_overlap_weight)
+
+    scored: list[tuple[float, str, float, float]] = []
+    for bid in pool_list:
+        b_chunks = _snapshot_event_chunk_ids(graph_snapshot, bid)
+        vec_b = retrieve(story_id, b_chunks) if b_chunks else {}
+        diag["sim_missing_chunks"] += max(0, len(b_chunks) - len(vec_b))
+
+        raw_cos = _max_cosine_between_vector_maps(vec_new, vec_b)
+        sim_part = _norm_cosine_to_unit_interval(raw_cos) if raw_cos >= -1.0 else 0.0
+
+        s_b = _neighbor_overlap_nodes({bid}, adj, node_types)
+        overlap_part = _jaccard(s_new, s_b)
+
+        score = w_sim * sim_part + w_ov * overlap_part
+        scored.append((score, bid, sim_part, overlap_part))
+
+    scored.sort(key=lambda row: (-row[0], row[1]))
+    picked = scored[:top_k]
+
+    existing_ids = {r["node_id"] for r in canonical_rows}
+    extra_rows: list[dict[str, str]] = []
+    preview: list[dict[str, Any]] = []
+    for score, bid, sim_part, overlap_part in picked:
+        if bid in existing_ids:
+            continue
+        row = _canonical_display_row(graph_snapshot, bid)
+        if row is None:
+            continue
+        extra_rows.append(row)
+        existing_ids.add(bid)
+        preview.append({"event_id": bid, "score": score, "sim": sim_part, "overlap": overlap_part})
+        if len(extra_rows) >= top_k:
+            break
+
+    diag["injected_bridge_events"] = len(extra_rows)
+    diag["scores_preview"] = preview[:12]
+
+    out_rows = list(canonical_rows) + extra_rows
+    return out_rows, diag
 
 
 def extract_chapter_artifacts(
@@ -1039,13 +1579,27 @@ def extract_chapter_artifacts(
         batch_records.extend(phase1_batch_records)
         phase1_failed = not any("latency_ms" in r for r in phase1_batch_records)
 
-        # Phase 2: event↔event links only (single pass over full canonical list)
+        phase1_deduped = _dedupe_extracted_relations(phase1_merged)
+        phase2_canonical_rows = list(canonical_rows)
+        bridge_diag: dict[str, Any] = {}
+        if int(settings.extraction_phase2_bridge_top_k) > 0:
+            phase2_canonical_rows, bridge_diag = _phase2_canonical_with_bridge_events(
+                state=state,
+                entities=entities,
+                canonical_rows=canonical_rows,
+                graph_snapshot=graph_snapshot,
+                phase1_relations=phase1_deduped,
+                vector_store=context.vector_store,
+                settings=settings,
+            )
+
+        # Phase 2: event↔event links only (single pass over expanded canonical list)
         phase2_failed = True
         try:
             phase2_prompt = _build_phase2_relation_prompt(
                 ctx,
-                canonical_rows=canonical_rows,
-                phase1_relations=_dedupe_extracted_relations(phase1_merged),
+                canonical_rows=phase2_canonical_rows,
+                phase1_relations=phase1_deduped,
             )
             rel_out2, rel_res2 = context.llm_client.invoke_json(phase2_prompt, RelationExtractionOutput, rel_profile)
             phase2_merged.extend(list(rel_out2.relations or []))
@@ -1054,30 +1608,35 @@ def extract_chapter_artifacts(
                 {
                     "phase": 2,
                     "index": 0,
-                    "entity_count": len(canonical_rows),
+                    "entity_count": len(phase2_canonical_rows),
                     "latency_ms": rel_res2.latency_ms,
                     "token_usage": rel_res2.token_usage,
                 }
             )
         except Exception as exc:
             logger.error("relation_extractor phase2 failed", extra={"extra_payload": {"error": str(exc)}})
-            batch_records.append({"phase": 2, "index": 0, "entity_count": len(canonical_rows), "error": str(exc), "fallback": True})
+            batch_records.append(
+                {"phase": 2, "index": 0, "entity_count": len(phase2_canonical_rows), "error": str(exc), "fallback": True}
+            )
 
         if phase1_failed and phase2_failed:
             relations = list(fb.relations)
-            diagnostics["steps"]["relation_extractor"] = {
+            rel_fb: dict[str, Any] = {
                 "fallback": True,
                 "batch_size": batch_size,
                 "batched": batched,
                 "batches": batch_records,
                 "prompt_chars": len(ctx.chapter_text_for_relations),
             }
+            if bridge_diag:
+                rel_fb["phase2_bridge"] = bridge_diag
+            diagnostics["steps"]["relation_extractor"] = rel_fb
         else:
             merged_all = list(phase1_merged) + list(phase2_merged)
             relations = _dedupe_extracted_relations(merged_all)
             total_latency = sum(int(b.get("latency_ms", 0) or 0) for b in batch_records if "latency_ms" in b)
             total_tokens = sum(int(b.get("token_usage", 0) or 0) for b in batch_records if "token_usage" in b)
-            diagnostics["steps"]["relation_extractor"] = {
+            rel_step_ok: dict[str, Any] = {
                 "batch_size": batch_size,
                 "batched": batched,
                 "batch_count": len(batches),
@@ -1086,16 +1645,38 @@ def extract_chapter_artifacts(
                 "token_usage": total_tokens,
                 "prompt_chars": len(ctx.chapter_text_for_relations),
             }
+            if bridge_diag:
+                rel_step_ok["phase2_bridge"] = bridge_diag
+            diagnostics["steps"]["relation_extractor"] = rel_step_ok
 
+    diagnostics["counts_pre_validation_gate"] = {"entities": len(entities), "relations": len(relations)}
     output = ChapterExtractionOutput(entities=entities, relations=relations, chapter_memory=memory)
-    output = _validation_gate(output, state, graph_snapshot, events)
+    align_retries = int(settings.extraction_relation_align_retry_max)
+    output, v_gate_diag = _validation_gate_with_retries(
+        output,
+        state,
+        graph_snapshot,
+        events,
+        context,
+        max_align_retries=align_retries,
+    )
+    diagnostics["steps"]["validation_gate"] = v_gate_diag
+    diagnostics["counts_post_validation_gate"] = {
+        "entities": len(output.entities),
+        "relations": len(output.relations),
+    }
 
     rel_step = diagnostics["steps"].get("relation_extractor") or {}
     if isinstance(rel_step.get("batches"), list):
         rel_ms = sum(int(b.get("latency_ms", 0) or 0) for b in rel_step["batches"] if isinstance(b, dict))
     else:
         rel_ms = int(rel_step.get("latency_ms", 0) or 0)
-    total_latency = max(entity_latency, memory_latency) + rel_ms
+    repair_ms = 0
+    if isinstance(v_gate_diag.get("repair_rounds"), list):
+        for rd in v_gate_diag["repair_rounds"]:
+            if isinstance(rd, dict):
+                repair_ms += int(rd.get("latency_ms") or 0)
+    total_latency = max(entity_latency, memory_latency) + rel_ms + repair_ms
     diagnostics["model"] = get_profile("entity_extractor").model
     diagnostics["latency_ms"] = total_latency
     return output, diagnostics

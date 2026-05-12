@@ -11,6 +11,7 @@ import type {
   StoryListItem,
   StoryPatch,
   WorkflowPayload,
+  WorkflowMetricsResponse,
   WritingPreambleResponse,
   RegenerateChapterSummaryResponse,
 } from "./types";
@@ -187,6 +188,8 @@ export async function runChapter(
     waiveMandatoryNodeIds?: string[];
     selectedAnchorIds?: string[];
     nextAnchorIds?: string[];
+    /** Per-run override of the story-level human chapter review toggle. */
+    requireChapterReview?: boolean;
   },
 ): Promise<WorkflowPayload> {
   const chapterOutline = (options?.chapterOutline ?? options?.authorChapterPlan ?? "").trim();
@@ -196,27 +199,58 @@ export async function runChapter(
   const waive_mandatory_node_ids = options?.waiveMandatoryNodeIds ?? [];
   const selected_anchor_ids = options?.selectedAnchorIds ?? [];
   const next_anchor_ids = options?.nextAnchorIds ?? [];
+  const body: Record<string, unknown> = {
+    // Backward-compatible: server still accepts author_chapter_plan.
+    author_chapter_plan: chapterOutline,
+    // New dual-track inputs.
+    chapter_outline: chapterOutline,
+    chapter_hard_rules: chapterHardRules,
+    ai_freedom_level: aiFreedomLevel,
+    extraction_surface_hints,
+    waive_mandatory_node_ids,
+    selected_anchor_ids,
+    next_anchor_ids,
+  };
+  if (options?.requireChapterReview !== undefined) {
+    body.require_chapter_review = options.requireChapterReview;
+  }
   const response = await fetch(`${API_BASE}/stories/${storyId}/chapters/${chapterId}/run`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      // Backward-compatible: server still accepts author_chapter_plan.
-      author_chapter_plan: chapterOutline,
-      // New dual-track inputs.
-      chapter_outline: chapterOutline,
-      chapter_hard_rules: chapterHardRules,
-      ai_freedom_level: aiFreedomLevel,
-      extraction_surface_hints,
-      waive_mandatory_node_ids,
-      selected_anchor_ids,
-      next_anchor_ids,
-    }),
+    body: JSON.stringify(body),
   });
   return parseJson(response);
 }
 
 export async function fetchWorkflow(runId: string): Promise<WorkflowPayload> {
   const response = await fetch(`${API_BASE}/workflows/${runId}`);
+  return parseJson(response);
+}
+
+export async function fetchStoryWorkflowMetrics(
+  storyId: string,
+  opts?: { limit?: number; offset?: number },
+): Promise<WorkflowMetricsResponse> {
+  const params = new URLSearchParams();
+  if (opts?.limit != null) params.set("limit", String(opts.limit));
+  if (opts?.offset != null) params.set("offset", String(opts.offset));
+  const q = params.toString();
+  const url = `${API_BASE}/stories/${encodeURIComponent(storyId)}/workflow-metrics${q ? `?${q}` : ""}`;
+  const response = await fetch(url);
+  return parseJson(response);
+}
+
+export async function fetchChapterWorkflowMetrics(
+  storyId: string,
+  chapterId: number,
+  opts?: { limit?: number; offset?: number },
+): Promise<WorkflowMetricsResponse> {
+  const params = new URLSearchParams();
+  if (opts?.limit != null) params.set("limit", String(opts.limit));
+  if (opts?.offset != null) params.set("offset", String(opts.offset));
+  const q = params.toString();
+  const url = `${API_BASE}/stories/${encodeURIComponent(storyId)}/chapters/${chapterId}/workflow-metrics${q ? `?${q}` : ""}`;
+  const response = await fetch(url);
   return parseJson(response);
 }
 

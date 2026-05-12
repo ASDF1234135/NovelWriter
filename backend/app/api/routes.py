@@ -20,6 +20,7 @@ from app.domain.schema import (
     GraphRAGAskRequest,
     GraphRAGEvaluateOutput,
     GraphRAGEvaluateRequest,
+    GraphRAGStoryBackgroundRequest,
     GraphQueryRequest,
     HitlAnchorDelayRequest,
     HitlAnchorResolutionRequest,
@@ -86,11 +87,13 @@ def get_story_detail(
     # Workflow runs no longer imply configuration lock (macro/story edits allowed after runs).
     locked = False
     has_completed = story_repository.has_completed_chapter(story_id)
+    rt = row.get("story_runtime_json") if isinstance(row.get("story_runtime_json"), dict) else {}
     return {
         "story_id": row["story_id"],
         "title": row["title"],
         "premise": row["premise"],
         "bible": row["bible_json"],
+        "story_runtime": rt,
         "storylines": list(row.get("storylines_json") or []),
         "anchor_nodes": list(row.get("anchor_nodes_json") or []),
         "target_total_words": row["target_total_words"],
@@ -111,6 +114,19 @@ def get_story_detail(
     }
 
 
+@router.get("/stories/{story_id}/workflow-metrics")
+def get_story_workflow_metrics(
+    story_id: str,
+    limit: int = 200,
+    offset: int = 0,
+    workflow_service: WorkflowService = Depends(get_workflow_service),
+) -> dict:
+    try:
+        return workflow_service.get_story_workflow_metrics(story_id, limit=limit, offset=offset)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.patch("/stories/{story_id}")
 def patch_story(
     story_id: str,
@@ -126,11 +142,13 @@ def patch_story(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     locked = False
     has_completed = story_repository.has_completed_chapter(story_id)
+    rt = row.get("story_runtime_json") if isinstance(row.get("story_runtime_json"), dict) else {}
     return {
         "story_id": row["story_id"],
         "title": row["title"],
         "premise": row["premise"],
         "bible": row["bible_json"],
+        "story_runtime": rt,
         "storylines": list(row.get("storylines_json") or []),
         "anchor_nodes": list(row.get("anchor_nodes_json") or []),
         "target_total_words": row["target_total_words"],
@@ -233,6 +251,7 @@ def run_chapter(
             waive_mandatory_node_ids=run_body.waive_mandatory_node_ids,
             selected_anchor_ids=run_body.selected_anchor_ids,
             next_anchor_ids=run_body.next_anchor_ids,
+            require_chapter_review=run_body.require_chapter_review,
         )
         run_id = payload["run"]["run_id"]
         background_tasks.add_task(workflow_service.execute_stored_run, run_id)
@@ -264,6 +283,22 @@ def get_chapter(
 ) -> dict:
     try:
         return workflow_service.get_chapter(story_id, chapter_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/stories/{story_id}/chapters/{chapter_id}/workflow-metrics")
+def get_chapter_workflow_metrics(
+    story_id: str,
+    chapter_id: int,
+    limit: int = 200,
+    offset: int = 0,
+    workflow_service: WorkflowService = Depends(get_workflow_service),
+) -> dict:
+    if chapter_id < 1:
+        raise HTTPException(status_code=400, detail="chapter_id must be >= 1")
+    try:
+        return workflow_service.get_chapter_workflow_metrics(story_id, chapter_id, limit=limit, offset=offset)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -620,6 +655,31 @@ def graph_rag_evaluate(
             response_model=GraphRAGEvaluateOutput,
         )
         return JSONResponse(content=parsed.model_dump(mode="json"))
+    except LLMProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/stories/{story_id}/graph-rag/story-background")
+def graph_rag_story_background(
+    story_id: str,
+    request: GraphRAGStoryBackgroundRequest,
+    graph_rag: GraphRAGService = Depends(get_graph_rag_service),
+    story_repository: StoryRepository = Depends(get_story_repository),
+) -> PlainTextResponse:
+    if not story_repository.get_story(story_id):
+        raise HTTPException(status_code=404, detail=f"Story not found: {story_id}")
+    try:
+        text = graph_rag.summarize_story_background(
+            narrative_directive=request.narrative_directive,
+            chapter_goal=request.chapter_goal,
+            story_id=story_id,
+            active_epoch_id=request.active_epoch_id,
+            pov_character_id=request.pov_character_id,
+            output_language=request.output_language,
+            top_k=request.top_k,
+            context_hop_tier=request.context_hop_tier,
+        )
+        return PlainTextResponse(text)
     except LLMProviderError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 

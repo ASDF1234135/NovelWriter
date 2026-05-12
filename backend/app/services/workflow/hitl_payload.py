@@ -116,6 +116,24 @@ def build_hitl_context_payload(state: dict[str, Any]) -> HitlContextPayload | No
             ),
         )
 
+    if reason == HitlReason.CHAPTER_DRAFT_REVIEW:
+        score = state.get("last_reader_score")
+        try:
+            reader_score = int(score) if score is not None else None
+        except (TypeError, ValueError):
+            reader_score = None
+        issue = "章節草稿已通過 reader 審核，請人類確認是否歸檔（草稿後續仍會由 copyeditor 潤飾）。"
+        return HitlContextPayload(
+            primary_issue=issue,
+            supervisor_feedbacks=[],
+            conflict_notes=[],
+            problematic_draft_snippet=_snippet(draft),
+            context_metadata=HitlContextMetadata(
+                payload_type="chapter_review",
+                reader_score=reader_score,
+            ),
+        )
+
     if reason == HitlReason.OUTPUT_LANGUAGE_MISMATCH:
         detail = str(state.get("hitl_output_language_detail") or "").strip()
         exp = str(state.get("hitl_expected_output_language") or "").strip() or "en"

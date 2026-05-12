@@ -122,6 +122,10 @@ class ItemNode(BaseNode):
 
 class EventNode(BaseNode):
     node_type: Literal[NodeType.EVENT] = NodeType.EVENT
+    chunk_ids: list[str] = Field(
+        default_factory=list,
+        description="Chunk ids aligned to prose chunks for vector / graph_rag (stored on graph node).",
+    )
 
 
 class ConceptNode(BaseNode):
@@ -232,6 +236,10 @@ class StoryInput(BaseModel):
         default="zh-Hant",
         description="Natural-language output for generated story content, outlines, feedback, and extractions.",
     )
+    require_chapter_review: bool = Field(
+        default=False,
+        description="When true, pause after reader approval so a human can read/edit the draft before archival.",
+    )
 
 
 class StoryPatch(BaseModel):
@@ -248,6 +256,10 @@ class StoryPatch(BaseModel):
     output_language: StoryOutputLanguage | None = Field(
         default=None,
         description="When omitted, existing DB value is preserved (PATCH must not null out).",
+    )
+    require_chapter_review: bool | None = Field(
+        default=None,
+        description="Story-level default for post-reader human review HITL; null leaves DB value untouched.",
     )
 
 
@@ -282,6 +294,10 @@ class ChapterRunRequest(BaseModel):
     next_anchor_ids: list[str] = Field(
         default_factory=list,
         description="Optional post-chapter navigation anchor ids (must remain reachable).",
+    )
+    require_chapter_review: bool | None = Field(
+        default=None,
+        description="Per-run override for the post-reader human review HITL; null falls back to story default.",
     )
 
     @field_validator("ai_freedom_level", mode="before")
@@ -997,6 +1013,18 @@ class RelationExtractionOutput(BaseModel):
     relations: list[ExtractedRelation] = Field(default_factory=list)
 
 
+class RelationAlignRepairItem(BaseModel):
+    """Maps a failed relation (by batch index) to corrected endpoint ids from the allowed glossary."""
+
+    failure_index: int = Field(..., ge=0)
+    source_node_id: str = ""
+    target_node_id: str = ""
+
+
+class RelationAlignRepairOutput(BaseModel):
+    repairs: list[RelationAlignRepairItem] = Field(default_factory=list)
+
+
 class NodeMutation(BaseModel):
     action: Literal["CREATE_NODE", "UPDATE_NODE"]
     node_id: str
@@ -1036,6 +1064,7 @@ class WorkflowStatus(str, Enum):
     WAITING_HITL = "WAITING_HITL"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
 class StateTransactionStatus(str, Enum):
@@ -1124,6 +1153,18 @@ class GraphRAGEvaluateRequest(BaseModel):
     context_hop_tier: int = Field(default=2, ge=0, le=2)
 
 
+class GraphRAGStoryBackgroundRequest(BaseModel):
+    """REST body for planner-style story background synthesis (mirrors workflow graph_rag node)."""
+
+    narrative_directive: str = Field(default="", max_length=4000)
+    chapter_goal: str = Field(default="", max_length=8000)
+    active_epoch_id: str = "epoch_present"
+    pov_character_id: str = "char_public_observer"
+    top_k: int = Field(default=5, ge=1, le=20)
+    context_hop_tier: int = Field(default=2, ge=0, le=2)
+    output_language: str = Field(default="zh-Hant", max_length=32)
+
+
 class GraphRAGEvaluateOutput(BaseModel):
     resolved: bool
     confidence: float = Field(..., ge=0.0, le=1.0)
@@ -1144,6 +1185,7 @@ class HitlReason:
     CONTEXT_LENGTH_EXCEEDED = "Context_Length_Exceeded"
     ALIGNMENT_RULES_REQUIRED = "Alignment_Rules_Required"
     OUTPUT_LANGUAGE_MISMATCH = "Output_Language_Mismatch"
+    CHAPTER_DRAFT_REVIEW = "Chapter_Draft_Review"
 
 
 HitlContextPayloadType = Literal[
@@ -1152,6 +1194,7 @@ HitlContextPayloadType = Literal[
     "draft_loop",
     "context_prune",
     "output_language",
+    "chapter_review",
     "generic",
 ]
 
@@ -1172,6 +1215,10 @@ class HitlContextMetadata(BaseModel):
     language_detection_summary: str | None = Field(
         default=None,
         description="Brief script-count summary when payload_type=output_language.",
+    )
+    reader_score: int | None = Field(
+        default=None,
+        description="Last reader literary score when payload_type=chapter_review.",
     )
 
 

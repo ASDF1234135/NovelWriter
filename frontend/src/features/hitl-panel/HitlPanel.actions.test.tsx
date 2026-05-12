@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n/I18nProvider";
 import { HitlPanel } from "./HitlPanel";
 
-const noopAsync = vi.fn().mockResolvedValue(undefined);
+const makeNoop = () => vi.fn().mockResolvedValue(undefined);
 
 function renderPanel(node: ReactElement) {
   return render(<I18nProvider>{node}</I18nProvider>);
@@ -39,10 +39,10 @@ describe("HitlPanel actions", () => {
           },
           steps: [],
         }}
-        onDecision={noopAsync}
-        onOutlineEdit={noopAsync}
+        onDecision={makeNoop()}
+        onOutlineEdit={makeNoop()}
         onStateInjection={onStateInjection}
-        onDraftEdit={noopAsync}
+        onDraftEdit={makeNoop()}
       />,
     );
 
@@ -63,7 +63,7 @@ describe("HitlPanel actions", () => {
     );
   });
 
-  it("outline submit uses preview gate before calling onOutlineEdit", async () => {
+  it("plan loop: outline submit goes through preview gate before calling onOutlineEdit", async () => {
     const user = userEvent.setup();
     const onOutlineEdit = vi.fn().mockResolvedValue(undefined);
     renderPanel(
@@ -78,16 +78,30 @@ describe("HitlPanel actions", () => {
             hitl_reason: "Plan_Loop_Exceeded",
             hitl_decision_mode: "MANUAL_EDIT",
           },
-          state: { pending_hitl_options: [], resume_from: "planner" },
+          state: {
+            pending_hitl_options: [],
+            resume_from: "planner",
+            // Provide a valid outline so formState.isValid becomes true after the
+            // useEffect populates outlineEvents via outlineArray.replace().
+            ground_truth_events: [
+              { event_id: "event_01", description: "主角入山" },
+              { event_id: "event_02", description: "遇到對手", caused_by_event_id: "event_01" },
+            ],
+          },
           steps: [],
         }}
-        onDecision={noopAsync}
+        onDecision={makeNoop()}
         onOutlineEdit={onOutlineEdit}
-        onStateInjection={noopAsync}
-        onDraftEdit={noopAsync}
+        onStateInjection={makeNoop()}
+        onDraftEdit={makeNoop()}
       />,
     );
-    await user.click(screen.getByRole("button", { name: "預覽並套用大綱" }));
+
+    // Plan_Loop's default solution is "director"; switch to the outline panel first.
+    await user.click(screen.getByRole("button", { name: /手動調整事件大綱/ }));
+    const previewBtn = await screen.findByRole("button", { name: "預覽並套用大綱" });
+    await waitFor(() => expect(previewBtn).not.toBeDisabled());
+    await user.click(previewBtn);
     expect(await screen.findByText("送出前預覽：事件大綱變更")).toBeInTheDocument();
     expect(onOutlineEdit).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "確認套用大綱" }));
@@ -113,16 +127,16 @@ describe("HitlPanel actions", () => {
           steps: [],
         }}
         onDecision={onDecision}
-        onOutlineEdit={noopAsync}
-        onStateInjection={noopAsync}
-        onDraftEdit={noopAsync}
+        onOutlineEdit={makeNoop()}
+        onStateInjection={makeNoop()}
+        onDraftEdit={makeNoop()}
       />,
     );
     await user.click(screen.getByRole("button", { name: "放棄本章草稿，打掉重練" }));
     await waitFor(() => expect(onDecision).toHaveBeenCalledWith("ABORT_AND_RESTART"));
   });
 
-  it("busy disables one-click decision buttons", () => {
+  it("busy disables quick-action decision buttons", () => {
     renderPanel(
       <HitlPanel
         busy
@@ -142,10 +156,10 @@ describe("HitlPanel actions", () => {
           },
           steps: [],
         }}
-        onDecision={noopAsync}
-        onOutlineEdit={noopAsync}
-        onStateInjection={noopAsync}
-        onDraftEdit={noopAsync}
+        onDecision={makeNoop()}
+        onOutlineEdit={makeNoop()}
+        onStateInjection={makeNoop()}
+        onDraftEdit={makeNoop()}
       />,
     );
     expect(screen.getByRole("button", { name: "維持現有草稿（強制通過）" })).toBeDisabled();

@@ -36,6 +36,7 @@ function hydrateFromStoryInput(input: StoryInput): {
   draftLoopRetryLimit: number;
   macroAuthorNotes: string;
   outputLanguage: StoryOutputLanguage;
+  requireChapterReview: boolean;
 } {
   const ol = input.output_language;
   return {
@@ -47,6 +48,7 @@ function hydrateFromStoryInput(input: StoryInput): {
     draftLoopRetryLimit: input.draft_loop_retry_limit,
     macroAuthorNotes: input.macro_author_notes ?? "",
     outputLanguage: ol === "en" || ol === "zh-Hans" || ol === "zh-Hant" ? ol : "zh-Hant",
+    requireChapterReview: Boolean(input.require_chapter_review),
   };
 }
 
@@ -59,6 +61,7 @@ function buildStoryPayload(
   draftLoopRetryLimit: number,
   macroAuthorNotes: string,
   outputLanguage: StoryOutputLanguage,
+  requireChapterReview: boolean,
 ): StoryInput {
   return {
     title,
@@ -71,6 +74,7 @@ function buildStoryPayload(
     macro_author_notes: macroAuthorNotes,
     cast_seed: [],
     output_language: outputLanguage,
+    require_chapter_review: requireChapterReview,
   };
 }
 
@@ -104,6 +108,7 @@ export function StorySetupForm({
   const [draftLoopRetryLimit, setDraftLoopRetryLimit] = useState(3);
   const [macroAuthorNotes, setMacroAuthorNotes] = useState("");
   const [outputLanguage, setOutputLanguage] = useState<StoryOutputLanguage>(seedOutputLanguage);
+  const [requireChapterReview, setRequireChapterReview] = useState(false);
   const [saveBusy, setSaveBusy] = useState(false);
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const [importModeOpen, setImportModeOpen] = useState(false);
@@ -124,6 +129,7 @@ export function StorySetupForm({
       setDraftLoopRetryLimit(h.draftLoopRetryLimit);
       setMacroAuthorNotes(h.macroAuthorNotes);
       setOutputLanguage(h.outputLanguage);
+      setRequireChapterReview(h.requireChapterReview);
     } else {
       setTitle(seedTitle);
       setPremise(seedPremise);
@@ -133,6 +139,7 @@ export function StorySetupForm({
       setDraftLoopRetryLimit(3);
       setMacroAuthorNotes("");
       setOutputLanguage(seedOutputLanguage);
+      setRequireChapterReview(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- hydrate only when resetKey bumps
   }, [resetKey, seedOutputLanguage, seedPremise, seedTitle]);
@@ -149,6 +156,7 @@ export function StorySetupForm({
         draftLoopRetryLimit,
         macroAuthorNotes,
         outputLanguage,
+        requireChapterReview,
       ),
     );
   }, [
@@ -162,6 +170,7 @@ export function StorySetupForm({
     draftLoopRetryLimit,
     macroAuthorNotes,
     outputLanguage,
+    requireChapterReview,
   ]);
 
   const fieldDisabled = Boolean(disabled || locked);
@@ -185,6 +194,7 @@ export function StorySetupForm({
         draftLoopRetryLimit,
         macroAuthorNotes,
         outputLanguage,
+        requireChapterReview,
       ),
     );
   }
@@ -203,6 +213,7 @@ export function StorySetupForm({
           draftLoopRetryLimit,
           macroAuthorNotes,
           outputLanguage,
+          requireChapterReview,
         ),
       );
     } finally {
@@ -357,6 +368,24 @@ export function StorySetupForm({
           <p className="text-xs text-on-surface-variant">
             {t("setup.outputLanguageHint")}
           </p>
+        </div>
+        <div className="space-y-2 rounded-xl border border-outline-variant/15 bg-surface-container-highest/40 p-3">
+          <label className="flex items-start gap-3">
+            <input
+              type="checkbox"
+              className="mt-1 h-4 w-4 accent-primary"
+              checked={requireChapterReview}
+              onChange={(e) => setRequireChapterReview(e.target.checked)}
+              disabled={fieldDisabled}
+              aria-describedby="setup-require-review-hint"
+            />
+            <span className="flex flex-col">
+              <span className="auteur-label">{t("setup.requireChapterReview")}</span>
+              <span id="setup-require-review-hint" className="text-xs text-on-surface-variant">
+                {t("setup.requireChapterReviewHint")}
+              </span>
+            </span>
+          </label>
         </div>
         <div className="space-y-1">
           <label className="auteur-label">{t("setup.premise")}</label>

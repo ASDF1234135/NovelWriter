@@ -121,6 +121,65 @@ describe("HitlPanel reason rendering", () => {
     expect(screen.getAllByText("微調章節方向").length).toBeGreaterThan(0);
   });
 
+  it("chapter draft review: panel renders the redirect stub instead of solution panels", async () => {
+    const onDecision = vi.fn().mockResolvedValue(undefined);
+    const onDraftEdit = vi.fn().mockResolvedValue(undefined);
+    renderPanel(
+      <HitlPanel
+        workflow={{
+          run: {
+            run_id: "run-cr",
+            story_id: "story-1",
+            chapter_id: 1,
+            status: "WAITING_HITL",
+            requires_hitl: true,
+            hitl_reason: "Chapter_Draft_Review",
+            hitl_decision_mode: "MANUAL_EDIT",
+            hitl_context: {
+              primary_issue: "Awaiting human review of the chapter draft.",
+              supervisor_feedbacks: [],
+              conflict_notes: [],
+              problematic_draft_snippet: "draft snippet…",
+              context_metadata: { payload_type: "chapter_review", reader_score: 88 },
+            },
+          },
+          state: {
+            pending_hitl_options: [
+              { id: "APPROVE_DRAFT", label: "通過（可修改）" },
+              { id: "RERUN_KEEP_DIRECTOR", label: "保留劇情節點重跑" },
+              { id: "ABANDON_CHAPTER", label: "放棄此次生成" },
+            ],
+            resume_from: "chunker",
+            current_draft: "draft body…",
+          },
+          steps: [],
+        }}
+        onDecision={onDecision}
+        onOutlineEdit={noopAsync}
+        onStateInjection={noopAsync}
+        onDraftEdit={onDraftEdit}
+      />,
+    );
+
+    // The redirect stub points the user at the reading area.
+    expect(
+      screen.getByText("此次審核請至閱讀區進行（不在此面板操作）。"),
+    ).toBeInTheDocument();
+
+    // None of the option-id buttons should be wired up inside the panel,
+    // because chapter-review actions live in the reading area.
+    expect(screen.queryByRole("button", { name: /通過（可修改）/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /保留劇情節點重跑/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /放棄此次生成/ })).not.toBeInTheDocument();
+
+    // And the panel's heavyweight solution surfaces stay hidden.
+    expect(screen.queryByRole("heading", { name: "修改章節正文" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "手動調整事件大綱" })).not.toBeInTheDocument();
+
+    expect(onDecision).not.toHaveBeenCalled();
+    expect(onDraftEdit).not.toHaveBeenCalled();
+  });
+
   it("output language mismatch: shows situation and dashboard options", async () => {
     const user = userEvent.setup();
     const onDecision = vi.fn().mockResolvedValue(undefined);

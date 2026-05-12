@@ -22,6 +22,11 @@ export const HITL_REASON = {
   OUTPUT_LANGUAGE: "Output_Language_Mismatch",
   /** Post-run milestone adjudication (anchor_resolve node). */
   ANCHOR_RESOLVE: "Anchor_Resolution_Failed",
+  /**
+   * Post-reader human review checkpoint. Handled in the reading area (not this panel);
+   * solutionsForReason returns [] so HitlPanel renders a redirect stub.
+   */
+  CHAPTER_DRAFT_REVIEW: "Chapter_Draft_Review",
 } as const;
 
 export type HitlReasonValue = (typeof HITL_REASON)[keyof typeof HITL_REASON];
@@ -180,6 +185,17 @@ const HITL_SITUATION_COPY: Record<string, { title: string; why: string }> = {
       "系統用簡單規則檢查本章正文的主要字母類型，發現可能與故事「輸出語言」設定不符。您可以退回撰寫依設定語言重寫，或確認後略過檢查繼續彙總。",
       "系统用简单规则检查本章正文的主要字符类型，发现可能与故事“输出语言”设定不符。你可以回到撰写按设定重写，或确认后略过检查继续汇总。",
       "Simple language detection suggests this chapter may not match the project's output language setting. You can return to rewrite in target language, or confirm and continue.",
+    ),
+  },
+  [HITL_REASON.CHAPTER_DRAFT_REVIEW]: {
+    // The actual UI lives in the reading area (ChapterReviewGate); HitlPanel
+    // only renders a short redirect stub. Keep a friendly copy in case the
+    // situation card is ever shown alongside the stub.
+    title: pick("章節草稿待您審核", "章节草稿待你审核", "Chapter Draft Awaiting Review"),
+    why: pick(
+      "Reader 已通過本章草稿；此次工作流設定為需要人工審核。請至閱讀區直接審閱或編輯後通過。",
+      "Reader 已通过本章草稿；此次工作流设定为需要人工审核。请到阅读区直接审阅或编辑后通过。",
+      "Reader has approved the draft, but this run requires a human checkpoint. Please review or edit the draft in the reading area, then approve.",
     ),
   },
 };
@@ -609,8 +625,18 @@ export const HITL_REASON_MATRIX: HitlReasonMatrixRow[] = [
   {
     reason: HITL_REASON.OUTPUT_LANGUAGE,
     title: getSituationCopy(HITL_REASON.OUTPUT_LANGUAGE).title,
+    defaultSolution: "draft",
+    solutionIds: ["draft"],
+    optionIds: ["language_return_author", "language_force_continue"],
+  },
+  {
+    // Post-reader human review is handled in the reading area (ChapterReviewGate),
+    // not the HitlPanel; the panel renders a redirect stub. Keep solution arrays
+    // empty so HITL_REASON_MATRIX stays consistent with solutionsForReason().
+    reason: HITL_REASON.CHAPTER_DRAFT_REVIEW,
+    title: getSituationCopy(HITL_REASON.CHAPTER_DRAFT_REVIEW).title,
     defaultSolution: null,
     solutionIds: [],
-    optionIds: ["language_return_author", "language_force_continue"],
+    optionIds: ["APPROVE_DRAFT", "RERUN_KEEP_DIRECTOR", "ABANDON_CHAPTER"],
   },
 ];

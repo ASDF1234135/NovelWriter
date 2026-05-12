@@ -79,4 +79,27 @@
   .btn-secondary {
     @apply rounded-full border border-outline-variant/30 bg-surface-container-high px-4 py-2 font-label text-xs font-bold uppercase tracking-wider text-on-surface transition-colors hover:bg-surface-bright/40 disabled:opacity-50;
   }
+  .chapter-review-editor {
+    @apply min-h-[60vh] rounded-lg bg-surface-container-lowest/30 px-3 py-3 outline-none transition-shadow;
+    caret-color: rgb(192 193 255 / 0.85);
+  }
+  .chapter-review-editor:focus-within {
+    @apply ring-2 ring-primary/30;
+  }
+  .chapter-review-editor p {
+    @apply my-3;
+  }
+  .chapter-review-editor p:first-child {
+    @apply mt-0;
+  }
+  .chapter-review-editor p:last-child {
+    @apply mb-0;
+  }
+  .chapter-review-editor p.is-editor-empty:first-child::before {
+    @apply text-on-surface-variant/60;
+    content: attr(data-placeholder);
+    float: left;
+    height: 0;
+    pointer-events: none;
+  }
 }

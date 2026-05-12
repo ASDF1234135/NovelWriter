@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from app.domain.schema import GraphQueryRequest, NodeType, StoryCastMemberStored
+from app.services.graph_rag_service import GraphRAGService
+from app.services.llm import LLMProviderError
 from app.services.workflow.continuity import (
     build_continuity_packet,
     format_local_enforced_rules_block,
@@ -198,13 +200,33 @@ def run_graph_rag(state: dict, context: WorkflowContext) -> dict:
             if node.node_type in {NodeType.CHARACTER, NodeType.PERSONA} and node.node_id in cast_full
         ]
         gc_max, vc_max = _tier_truncate_limits(tier)
-        graph_context = truncate_json_payload(
-            {
-                "graph_snapshot": graph_snapshot.model_dump(mode="json"),
-                "cast_slim_view": slim_cards,
-            },
-            max_chars=gc_max,
+        graph_rag_svc = GraphRAGService(
+            graph_store=context.graph_store,
+            vector_store=context.vector_store,
+            llm=context.llm_client,
         )
+        chapter_goal = str(state.get("chapter_outline") or state.get("author_chapter_plan") or "").strip()
+        try:
+            raw_background = graph_rag_svc.summarize_story_background(
+                narrative_directive=str(state.get("narrative_directive") or "").strip(),
+                chapter_goal=chapter_goal,
+                story_id=state["story_id"],
+                active_epoch_id=state["active_epoch_id"],
+                pov_character_id=resolved_pov_character_id,
+                output_language=context.output_language,
+                top_k=5,
+                context_hop_tier=tier,
+            )
+            text = (raw_background or "").strip()
+            graph_context = text if len(text) <= gc_max else text[: max(gc_max - 1, 0)] + "…"
+        except LLMProviderError:
+            graph_context = truncate_json_payload(
+                {
+                    "graph_background_fallback": True,
+                    "graph": graph_rag_svc.prune_graph_snapshot(graph_snapshot),
+                },
+                max_chars=gc_max,
+            )
         vector_context = truncate_json_payload(
             {
                 "hits": [hit.model_dump() for hit in vector_hits],

@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { useI18n } from "../i18n/useI18n";
 
-export type AppView = "library" | "setup" | "write" | "review" | "graph" | "export";
+export type AppView = "library" | "setup" | "write" | "review" | "graph" | "export" | "workflowMetrics";
 export type TaskFlowStageId = "projectSetup" | "planStructure" | "writeChapter" | "reviewFix" | "export";
 
 type NavItem = { id: AppView; label: string; icon: string };
@@ -49,7 +49,7 @@ export function AppShell({
   workflowMiniStatus,
 }: Props) {
   const { locale, setLocale, t } = useI18n();
-  const gatedViews: AppView[] = ["write", "review", "graph", "export"];
+  const gatedViews: AppView[] = ["write", "review", "graph", "export", "workflowMetrics"];
   const needsStory = (v: AppView) => gatedViews.includes(v);
   const libraryNav: NavItem = { id: "library", label: t("common.storyLibrary"), icon: "auto_stories" };
   const storyScopedNav: NavItem[] = [
@@ -57,6 +57,7 @@ export function AppShell({
     { id: "write", label: t("common.chapterRun"), icon: "play_circle" },
     { id: "review", label: t("common.reviewFix"), icon: "fact_check" },
     { id: "graph", label: t("common.graph"), icon: "hub" },
+    { id: "workflowMetrics", label: t("common.workflowMetrics"), icon: "analytics" },
     { id: "export", label: t("common.export"), icon: "upload_file" },
   ];
 

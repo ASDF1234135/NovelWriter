@@ -1,6 +1,8 @@
 import pytest
 
 from app.domain.schema import (
+    ChapterExtractionOutput,
+    ChapterMemory,
     EdgeMutation,
     EdgeType,
     EventLink,
@@ -216,6 +218,72 @@ def test_state_updater_extracts_entities_relations_and_memory_chunks(workflow_co
     assert "unresolved_threads" in memory_types
     assert summary_doc["metadata"]["location_id"] == "loc_capital"
     assert "Kaelen" in summary_doc["metadata"]["entity_names"]
+
+
+def test_state_updater_rewrites_relation_endpoints_when_entities_merge_to_cast_ids(workflow_context: WorkflowContext) -> None:
+    """Slug extraction ids must remap onto cast graph ids so edges stay consistent."""
+    workflow_context.graph_store.seed_story("story_rel_remap")
+    workflow_context.graph_store.apply_mutations(
+        "story_rel_remap",
+        [
+            NodeMutation(
+                action="CREATE_NODE",
+                node_id="char_cast_irene",
+                node_type=NodeType.CHARACTER,
+                properties={
+                    "canonical_name": "Irene",
+                    "aliases": [],
+                    "description": "Lead.",
+                },
+            ),
+        ],
+    )
+    pending = ChapterExtractionOutput(
+        entities=[
+            ExtractedEntity(
+                node_id="char_irene",
+                node_type=NodeType.CHARACTER,
+                canonical_name="Irene",
+                summary="Irene acts.",
+            ),
+            ExtractedEntity(
+                node_id="event_ch1_01",
+                node_type=NodeType.EVENT,
+                canonical_name="Opening confrontation",
+                summary="Beat one.",
+            ),
+        ],
+        relations=[
+            ExtractedRelation(
+                source_node_id="char_irene",
+                relation_type=EdgeType.PARTICIPATED_IN,
+                target_node_id="event_ch1_01",
+                is_public=True,
+            ),
+        ],
+        chapter_memory=ChapterMemory(),
+    )
+    state = {
+        "story_id": "story_rel_remap",
+        "chapter_id": 1,
+        "active_epoch_id": "epoch_present",
+        "pov_character_id": "char_public_observer",
+        "narrative_directive": "test",
+        "ground_truth_events": [
+            EventOutline(event_id="event_ch1_01", description="Opening confrontation", caused_by_event_id=None).model_dump(
+                mode="json"
+            ),
+        ],
+        "current_draft": "Irene faces the opening confrontation.",
+        "best_draft_content": "",
+        "pending_chapter_extraction": pending.model_dump(mode="json"),
+    }
+    output = run_state_updater(state, workflow_context)
+    participated = next(
+        m for m in output["mutations"] if m["action"] == "CREATE_EDGE" and m["relation_type"] == "PARTICIPATED_IN"
+    )
+    assert participated["source_id"] == "char_cast_irene"
+    assert participated["target_id"] == "event_ch1_01"
 
 
 def test_state_updater_normalizes_nonstandard_event_ids(workflow_context: WorkflowContext) -> None:

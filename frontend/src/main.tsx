@@ -1,11 +1,18 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter } from "react-router-dom";
+import { createBrowserRouter, RouterProvider } from "react-router-dom";
 import App from "./app/App";
 import "./index.css";
 import { I18nProvider } from "./i18n/I18nProvider";
 import { queryClient } from "./app/queryClient";
+
+const router = createBrowserRouter([
+  // Single catch-all route: App owns its own view switching based on pathname
+  // (see pathToView in App.tsx). We use a data router (not BrowserRouter) so
+  // useBlocker / useNavigation are available to ChapterReviewGate.
+  { path: "*", element: <App /> },
+]);
 
 const rootElement = document.getElementById("root");
 const isLocalDevHost =
@@ -39,9 +46,7 @@ ReactDOM.createRoot(rootElement!).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
       <I18nProvider>
-        <BrowserRouter>
-          <App />
-        </BrowserRouter>
+        <RouterProvider router={router} />
       </I18nProvider>
     </QueryClientProvider>
   </React.StrictMode>,

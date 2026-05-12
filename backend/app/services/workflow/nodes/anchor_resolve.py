@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from app.core.config import get_settings
 from app.domain.schema import AnchorResolutionOutput, GraphRAGEvaluateOutput
+from app.domain.story_runtime import recompute_anchor_unlocks
 from app.services.graph_rag_service import GraphRAGService
 from app.services.llm import MockLLMClient
 from app.services.workflow.context import WorkflowContext
@@ -129,38 +130,6 @@ def _normalize_partition(selected: list[str], resolved_now: list[str], unresolve
     return sorted(set(r)), sorted(set(u))
 
 
-def _is_terminal_anchor(row: dict) -> bool:
-    return str(row.get("node_kind") or "").upper() in {"CHECKPOINT", "ENDING"}
-
-
-def _recompute_unlocks(anchor_nodes: list[dict], resolved: set[str]) -> tuple[list[dict], list[str]]:
-    by_id = {str(n.get("id") or ""): dict(n) for n in anchor_nodes if str(n.get("id") or "").strip()}
-    changed = True
-    while changed:
-        changed = False
-        for node_id, row in by_id.items():
-            if node_id in resolved or not _is_terminal_anchor(row):
-                continue
-            deps = [str(x) for x in (row.get("depends_on") or []) if str(x).strip()]
-            if all(dep in resolved for dep in deps):
-                resolved.add(node_id)
-                changed = True
-
-    candidates: list[str] = []
-    for node_id, row in by_id.items():
-        deps = [str(x) for x in (row.get("depends_on") or []) if str(x).strip()]
-        if node_id in resolved:
-            row["status"] = "RESOLVED"
-            continue
-        if all(dep in resolved for dep in deps):
-            row["status"] = "UNLOCKED"
-            if not _is_terminal_anchor(row):
-                candidates.append(node_id)
-        else:
-            row["status"] = "LOCKED"
-    return list(by_id.values()), sorted(set(candidates))
-
-
 def run_anchor_resolve(state: dict, context: WorkflowContext) -> dict:
     anchor_nodes = list(state.get("anchor_nodes") or [])
     selected = [str(x).strip() for x in (state.get("selected_anchor_ids") or []) if str(x).strip()]
@@ -267,7 +236,7 @@ def run_anchor_resolve(state: dict, context: WorkflowContext) -> dict:
             chapter_text = str(state.get("current_draft") or state.get("best_draft_content") or "")
             output, hitl_required = _fallback_resolution(chapter_text, selected, node_by_id)
 
-    next_nodes, candidates = _recompute_unlocks(anchor_nodes, resolved)
+    next_nodes, candidates = recompute_anchor_unlocks(anchor_nodes, resolved)
     unresolved_non_terminal = [
         n
         for n in next_nodes

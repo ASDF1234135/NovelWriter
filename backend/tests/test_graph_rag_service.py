@@ -32,6 +32,17 @@ class FakeGraphRAGLLM:
         return response_model.model_validate(payload), LLMResultStub(content="")
 
 
+class CheckingStoryBackgroundLLM(FakeGraphRAGLLM):
+    def invoke_text(self, prompt: str, profile: AgentPromptProfile) -> LLMResultStub:
+        assert profile.agent_name == "graph_rag_story_background"
+        assert "本章目標概要" in prompt
+        assert "進城測試" in prompt
+        assert "Evidence pack (JSON):" in prompt
+        assert "zh-Hant" in prompt
+        assert "推進測試" in prompt
+        return LLMResultStub(content="【Mock背景】")
+
+
 def test_retrieve_evidence_pack_prunes_empty_fields() -> None:
     graph_store = InMemoryGraphStore()
     vector_store = InMemoryVectorStore(DeterministicEmbeddingClient(64))
@@ -75,6 +86,22 @@ def test_ask_question_returns_text() -> None:
         pov_character_id="char_public_observer",
     )
     assert out.startswith("[text:graph_rag_ask]")
+
+
+def test_summarize_story_background_uses_evidence_and_outline() -> None:
+    graph_store = InMemoryGraphStore()
+    vector_store = InMemoryVectorStore(DeterministicEmbeddingClient(64))
+    service = GraphRAGService(graph_store=graph_store, vector_store=vector_store, llm=CheckingStoryBackgroundLLM())
+
+    text = service.summarize_story_background(
+        narrative_directive="推進測試",
+        chapter_goal="進城測試",
+        story_id="story_1",
+        active_epoch_id="epoch_present",
+        pov_character_id="char_public_observer",
+        output_language="zh-Hant",
+    )
+    assert text == "【Mock背景】"
 
 
 def test_evaluate_condition_returns_structured_output() -> None:

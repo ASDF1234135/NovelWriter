@@ -19,6 +19,68 @@ from app.services.workflow.context import WorkflowContext
 from app.services.workflow.extraction import extract_chapter_artifacts
 
 
+def build_last_chapter_extraction_metrics(
+    diag: dict[str, Any] | None,
+    *,
+    entities_final: int,
+    relations_final: int,
+    mandatory_mapping_ok: bool,
+) -> dict[str, Any]:
+    """
+    JSON-serializable snapshot for workflow metrics APIs.
+
+    Entity/relation \"rates\": prefer comparing post-validation counts to pre-validation gate counts
+    (see counts_*_validation_gate); fallbacks indicate extractor degraded paths.
+    """
+    base: dict[str, Any] = {
+        "mandatory_mapping_ok": mandatory_mapping_ok,
+        "entities_final": entities_final,
+        "relations_final": relations_final,
+    }
+    if not diag:
+        base["diag_missing"] = True
+        return base
+
+    steps = diag.get("steps") if isinstance(diag.get("steps"), dict) else {}
+    ent_step = steps.get("entity_extractor") if isinstance(steps.get("entity_extractor"), dict) else {}
+    mem_step = steps.get("chapter_memory_extractor") if isinstance(steps.get("chapter_memory_extractor"), dict) else {}
+    rel_step = steps.get("relation_extractor") if isinstance(steps.get("relation_extractor"), dict) else {}
+    vg = steps.get("validation_gate") if isinstance(steps.get("validation_gate"), dict) else {}
+    qm = diag.get("quality_metrics") if isinstance(diag.get("quality_metrics"), dict) else {}
+    pre = diag.get("counts_pre_validation_gate") if isinstance(diag.get("counts_pre_validation_gate"), dict) else {}
+    post = diag.get("counts_post_validation_gate") if isinstance(diag.get("counts_post_validation_gate"), dict) else {}
+
+    base.update(
+        {
+            "entity_extractor_fallback": bool(ent_step.get("fallback")),
+            "chapter_memory_extractor_fallback": bool(mem_step.get("fallback")),
+            "relation_extractor_fallback": bool(rel_step.get("fallback")),
+            "relation_extractor_skipped": bool(rel_step.get("skipped")),
+            "quality_metrics": {
+                k: int(qm[k])
+                for k in ("entity_candidates_raw", "entity_candidates_kept", "concept_candidates_dropped")
+                if k in qm and isinstance(qm[k], (int, float))
+            },
+            "counts_pre_validation_gate": {
+                "entities": int(pre.get("entities", 0) or 0),
+                "relations": int(pre.get("relations", 0) or 0),
+            },
+            "counts_post_validation_gate": {
+                "entities": int(post.get("entities", entities_final) or 0),
+                "relations": int(post.get("relations", relations_final) or 0),
+            },
+            "validation_gate": {
+                "align_retry_attempts": int(vg.get("align_retry_attempts") or 0),
+                "dropped_non_align_count": int(vg.get("dropped_non_align_count") or 0),
+                "align_failed_remaining_count": int(vg.get("align_failed_remaining_count") or 0),
+            },
+            "extraction_latency_ms_total": int(diag.get("latency_ms") or 0),
+            "model": str(diag.get("model") or ""),
+        }
+    )
+    return base
+
+
 def _author_surface_map(state: dict) -> dict[str, list[str]]:
     raw = state.get("author_extraction_surface_hints") or []
     out: dict[str, list[str]] = {}
@@ -151,8 +213,15 @@ def run_extraction_gate(state: dict, context: WorkflowContext) -> dict:
         prefix = _extraction_fallback_notice(diag if isinstance(diag, dict) else None)
         msg = prefix + msg
         hints = build_extraction_remap_hints(list(extracted.entities), missing, planned)
+        last_metrics = build_last_chapter_extraction_metrics(
+            diag if isinstance(diag, dict) else None,
+            entities_final=len(extracted.entities),
+            relations_final=len(extracted.relations),
+            mandatory_mapping_ok=False,
+        )
         return {
             "extraction_route": "author",
+            "last_chapter_extraction_metrics": last_metrics,
             "pending_chapter_extraction": {},
             "extraction_gate_feedback_entry": {
                 "attempt": state.get("draft_retry_count", 0) + 1,
@@ -166,9 +235,16 @@ def run_extraction_gate(state: dict, context: WorkflowContext) -> dict:
             "hitl_extraction_remap_hints": hints,
         }
 
+    last_metrics = build_last_chapter_extraction_metrics(
+        diag if isinstance(diag, dict) else None,
+        entities_final=len(extracted.entities),
+        relations_final=len(extracted.relations),
+        mandatory_mapping_ok=True,
+    )
     return {
         # Success continues to post-draft fixed chain (copyeditor/output-language/summarizer).
         "extraction_route": "continue",
+        "last_chapter_extraction_metrics": last_metrics,
         "pending_chapter_extraction": extracted.model_dump(mode="json"),
         "extraction_gate_error": "",
     }

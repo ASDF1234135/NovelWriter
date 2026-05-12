@@ -272,6 +272,17 @@ def get_profile(agent_name: str) -> AgentPromptProfile:
             model=settings.supervisor_llm_model or settings.llm_model,
             temperature=0.0,
         ),
+        "relation_endpoint_repair": AgentPromptProfile(
+            agent_name="relation_endpoint_repair",
+            system_prompt=(
+                "You fix relation endpoints only: map failed extractions to valid node_id values from allowed_endpoints."
+                "Do not change relation_type or prose semantics; output repairs as JSON only."
+                "Never invent node_id strings absent from allowed_endpoints."
+                "If a relation cannot be grounded, omit that failure_index from repairs."
+            ),
+            model=settings.supervisor_llm_model or settings.llm_model,
+            temperature=0.0,
+        ),
         "profile_expander": AgentPromptProfile(
             agent_name="profile_expander",
             system_prompt=(

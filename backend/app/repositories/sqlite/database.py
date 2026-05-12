@@ -158,6 +158,12 @@ class SQLiteDatabase:
                 "output_language",
                 "TEXT NOT NULL DEFAULT 'zh-Hant'",
             )
+            self._ensure_column(
+                conn,
+                "stories",
+                "require_chapter_review",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
             self._ensure_column(conn, "volumes", "target_volume_words", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(
                 conn,
@@ -171,6 +177,13 @@ class SQLiteDatabase:
                 "plot_summary_source",
                 "TEXT NOT NULL DEFAULT 'UNKNOWN'",
             )
+            self._ensure_column(
+                conn,
+                "stories",
+                "story_runtime_json",
+                "TEXT NOT NULL DEFAULT '{}'",
+            )
+            self._migrate_story_runtime_split(conn)
             # Legacy table removed: runtime/navigation now reads storylines + anchor_nodes_json.
             conn.execute("DROP TABLE IF EXISTS anchors")
             conn.execute("PRAGMA journal_mode=WAL")
@@ -192,3 +205,78 @@ class SQLiteDatabase:
         if column_name in existing_columns:
             return
         conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
+
+    @staticmethod
+    def _migrate_story_runtime_split(conn: sqlite3.Connection) -> None:
+        """One-time: move bible_json runtime keys + anchor status into story_runtime_json; skeleton-only anchors."""
+        ver_row = conn.execute("PRAGMA user_version").fetchone()
+        current_v = int(ver_row["user_version"]) if ver_row and ver_row["user_version"] is not None else 0
+        if current_v >= 6:
+            return
+
+        from app.domain.story_runtime import (
+            anchor_nodes_to_skeleton_rows,
+            extract_runtime_from_bible,
+            parse_story_runtime,
+            resolved_anchors_from_skeleton_and_legacy,
+            strip_runtime_keys_from_bible,
+        )
+
+        rows = conn.execute(
+            """
+            SELECT story_id, bible_json, anchor_nodes_json,
+                   COALESCE(NULLIF(trim(story_runtime_json), ''), '{}') AS srj
+            FROM stories
+            """
+        ).fetchall()
+
+        for row in rows:
+            story_id = str(row["story_id"])
+            try:
+                bible_loaded = json.loads(row["bible_json"]) if row["bible_json"] else {}
+            except (json.JSONDecodeError, TypeError, ValueError):
+                bible_loaded = {}
+            bible = bible_loaded if isinstance(bible_loaded, dict) else {}
+
+            try:
+                anchor_loaded = json.loads(row["anchor_nodes_json"]) if row["anchor_nodes_json"] else []
+            except (json.JSONDecodeError, TypeError, ValueError):
+                anchor_loaded = []
+            nodes = [dict(n) for n in anchor_loaded if isinstance(n, dict)]
+
+            try:
+                existing_rt = parse_story_runtime(json.loads(row["srj"]))
+            except (json.JSONDecodeError, TypeError, ValueError):
+                existing_rt = parse_story_runtime({})
+
+            rt_from_bible = extract_runtime_from_bible(bible)
+            merged_resolved = resolved_anchors_from_skeleton_and_legacy(
+                bible_resolved=rt_from_bible["resolved_anchors"],
+                nodes_skeleton_or_full=nodes,
+            )
+            runtime = parse_story_runtime(existing_rt)
+            runtime["resolved_anchors"] = merged_resolved
+            if rt_from_bible["anchor_candidates"]:
+                runtime["anchor_candidates"] = list(rt_from_bible["anchor_candidates"])
+            if rt_from_bible["lore_mysteries_progression"]:
+                runtime["lore_mysteries_progression"] = list(rt_from_bible["lore_mysteries_progression"])
+
+            skeleton, prop_updates = anchor_nodes_to_skeleton_rows(nodes)
+            runtime["anchor_properties"] = {**runtime["anchor_properties"], **prop_updates}
+
+            bible_clean = strip_runtime_keys_from_bible(bible)
+            conn.execute(
+                """
+                UPDATE stories
+                SET bible_json = ?, anchor_nodes_json = ?, story_runtime_json = ?
+                WHERE story_id = ?
+                """,
+                (
+                    json.dumps(bible_clean, ensure_ascii=False),
+                    json.dumps(skeleton, ensure_ascii=False),
+                    json.dumps(runtime, ensure_ascii=False),
+                    story_id,
+                ),
+            )
+
+        conn.execute("PRAGMA user_version = 6")

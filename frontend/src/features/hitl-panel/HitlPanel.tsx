@@ -267,15 +267,27 @@ export function HitlPanel({
           description: String(row.description ?? "").trim(),
           caused_by_event_id: row.caused_by_event_id != null ? String(row.caused_by_event_id).trim() : "",
         }));
-        outlineArray.replace(mapped);
+        const currentOutline = (getValues("outlineEvents") ?? []).map((row) => ({
+          event_id: String(row.event_id ?? "").trim(),
+          description: String(row.description ?? "").trim(),
+          caused_by_event_id: String(row.caused_by_event_id ?? "").trim(),
+        }));
+        if (JSON.stringify(currentOutline) !== JSON.stringify(mapped)) {
+          outlineArray.replace(mapped);
+        }
       }
-      setValue("narrativeScript", String(st.narrative_script ?? ""));
+      const nextNarrativeScript = String(st.narrative_script ?? "");
+      if (getValues("narrativeScript") !== nextNarrativeScript) {
+        setValue("narrativeScript", nextNarrativeScript);
+      }
     }
     if (isDirectorPatchReason(reason)) {
-      if (reason === HITL_REASON.B_STORY_COOLDOWN) {
-        setValue("directorNotes", String(st.b_story_directive ?? ""));
-      } else {
-        setValue("directorNotes", String(st.narrative_directive ?? ""));
+      const nextDirectorNotes =
+        reason === HITL_REASON.B_STORY_COOLDOWN
+          ? String(st.b_story_directive ?? "")
+          : String(st.narrative_directive ?? "");
+      if (getValues("directorNotes") !== nextDirectorNotes) {
+        setValue("directorNotes", nextDirectorNotes);
       }
     }
     if (reason === HITL_REASON.EXTRACTION_GATE) {
@@ -331,9 +343,12 @@ export function HitlPanel({
       }
     }
     if (reason === HITL_REASON.ALIGNMENT_RULES_REQUIRED) {
-      setValue("alignmentRulesInput", String(st.chapter_hard_rules ?? ""));
+      const nextRules = String(st.chapter_hard_rules ?? "");
+      if (getValues("alignmentRulesInput") !== nextRules) {
+        setValue("alignmentRulesInput", nextRules);
+      }
     }
-  }, [hitlActive, reason, workflow?.run.run_id, workflow?.run.hitl_context, workflow?.state, remapArray, outlineArray, setValue]);
+  }, [hitlActive, reason, workflow?.run.run_id, workflow?.run.hitl_context, workflow?.state, remapArray, outlineArray, getValues, setValue]);
   const shell = compact
     ? "glass-panel rounded-xl border border-outline-variant/15 p-4 shadow-glow"
     : "rounded-xl border border-outline-variant/10 bg-surface-container-low p-6 shadow-glow";
@@ -387,7 +402,13 @@ export function HitlPanel({
       </p>
       {hitlActive ? <HitlFlowStrip reason={reason} resumeFrom={resumeHint} compact={compact} /> : null}
 
-      {hitlActive ? (
+      {hitlActive && reason === HITL_REASON.CHAPTER_DRAFT_REVIEW ? (
+        <div className="rounded-lg border border-tertiary/40 bg-tertiary/10 px-3 py-3 font-body text-sm text-on-surface">
+          {t("hitl.chapterReview.panelStub")}
+        </div>
+      ) : null}
+
+      {hitlActive && reason !== HITL_REASON.CHAPTER_DRAFT_REVIEW ? (
         <>
           {workflowError.trim() ? (
             <div className="mb-3 rounded-lg border border-error/40 bg-error/10 px-3 py-2 font-body text-sm text-error">{workflowError.trim()}</div>

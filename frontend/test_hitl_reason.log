@@ -1,0 +1,14 @@
+﻿
+ RUN  v2.1.9 C:/myProject/NovelBuilder_v2/frontend
+
+ ??src/features/hitl-panel/HitlPanel.reason.test.tsx > HitlPanel reason rendering > draft loop: dashboard decision calls onDecision and does not show plan-outline panel by default
+ ??src/features/hitl-panel/HitlPanel.reason.test.tsx > HitlPanel reason rendering > plan loop: shows situation copy and outline panel when selected
+ ??src/features/hitl-panel/HitlPanel.reason.test.tsx > HitlPanel reason rendering > resolution tactic cooldown: shows director solution like plan family
+ ??src/features/hitl-panel/HitlPanel.reason.test.tsx > HitlPanel reason rendering > chapter draft review: panel renders the redirect stub instead of solution panels
+ ??src/features/hitl-panel/HitlPanel.reason.test.tsx > HitlPanel reason rendering > output language mismatch: shows situation and dashboard options
+
+ Test Files  1 passed (1)
+      Tests  5 passed (5)
+   Start at  23:22:19
+   Duration  6.10s (transform 805ms, setup 287ms, collect 1.65s, tests 667ms, environment 1.59s, prepare 211ms)
+

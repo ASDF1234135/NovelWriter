@@ -1,0 +1,15 @@
+﻿
+ RUN  v2.1.9 C:/myProject/NovelBuilder_v2/frontend
+
+ ??src/features/hitl-panel/hitlNarrative.test.ts > hitlNarrative > mapHitlQuickActionLabel prefers i18n then server label
+ ??src/features/hitl-panel/hitlNarrative.test.ts > hitlNarrative > getRemapExpectedNodeType reads planned_graph_nodes
+ ??src/features/hitl-panel/hitlNarrative.test.ts > hitlNarrative > filterGraphNodesByType returns all nodes when type is null
+ ??src/features/hitl-panel/hitlNarrative.test.ts > hitlNarrative > filterGraphNodesByType matches node_type case-insensitively
+ ??src/features/hitl-panel/hitlCopy.test.ts > HITL reason matrix baseline > keeps one row for each known reason
+ ??src/features/hitl-panel/hitlCopy.test.ts > HITL reason matrix baseline > matches title and solution mapping functions
+
+ Test Files  2 passed (2)
+      Tests  6 passed (6)
+   Start at  23:21:23
+   Duration  5.68s (transform 184ms, setup 518ms, collect 193ms, tests 20ms, environment 3.29s, prepare 447ms)
+

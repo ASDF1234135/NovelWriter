@@ -12,6 +12,8 @@ import {
   fetchStoryDetail,
   fetchWritingPreamble,
   regenerateChapterSummary,
+  fetchStoryWorkflowMetrics,
+  fetchChapterWorkflowMetrics,
   fetchWorkflow,
   macroCompile,
   putMacroPlan,
@@ -31,6 +33,7 @@ import {
 } from "../api";
 import { AgentOutputView } from "../features/agent-output/AgentOutputView";
 import { ChapterReader } from "../features/chapter-reader/ChapterReader";
+import { ChapterReviewGate } from "../features/chapter-review/ChapterReviewGate";
 import { GraphView } from "../features/graph-view/GraphView";
 import { HitlPanel } from "../features/hitl-panel/HitlPanel";
 import { AnchorDagSection } from "../features/macro-plan/AnchorDagSection";
@@ -46,6 +49,7 @@ import {
 import { MacroPlanPanel } from "../features/macro-plan/MacroPlanPanel";
 import { StoryLibrary } from "../features/story-library/StoryLibrary";
 import { StorySetupForm } from "../features/story-setup/StorySetupForm";
+import { WorkflowMetricsDashboard } from "../features/workflow-metrics/WorkflowMetricsDashboard";
 import { WorkflowMonitor } from "../features/workflow-monitor/WorkflowMonitor";
 import { HitlDevDropdown } from "../features/workflow-monitor/HitlDevDropdown";
 import { WorkflowProgressTrack } from "../features/workflow-monitor/WorkflowProgressTrack";
@@ -92,6 +96,7 @@ const VIEW_PATH_MAP: Record<AppView, string> = {
   review: "/review",
   graph: "/graph",
   export: "/export",
+  workflowMetrics: "/workflow-metrics",
 };
 
 function pathToView(pathname: string): AppView {
@@ -110,6 +115,8 @@ function pathToView(pathname: string): AppView {
       return "graph";
     case "/export":
       return "export";
+    case "/workflow-metrics":
+      return "workflowMetrics";
     default:
       return "library";
   }
@@ -141,6 +148,7 @@ function navTargetLabel(target: AppView, tfn: (key: string, fallback?: string, p
     write: "app.navTarget.write",
     review: "app.navTarget.review",
     graph: "app.navTarget.graph",
+    workflowMetrics: "app.navTarget.workflowMetrics",
     export: "app.navTarget.export",
   };
   return tfn(keys[target]);
@@ -180,6 +188,7 @@ export function storyDetailToInput(
       rawLanguage === undefined || rawLanguage === null || String(rawLanguage).trim() === ""
         ? fallbackLanguage
         : normalizeOutputLanguage(rawLanguage),
+    require_chapter_review: Boolean(d.require_chapter_review),
   };
 }
 
@@ -391,6 +400,7 @@ export default function App() {
   const [chapterOutline, setChapterOutline] = useState("");
   const [chapterHardRules, setChapterHardRules] = useState("");
   const [aiFreedomLevel, setAiFreedomLevel] = useState<AiFreedomLevel>("balanced");
+  const [requireChapterReview, setRequireChapterReview] = useState<boolean>(false);
   const [selectedAnchorIds, setSelectedAnchorIds] = useState<string[]>([]);
   const [manualAnchorSelectionOpen, setManualAnchorSelectionOpen] = useState(false);
   const [writingPreamble, setWritingPreamble] = useState<WritingPreambleResponse | null>(null);
@@ -481,10 +491,14 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!storyId && (view === "write" || view === "review" || view === "graph" || view === "export")) {
+    if (!storyId && (view === "write" || view === "review" || view === "graph" || view === "export" || view === "workflowMetrics")) {
       navigateToViewPath("library");
     }
   }, [storyId, view]);
+
+  useEffect(() => {
+    setRequireChapterReview(Boolean(persistedStoryConfig?.require_chapter_review));
+  }, [persistedStoryConfig?.require_chapter_review, storyId]);
 
   useEffect(() => {
     const reason = String(workflow?.state?.hitl_reason ?? workflow?.run?.hitl_reason ?? "");
@@ -504,6 +518,13 @@ export default function App() {
     const waiting =
       workflow?.run?.requires_hitl === true || String(workflow?.state?.workflow_status ?? "") === "WAITING_HITL";
     return waiting && reason === "Alignment_Rules_Required";
+  }, [workflow]);
+
+  const chapterReviewActive = useMemo(() => {
+    const reason = String(workflow?.state?.hitl_reason ?? workflow?.run?.hitl_reason ?? "");
+    const waiting =
+      workflow?.run?.requires_hitl === true || String(workflow?.state?.workflow_status ?? "") === "WAITING_HITL";
+    return waiting && reason === "Chapter_Draft_Review";
   }, [workflow]);
 
   const workflowHitlActive = useMemo(() => {
@@ -968,6 +989,7 @@ export default function App() {
         macro_author_notes: storyConfigSnapshot.macro_author_notes ?? "",
         cast_seed: storyConfigSnapshot.cast_seed ?? [],
         output_language: normalizeOutputLanguage(storyConfigSnapshot.output_language),
+        require_chapter_review: Boolean(storyConfigSnapshot.require_chapter_review),
       });
       setPersistedStoryConfig(storyConfigSnapshot);
     } catch (err) {
@@ -1004,6 +1026,7 @@ export default function App() {
         macro_author_notes: payload.macro_author_notes ?? "",
         cast_seed: payload.cast_seed ?? [],
         output_language: normalizeOutputLanguage(payload.output_language),
+        require_chapter_review: Boolean(payload.require_chapter_review),
       });
       setStoryConfigSnapshot(payload);
       setPersistedStoryConfig(payload);
@@ -1019,8 +1042,13 @@ export default function App() {
     try {
       const wf = await fetchWorkflow(runId);
       setWorkflow(wf);
-      if (String(wf.state.workflow_status ?? "") === "COMPLETED") {
+      const status = String(wf.state.workflow_status ?? "");
+      if (status === "COMPLETED") {
         navigateToViewPath("review");
+      } else if (status === "CANCELLED") {
+        // Stay on the write view and surface a notice; chapter was abandoned by the user.
+        setNotice(t("chapterReview.cancelledNotice"));
+        navigateToViewPath("write");
       }
       const sid = storyIdRef.current;
       if (sid) {
@@ -1076,7 +1104,7 @@ export default function App() {
           try {
             const wf = await fetchWorkflow(runId);
             const status = String(wf.state.workflow_status ?? "");
-            const terminal = status === "COMPLETED" || status === "FAILED";
+            const terminal = status === "COMPLETED" || status === "FAILED" || status === "CANCELLED";
             const waitingHitl = wf.run.requires_hitl === true || status === "WAITING_HITL";
             setWorkflow(wf);
             if (terminal) {
@@ -1084,6 +1112,10 @@ export default function App() {
               return;
             }
             if (waitingHitl) {
+              const reason = String(wf.state.hitl_reason ?? wf.run.hitl_reason ?? "");
+              if (reason === "Chapter_Draft_Review") {
+                navigateToViewPath("review");
+              }
               setBusy(false);
               return;
             }
@@ -1101,7 +1133,7 @@ export default function App() {
   function applyHitlWorkflowResponse(wf: WorkflowPayload) {
     setError("");
     const st = String(wf.state.workflow_status ?? "");
-    const terminal = st === "COMPLETED" || st === "FAILED";
+    const terminal = st === "COMPLETED" || st === "FAILED" || st === "CANCELLED";
     const waiting = wf.run.requires_hitl === true || st === "WAITING_HITL";
     setWorkflow(wf);
     if (terminal) {
@@ -1111,6 +1143,11 @@ export default function App() {
     } else if (waiting) {
       workflowEventsUnsubRef.current?.();
       workflowEventsUnsubRef.current = null;
+      // Chapter-review HITL renders in the reading area, not the panel.
+      const reason = String(wf.state.hitl_reason ?? wf.run.hitl_reason ?? "");
+      if (reason === "Chapter_Draft_Review") {
+        navigateToViewPath("review");
+      }
       setBusy(false);
     } else {
       attachWorkflowEventStream(wf.run.run_id);
@@ -1137,6 +1174,7 @@ export default function App() {
         aiFreedomLevel,
         selectedAnchorIds: manualAnchorSelectionOpen ? selectedAnchorIds : undefined,
         nextAnchorIds: manualAnchorSelectionOpen ? autoNextAnchorIds : undefined,
+        requireChapterReview,
       };
       const initial = await runChapter(storyId, nextGeneratableChapterId, {
         ...runOptions,
@@ -1243,6 +1281,7 @@ export default function App() {
         macro_author_notes: merged.macro_author_notes ?? "",
         cast_seed: merged.cast_seed ?? [],
         output_language: normalizeOutputLanguage(merged.output_language),
+        require_chapter_review: Boolean(merged.require_chapter_review),
       });
       setStoryConfigSnapshot(merged);
       setPersistedStoryConfig(merged);
@@ -1626,6 +1665,25 @@ export default function App() {
       runHitlAction(sendContextPrune, payload, "errors.contextPruneFailed"),
   };
 
+  /** Chapter-review HITL action handlers used by ChapterReviewGate. */
+  const chapterReviewHandlers = {
+    onApprove: async (content: string, edited: boolean) => {
+      if (edited) {
+        await runHitlAction(
+          sendDraftEdit,
+          { chapter_content: content, resume_from: "chunker" },
+          "errors.applyDraftFailed",
+        );
+      } else {
+        await runHitlAction(sendHitlDecision, "APPROVE_DRAFT", "errors.sendChoiceFailed");
+      }
+    },
+    onRerun: async () =>
+      runHitlAction(sendHitlDecision, "RERUN_KEEP_DIRECTOR", "errors.sendChoiceFailed"),
+    onAbandon: async () =>
+      runHitlAction(sendHitlDecision, "ABANDON_CHAPTER", "errors.sendChoiceFailed"),
+  };
+
   const showStorySection = Boolean(storyId) || view === "setup";
   const compileProgressText = useMemo(() => {
     if (!compileInProgress) return "";
@@ -1719,7 +1777,7 @@ export default function App() {
       markStageVisit(hasMacroCompiled ? "planStructure" : "projectSetup");
     } else if (nextView === "write") {
       markStageVisit("writeChapter");
-    } else if (nextView === "review" || nextView === "graph") {
+    } else if (nextView === "review" || nextView === "graph" || nextView === "workflowMetrics") {
       markStageVisit("reviewFix");
     } else if (nextView === "export") {
       markStageVisit("export");
@@ -1744,7 +1802,7 @@ export default function App() {
       markStageVisit(hasMacroCompiled ? "planStructure" : "projectSetup");
     } else if (target === "write") {
       markStageVisit("writeChapter");
-    } else if (target === "review" || target === "graph") {
+    } else if (target === "review" || target === "graph" || target === "workflowMetrics") {
       markStageVisit("reviewFix");
     } else if (target === "export") {
       markStageVisit("export");
@@ -2014,6 +2072,27 @@ export default function App() {
             chapter={selectedChapter}
             outputLanguage={normalizeOutputLanguage(storyConfigSnapshot?.output_language ?? "zh-Hant")}
             busy={busy}
+            disableChapterSelection={chapterReviewActive}
+            reviewModeTitle={chapterReviewActive ? t("chapterReview.title") : undefined}
+            articleOverride={
+              chapterReviewActive
+                ? (
+                    <ChapterReviewGate
+                      key={String(workflow?.run.run_id ?? "")}
+                      draft={String(workflow?.state?.current_draft ?? workflow?.state?.best_draft_content ?? "")}
+                      readerScore={
+                        typeof workflow?.state?.last_reader_score === "number"
+                          ? Number(workflow?.state?.last_reader_score)
+                          : null
+                      }
+                      busy={busy}
+                      onApprove={chapterReviewHandlers.onApprove}
+                      onAbandon={chapterReviewHandlers.onAbandon}
+                      onRerun={chapterReviewHandlers.onRerun}
+                    />
+                  )
+                : undefined
+            }
             onSelectChapter={async (nextChapterId) => {
               if (!storyId) return;
               setBusy(true);
@@ -2171,6 +2250,24 @@ export default function App() {
                   </button>
                 </div>
               </div>
+              <label className="mt-3 flex items-start gap-3 rounded-lg border border-outline-variant/15 bg-surface-container-highest/40 px-3 py-2.5">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 h-4 w-4 accent-primary"
+                  checked={requireChapterReview}
+                  onChange={(e) => setRequireChapterReview(e.target.checked)}
+                  disabled={!storyId || busy || workflowConflictLocked || chapterAlreadyCompleted}
+                  aria-describedby="app-write-review-hint"
+                />
+                <span className="flex min-w-0 flex-col">
+                  <span className="font-label text-[11px] font-bold uppercase tracking-wider text-secondary">
+                    {t("app.write.requireChapterReview")}
+                  </span>
+                  <span id="app-write-review-hint" className="font-body text-xs text-on-surface-variant">
+                    {t("app.write.requireChapterReviewHint")}
+                  </span>
+                </span>
+              </label>
               {chapterAlreadyCompleted ? (
                 <div className="mt-3">
                   <span className="rounded-full border border-tertiary/30 bg-tertiary/10 px-2 py-1 text-xs text-tertiary">
@@ -2379,6 +2476,11 @@ export default function App() {
               </div>
             )}
           </div>
+        </div>
+      ) : null}
+      {view === "workflowMetrics" && storyId ? (
+        <div className="min-h-[calc(100vh-12rem)] px-4 py-8 md:px-10 lg:px-12">
+          <WorkflowMetricsDashboard storyId={storyId} chapters={chapters} />
         </div>
       ) : null}
       {view === "export" ? (

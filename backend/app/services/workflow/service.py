@@ -50,6 +50,7 @@ from app.services.bible_service import BibleService
 from app.services.graph_store import GraphStore
 from app.services.llm import LLMClient
 from app.services.vector_store import VectorStore
+from app.domain.story_runtime import normalize_anchor_candidates_from_hydrated
 from app.services.workflow.bible_general_lore import effective_general_world_lore
 from app.services.workflow.chapter_pacing import (
     build_ending_vibe_cooldown_constraint,
@@ -68,6 +69,7 @@ from app.services.workflow.output_language import (
 from app.services.workflow.graph import build_chapter_graph
 from app.services.workflow.graph import WorkflowNodeTimeoutError
 from app.services.workflow.hitl_payload import build_hitl_context_payload, should_expose_hitl_context
+from app.services.workflow.metrics import WorkflowMetricsResponse, build_single_run_metrics, rollup_metrics
 from app.services.workflow.outline_binding import compute_outline_binding_mode
 
 _ALLOWED_HITL_RESUME_NODES = frozenset(
@@ -78,6 +80,9 @@ _ALLOWED_HITL_RESUME_NODES = frozenset(
         "author",
         "draft_supervisor",
         "reader",
+        "chapter_review_gate",
+        "chunker",
+        "vectorize_chunks",
         "graph_rag",
         "extraction_gate",
         "copyeditor",
@@ -99,30 +104,20 @@ def _refresh_anchor_runtime_state(story_repository: StoryRepository, state: dict
     nodes = [dict(n) for n in (story.get("anchor_nodes_json") or []) if isinstance(n, dict)]
     state["anchor_nodes"] = nodes
     node_ids = {str(n.get("id") or "").strip() for n in nodes if str(n.get("id") or "").strip()}
-    node_by_id = {str(n.get("id") or "").strip(): n for n in nodes if str(n.get("id") or "").strip()}
-    bible = story.get("bible_json") if isinstance(story.get("bible_json"), dict) else {}
+    rt = story.get("story_runtime_json") if isinstance(story.get("story_runtime_json"), dict) else {}
     resolved_raw = state.get("resolved_anchors")
     if resolved_raw is None:
-        resolved_raw = bible.get("resolved_anchors") or []
+        resolved_raw = rt.get("resolved_anchors") or []
     resolved = [str(x).strip() for x in resolved_raw if str(x).strip() in node_ids]
     state["resolved_anchors"] = sorted(dict.fromkeys(resolved))
     candidates_raw = state.get("anchor_candidates")
     if not candidates_raw:
-        candidates_raw = bible.get("anchor_candidates") or []
-    if not candidates_raw and nodes:
-        candidates_raw = [
-            str(n.get("id") or "").strip()
-            for n in nodes
-            if str(n.get("status") or "").upper() == "UNLOCKED" and not _is_terminal_anchor_node(n)
-        ]
-    resolved_set = set(state["resolved_anchors"])
-    state["anchor_candidates"] = [
-        str(x).strip()
-        for x in candidates_raw
-        if str(x).strip() in node_ids
-        and str(x).strip() not in resolved_set
-        and not _is_terminal_anchor_node(node_by_id[str(x).strip()])
-    ]
+        candidates_raw = rt.get("anchor_candidates") or []
+    state["anchor_candidates"] = normalize_anchor_candidates_from_hydrated(
+        list(candidates_raw) if candidates_raw else None,
+        nodes=nodes,
+        resolved_anchors=state["resolved_anchors"],
+    )
     canonicalize_workflow_state_contract(state)
 
 
@@ -352,9 +347,13 @@ def _apply_abort_and_restart_chapter_state(story_repository: StoryRepository, st
     ):
         if key in state and state[key] not in (None, "", [], {}):
             fresh[key] = deepcopy(state[key]) if isinstance(state[key], (dict, list)) else state[key]
+    # Preserve per-run human review toggle so reruns continue to pause when the user opted in.
+    if "require_chapter_review" in state:
+        fresh["require_chapter_review"] = bool(state.get("require_chapter_review"))
 
     bible = story.get("bible_json") or {}
-    fresh["lore_mysteries_progression"] = list(bible.get("lore_mysteries_progression") or [])
+    rt = story.get("story_runtime_json") if isinstance(story.get("story_runtime_json"), dict) else {}
+    fresh["lore_mysteries_progression"] = list(rt.get("lore_mysteries_progression") or [])
     fresh["general_world_lore"] = effective_general_world_lore(bible)
     _refresh_anchor_runtime_state(story_repository, fresh)
     normalize_workflow_state(fresh)
@@ -586,6 +585,7 @@ _BIBLE_NON_USER_KEYS = (
     "compile_config",
     "resolved_anchors",
     "anchor_candidates",
+    "lore_mysteries_progression",
 )
 
 
@@ -728,14 +728,19 @@ def _validate_macro_plan_put_under_completed_lock(
                 f"new storyline {sid!r} must be USER_EDIT (only user-edit branches can be added)."
             )
 
+    resolved_ids = {
+        str(x).strip()
+        for x in (current_snapshot.get("story_runtime") or {}).get("resolved_anchors", [])
+        if str(x).strip()
+    }
     cur_nodes_by_id = {
         str(n.get("id") or ""): dict(n) for n in (current_snapshot.get("anchor_nodes") or [])
     }
     body_nodes_by_id = {str(n.id): n.model_dump(mode="json") for n in body.anchor_nodes}
     for nid, prev in cur_nodes_by_id.items():
-        prev_status = str(prev.get("status") or "").upper()
+        prev_resolved = nid in resolved_ids
         nxt = body_nodes_by_id.get(nid)
-        if prev_status == "RESOLVED":
+        if prev_resolved:
             if nxt is None:
                 raise _build_macro_lock_error(
                     f"resolved plot node {nid!r} cannot be deleted."
@@ -1046,9 +1051,11 @@ class WorkflowService:
         protagonist_id = str(story.get("protagonist_character_id") or "").strip()
         bible_out = story.get("bible_json") if isinstance(story.get("bible_json"), dict) else {}
         has_completed = self.story_repository.has_completed_chapter(story_id)
+        rt_out = dict(story.get("story_runtime_json") or {}) if isinstance(story.get("story_runtime_json"), dict) else {}
         return {
             "story_id": story_id,
             "bible": bible_out,
+            "story_runtime": rt_out,
             "macro_author_notes": str(story.get("macro_author_notes") or ""),
             "cast_seed": [s.model_dump(mode="json") for s in (story.get("cast_seed") or [])],
             "volumes": volumes,
@@ -1183,6 +1190,7 @@ class WorkflowService:
         waive_mandatory_node_ids: list[str] | None = None,
         selected_anchor_ids: list[str] | None = None,
         next_anchor_ids: list[str] | None = None,
+        require_chapter_review: bool | None = None,
     ) -> dict:
         """Create workflow run and persist initial state only (graph not executed yet)."""
         story = self.story_repository.get_story(story_id)
@@ -1226,6 +1234,11 @@ class WorkflowService:
         _ol = normalize_output_language(str(story.get("output_language") or ""))
         initial_state["story_output_language"] = _ol
         initial_state["target_word_count"] = default_chapter_target_words(_ol)
+        # Per-run override beats story default; falls back to False when nothing is set.
+        if require_chapter_review is not None:
+            initial_state["require_chapter_review"] = bool(require_chapter_review)
+        else:
+            initial_state["require_chapter_review"] = bool(story.get("require_chapter_review") or False)
 
         # Tail-End Context Injection: provide the previous chapter trailing excerpt to this run.
         previous_tail = ""
@@ -1266,10 +1279,11 @@ class WorkflowService:
             initial_state["ending_vibe_cooldown_constraint"] = {"active": False}
 
         bible = story.get("bible_json") or {}
+        rt = story.get("story_runtime_json") if isinstance(story.get("story_runtime_json"), dict) else {}
         initial_state["storyline_metadata"] = list(story.get("storylines_json") or [])
         initial_state["anchor_nodes"] = list(story.get("anchor_nodes_json") or [])
-        initial_state["resolved_anchors"] = list(bible.get("resolved_anchors") or [])
-        initial_state["anchor_candidates"] = list(bible.get("anchor_candidates") or [])
+        initial_state["resolved_anchors"] = list(rt.get("resolved_anchors") or [])
+        initial_state["anchor_candidates"] = list(rt.get("anchor_candidates") or [])
         # Canonical runtime source is anchor_nodes. Normalize legacy fields for consistency.
         node_ids = {str(n.get("id") or "").strip() for n in initial_state["anchor_nodes"] if str(n.get("id") or "").strip()}
         initial_node_by_id = {
@@ -1291,7 +1305,7 @@ class WorkflowService:
             ]
         initial_state["active_anchors"] = []
         initial_state["state_version"] = 2
-        initial_state["lore_mysteries_progression"] = list(bible.get("lore_mysteries_progression") or [])
+        initial_state["lore_mysteries_progression"] = list(rt.get("lore_mysteries_progression") or [])
         initial_state["general_world_lore"] = effective_general_world_lore(bible)
         _refresh_anchor_runtime_state(self.story_repository, initial_state)
         normalize_workflow_state(initial_state)
@@ -1324,6 +1338,9 @@ class WorkflowService:
             state["requires_hitl"] = False
             state["hitl_reason"] = "Legacy run is readonly after Anchor DAG V2 migration."
             self.workflow_repository.update_run(run_id, state)
+            return
+        if str(state.get("workflow_status") or "") == WorkflowStatus.CANCELLED.value:
+            # Run was abandoned by the user; do not resume execution.
             return
         try:
             self._execute_workflow(run_id, state)
@@ -1372,6 +1389,57 @@ class WorkflowService:
             "state": state,
             "steps": self.workflow_repository.list_steps(run_id),
         }
+
+    def get_story_workflow_metrics(self, story_id: str, *, limit: int = 200, offset: int = 0) -> dict:
+        story = self.story_repository.get_story(story_id)
+        if not story:
+            raise KeyError(f"Story not found: {story_id}")
+        summaries = self.workflow_repository.list_run_summaries_for_story(
+            story_id, chapter_id=None, limit=limit, offset=offset
+        )
+        runs_metrics = []
+        for s in summaries:
+            rid = str(s["run_id"])
+            state = normalize_workflow_state(self.workflow_repository.get_run_state(rid))
+            steps = self.workflow_repository.list_steps(rid)
+            hitl = self.workflow_repository.list_hitl_actions(rid, limit=500)
+            runs_metrics.append(build_single_run_metrics(s, state, steps, hitl))
+        rollup = rollup_metrics(runs_metrics)
+        payload = WorkflowMetricsResponse(
+            story_id=story_id,
+            scope="story",
+            chapter_id=None,
+            rollup=rollup,
+            runs=runs_metrics,
+        )
+        return payload.model_dump(mode="json")
+
+    def get_chapter_workflow_metrics(self, story_id: str, chapter_id: int, *, limit: int = 200, offset: int = 0) -> dict:
+        story = self.story_repository.get_story(story_id)
+        if not story:
+            raise KeyError(f"Story not found: {story_id}")
+        chapter = self.story_repository.get_chapter(story_id, chapter_id)
+        if not chapter:
+            raise KeyError(f"Chapter not found: {story_id}:{chapter_id}")
+        summaries = self.workflow_repository.list_run_summaries_for_story(
+            story_id, chapter_id=chapter_id, limit=limit, offset=offset
+        )
+        runs_metrics = []
+        for s in summaries:
+            rid = str(s["run_id"])
+            state = normalize_workflow_state(self.workflow_repository.get_run_state(rid))
+            steps = self.workflow_repository.list_steps(rid)
+            hitl = self.workflow_repository.list_hitl_actions(rid, limit=500)
+            runs_metrics.append(build_single_run_metrics(s, state, steps, hitl))
+        rollup = rollup_metrics(runs_metrics)
+        payload = WorkflowMetricsResponse(
+            story_id=story_id,
+            scope="chapter",
+            chapter_id=chapter_id,
+            rollup=rollup,
+            runs=runs_metrics,
+        )
+        return payload.model_dump(mode="json")
 
     def list_chapters(self, story_id: str) -> list[dict]:
         story = self.story_repository.get_story(story_id)
@@ -1444,6 +1512,37 @@ class WorkflowService:
             state["pending_hitl_options"] = []
             state["workflow_status"] = WorkflowStatus.RUNNING.value
             state["resume_from"] = "planner"
+            self.workflow_repository.update_run(run_id, state)
+            return
+
+        if request.option_id == "RERUN_KEEP_DIRECTOR" and prev_hitl_reason == HitlReason.CHAPTER_DRAFT_REVIEW:
+            _apply_abort_and_restart_chapter_state(self.story_repository, state)
+            state["requires_hitl"] = False
+            state["hitl_reason"] = ""
+            state["hitl_decision_mode"] = "NONE"
+            state["pending_hitl_options"] = []
+            state["workflow_status"] = WorkflowStatus.RUNNING.value
+            state["resume_from"] = "planner"
+            self.workflow_repository.update_run(run_id, state)
+            return
+
+        if request.option_id == "ABANDON_CHAPTER" and prev_hitl_reason == HitlReason.CHAPTER_DRAFT_REVIEW:
+            state["requires_hitl"] = False
+            state["hitl_reason"] = ""
+            state["hitl_decision_mode"] = "NONE"
+            state["pending_hitl_options"] = []
+            state["workflow_status"] = WorkflowStatus.CANCELLED.value
+            state["resume_from"] = ""
+            self.workflow_repository.update_run(run_id, state)
+            return
+
+        if request.option_id == "APPROVE_DRAFT" and prev_hitl_reason == HitlReason.CHAPTER_DRAFT_REVIEW:
+            state["requires_hitl"] = False
+            state["hitl_reason"] = ""
+            state["hitl_decision_mode"] = "NONE"
+            state["pending_hitl_options"] = []
+            state["workflow_status"] = WorkflowStatus.RUNNING.value
+            state["resume_from"] = "chunker"
             self.workflow_repository.update_run(run_id, state)
             return
 

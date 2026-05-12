@@ -4,7 +4,8 @@ import httpx
 import pytest
 from qdrant_client.http import models
 
-from app.services.vector_store import QdrantVectorStore
+from app.domain.schema import VectorDocument
+from app.services.vector_store import InMemoryVectorStore, QdrantVectorStore
 
 
 class FakeEmbeddingClient:
@@ -117,6 +118,24 @@ def test_qdrant_store_uses_config_vector_size_when_embedding_probe_unreachable(m
     )
 
     assert store.embedding_dimension == 3072
+
+
+def test_in_memory_store_retrieve_vectors_by_chunk_id_matches_indexed_payload() -> None:
+    store = InMemoryVectorStore(FakeEmbeddingClient(16))
+    docs = [
+        VectorDocument(
+            text_chunk="hello",
+            metadata={"chunk_id": "c_alpha", "chapter_id": 2},
+        ),
+        VectorDocument(
+            text_chunk="world",
+            metadata={"chunk_id": "c_beta", "chapter_id": 2},
+        ),
+    ]
+    store.add_documents("story_x", docs)
+    got = store.retrieve_vectors_by_chunk_ids("story_x", ["c_beta", "missing"])
+    assert list(got.keys()) == ["c_beta"]
+    assert len(got["c_beta"]) == 16
 
 
 def test_qdrant_store_init_fails_on_empty_embedding_probe(monkeypatch) -> None:

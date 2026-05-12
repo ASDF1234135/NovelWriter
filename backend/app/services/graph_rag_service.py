@@ -31,6 +31,32 @@ Rules:
 - Output must be a single JSON object matching the provided schema; no markdown, no extra text.
 """
 
+_GRAPH_RAG_STORY_BACKGROUND_SYSTEM_PROMPT = """You synthesize story background briefings for a chapter planner.
+
+Rules:
+- Follow the user's section outline exactly (same headings and order).
+- Every substantive claim MUST be grounded in the evidence pack (graph nodes/edges and/or vector excerpts). Do not invent plot facts, motives, or relationships.
+- For psychological goals or interior states, tie them only to what the evidence explicitly supports; otherwise say evidence is insufficient.
+- Where a subsection lacks evidence, write one short line stating that the evidence pack does not cover it—do not speculate.
+- Output readable prose (not JSON). Markdown headings are allowed.
+- Write all headings and body text in the language indicated by the user's output_language instruction.
+"""
+
+_STORY_BACKGROUND_USER_TEMPLATE = """幫我根據以下大綱目標整理故事背景資訊，包含：
+
+劇情進展：重要的前情提要、重要的未解之謎或伏筆以及整體故事背景整理
+
+人物：出場人物以及他們的背景資訊概述，以及他們對於當前劇情發展的心理、目標，以及近期背景概要
+
+位置：劇情發展位置以及狀態概要
+
+其他重要物品、規則或重要劇情狀態
+
+本章目標概要： {description}
+{narrative_block}
+Output language (BCP-47): {output_language}
+"""
+
 
 def _prune_empty_values(value: Any) -> Any:
     """Recursively drop empty scalars/containers from dict/list payloads."""
@@ -319,4 +345,54 @@ class GraphRAGService:
         )
         parsed, _llm_result = self.llm.invoke_json(prompt, response_model, profile)
         return parsed
+
+    def prune_graph_snapshot(self, snapshot: GraphSnapshot) -> dict[str, Any]:
+        """Public wrapper for pruned graph JSON (e.g. workflow fallback when summarization fails)."""
+        return self._prune_graph_snapshot(snapshot)
+
+    def summarize_story_background(
+        self,
+        *,
+        narrative_directive: str,
+        chapter_goal: str,
+        story_id: str,
+        active_epoch_id: str,
+        pov_character_id: str,
+        output_language: str,
+        top_k: int = 5,
+        context_hop_tier: int = 2,
+    ) -> str:
+        nd = (narrative_directive or "").strip()
+        cg = (chapter_goal or "").strip()
+        parts = [p for p in (nd, cg) if p]
+        retrieval_query = "\n".join(parts) if parts else "."
+
+        evidence = self._retrieve_evidence_pack(
+            retrieval_query,
+            story_id=story_id,
+            active_epoch_id=active_epoch_id,
+            pov_character_id=pov_character_id,
+            top_k=top_k,
+            context_hop_tier=context_hop_tier,
+        )
+        description = cg if cg else "（作者未填本章概要）"
+        narrative_block = f"\n本章敘事方向（檢索錨點）：{nd}\n" if nd else ""
+        ol = (output_language or "zh-Hant").strip() or "zh-Hant"
+        prompt = (
+            _STORY_BACKGROUND_USER_TEMPLATE.format(
+                description=description,
+                narrative_block=narrative_block,
+                output_language=ol,
+            )
+            + "\n\nEvidence pack (JSON):\n"
+            + json.dumps(evidence, ensure_ascii=False)
+        )
+        settings = get_settings()
+        profile = AgentPromptProfile(
+            agent_name="graph_rag_story_background",
+            system_prompt=_GRAPH_RAG_STORY_BACKGROUND_SYSTEM_PROMPT,
+            model=settings.llm_model,
+            temperature=0.2,
+        )
+        return self.llm.invoke_text(prompt, profile).content
 

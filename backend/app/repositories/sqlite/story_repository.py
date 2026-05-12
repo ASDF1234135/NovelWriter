@@ -4,6 +4,15 @@ import json
 from datetime import datetime, UTC
 from typing import Any
 
+from app.domain.story_runtime import (
+    anchor_nodes_to_skeleton_rows,
+    anchor_properties_from_runtime,
+    extract_runtime_from_bible,
+    hydrate_anchor_nodes,
+    parse_story_runtime,
+    resolved_anchors_from_skeleton_and_legacy,
+    strip_runtime_keys_from_bible,
+)
 from app.domain.schema import (
     CharacterArcMilestone,
     ConflictType,
@@ -55,8 +64,15 @@ class StoryRepository:
         created_at = datetime.now(UTC).isoformat()
         bible_raw = dict(story_input.bible or {})
         storylines = self._coerce_json_list(bible_raw.get("storylines"))
-        anchor_nodes = self._coerce_json_list(bible_raw.get("anchor_nodes"))
-        bible = self._strip_macro_topology_from_bible(bible_raw)
+        anchor_nodes_in = self._coerce_json_list(bible_raw.get("anchor_nodes"))
+        runtime_seed = extract_runtime_from_bible(bible_raw)
+        runtime_seed["resolved_anchors"] = resolved_anchors_from_skeleton_and_legacy(
+            bible_resolved=runtime_seed["resolved_anchors"],
+            nodes_skeleton_or_full=anchor_nodes_in,
+        )
+        skeleton_rows, prop_updates = anchor_nodes_to_skeleton_rows(anchor_nodes_in)
+        runtime_seed["anchor_properties"] = {**runtime_seed["anchor_properties"], **prop_updates}
+        bible = strip_runtime_keys_from_bible(self._strip_macro_topology_from_bible(bible_raw))
         compile_cfg = dict(bible.get("compile_config") or {})
         if story_input.branch_count_override is not None:
             compile_cfg["branch_count_override"] = int(story_input.branch_count_override)
@@ -68,9 +84,10 @@ class StoryRepository:
                 INSERT INTO stories (
                     story_id, title, premise, bible_json, target_total_words,
                     plan_retry_limit, draft_loop_retry_limit, macro_author_notes, cast_seed_json,
-                    storylines_json, anchor_nodes_json, output_language, created_at
+                    storylines_json, anchor_nodes_json, story_runtime_json, output_language,
+                    require_chapter_review, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     story_id,
@@ -83,8 +100,10 @@ class StoryRepository:
                     story_input.macro_author_notes,
                     self.db.dumps([s.model_dump(mode="json") for s in story_input.cast_seed]),
                     self.db.dumps(storylines),
-                    self.db.dumps(anchor_nodes),
+                    self.db.dumps(skeleton_rows),
+                    self.db.dumps(parse_story_runtime(runtime_seed)),
                     story_input.output_language,
+                    1 if story_input.require_chapter_review else 0,
                     created_at,
                 ),
             )
@@ -107,8 +126,10 @@ class StoryRepository:
             if not row:
                 return None
             row["bible_json"] = self.db.loads(row["bible_json"])
-            row["bible_json"] = self._strip_macro_topology_from_bible(
-                row["bible_json"] if isinstance(row["bible_json"], dict) else {}
+            row["bible_json"] = strip_runtime_keys_from_bible(
+                self._strip_macro_topology_from_bible(
+                    row["bible_json"] if isinstance(row["bible_json"], dict) else {}
+                )
             )
             compile_cfg = row["bible_json"].get("compile_config") if isinstance(row["bible_json"], dict) else {}
             row["branch_count_override"] = (
@@ -134,6 +155,17 @@ class StoryRepository:
             row.setdefault("cast_seed_json", "[]")
             row.setdefault("storylines_json", "[]")
             row.setdefault("anchor_nodes_json", "[]")
+            raw_runtime = row.get("story_runtime_json")
+            if isinstance(raw_runtime, str) and raw_runtime.strip():
+                try:
+                    loaded_rt = self.db.loads(raw_runtime)
+                    row["story_runtime_json"] = parse_story_runtime(loaded_rt)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    row["story_runtime_json"] = parse_story_runtime({})
+            elif isinstance(raw_runtime, dict):
+                row["story_runtime_json"] = parse_story_runtime(raw_runtime)
+            else:
+                row["story_runtime_json"] = parse_story_runtime({})
             raw_seed = row.get("cast_seed_json")
             if isinstance(raw_seed, str) and raw_seed.strip():
                 try:
@@ -158,17 +190,24 @@ class StoryRepository:
             raw_anchor_nodes = row.get("anchor_nodes_json")
             if isinstance(raw_anchor_nodes, str) and raw_anchor_nodes.strip():
                 try:
-                    row["anchor_nodes_json"] = self._coerce_json_list(self.db.loads(raw_anchor_nodes))
+                    anchor_skeleton = self._coerce_json_list(self.db.loads(raw_anchor_nodes))
                 except (json.JSONDecodeError, TypeError, ValueError):
-                    row["anchor_nodes_json"] = []
+                    anchor_skeleton = []
             else:
-                row["anchor_nodes_json"] = self._coerce_json_list(raw_anchor_nodes)
+                anchor_skeleton = self._coerce_json_list(raw_anchor_nodes)
             # Backward compatibility for old rows where macro topology was embedded in bible_json.
             if not row["storylines_json"]:
                 row["storylines_json"] = self._coerce_json_list(row["bible_json"].get("storylines"))
-            if not row["anchor_nodes_json"]:
-                row["anchor_nodes_json"] = self._coerce_json_list(row["bible_json"].get("anchor_nodes"))
+            if not anchor_skeleton:
+                anchor_skeleton = self._coerce_json_list(row["bible_json"].get("anchor_nodes"))
+            rt = row["story_runtime_json"]
+            row["anchor_nodes_json"] = hydrate_anchor_nodes(
+                anchor_skeleton,
+                resolved_anchors=list(rt.get("resolved_anchors") or []),
+                anchor_properties=anchor_properties_from_runtime(rt),
+            )
             row.setdefault("output_language", "zh-Hant")
+            row["require_chapter_review"] = bool(row.get("require_chapter_review") or 0)
             return row
 
     def try_begin_macro_compile(self, story_id: str) -> bool:
@@ -205,11 +244,19 @@ class StoryRepository:
             )
 
     def update_story_bible_json(self, story_id: str, bible: dict) -> None:
-        clean_bible = self._strip_macro_topology_from_bible(dict(bible or {}))
+        clean_bible = strip_runtime_keys_from_bible(self._strip_macro_topology_from_bible(dict(bible or {})))
         with self.db.connection() as conn:
             conn.execute(
                 "UPDATE stories SET bible_json = ? WHERE story_id = ?",
                 (self.db.dumps(clean_bible), story_id),
+            )
+
+    def update_story_runtime_json(self, story_id: str, runtime: dict) -> None:
+        payload = parse_story_runtime(runtime)
+        with self.db.connection() as conn:
+            conn.execute(
+                "UPDATE stories SET story_runtime_json = ? WHERE story_id = ?",
+                (self.db.dumps(payload), story_id),
             )
 
     def store_macro_plan_snapshot(
@@ -229,12 +276,45 @@ class StoryRepository:
         This makes the SQLite side internally strongly consistent: either all macro-plan
         writes (bible/topology/volumes/cast) commit together or none do.
         """
-        clean_bible = self._strip_macro_topology_from_bible(dict(bible or {}))
+        bible_dict = dict(bible or {})
+        incoming_rt = extract_runtime_from_bible(bible_dict)
+        clean_bible = strip_runtime_keys_from_bible(self._strip_macro_topology_from_bible(bible_dict))
         clean_storylines = self._coerce_json_list(storylines)
-        clean_anchor_nodes = self._coerce_json_list(anchor_nodes)
+        raw_anchors = self._coerce_json_list(anchor_nodes)
+        skeleton_rows, prop_updates = anchor_nodes_to_skeleton_rows(raw_anchors)
+        skeleton_ids = {str(n.get("id") or "").strip() for n in skeleton_rows if str(n.get("id") or "").strip()}
+        resolved_from_payload = {
+            str(n.get("id") or "").strip()
+            for n in raw_anchors
+            if isinstance(n, dict)
+            and str(n.get("status") or "").upper() == "RESOLVED"
+            and str(n.get("id") or "").strip()
+        }
+        non_resolved_body_ids = {
+            str(n.get("id") or "").strip()
+            for n in raw_anchors
+            if isinstance(n, dict)
+            and str(n.get("status") or "").upper() != "RESOLVED"
+            and str(n.get("id") or "").strip()
+        }
         cast_payload = [self._sanitize_cast_row(member.model_dump(mode="json")) for member in cast]
         prot = str(protagonist_character_id or "").strip()
         with self.db.connection() as conn:
+            row = conn.execute(
+                "SELECT story_runtime_json FROM stories WHERE story_id = ?",
+                (story_id,),
+            ).fetchone()
+            if not row:
+                raise KeyError(f"Story not found: {story_id}")
+            merged_rt = parse_story_runtime(self.db.loads(row["story_runtime_json"] or "{}"))
+            prev_resolved = {str(x).strip() for x in (merged_rt.get("resolved_anchors") or []) if str(x).strip()}
+            prev_kept = prev_resolved & skeleton_ids
+            merged_rt["resolved_anchors"] = sorted(
+                dict.fromkeys((prev_kept - non_resolved_body_ids) | resolved_from_payload)
+            )
+            if incoming_rt["lore_mysteries_progression"]:
+                merged_rt["lore_mysteries_progression"] = list(incoming_rt["lore_mysteries_progression"])
+            merged_rt["anchor_properties"] = {**merged_rt["anchor_properties"], **prop_updates}
             conn.execute(
                 """
                 UPDATE stories
@@ -242,15 +322,17 @@ class StoryRepository:
                     storylines_json = ?,
                     anchor_nodes_json = ?,
                     cast_json = ?,
-                    protagonist_character_id = ?
+                    protagonist_character_id = ?,
+                    story_runtime_json = ?
                 WHERE story_id = ?
                 """,
                 (
                     self.db.dumps(clean_bible),
                     self.db.dumps(clean_storylines),
-                    self.db.dumps(clean_anchor_nodes),
+                    self.db.dumps(skeleton_rows),
                     self.db.dumps(cast_payload),
                     prot,
+                    self.db.dumps(merged_rt),
                     story_id,
                 ),
             )
@@ -280,15 +362,24 @@ class StoryRepository:
         anchor_nodes: list[dict[str, Any]],
     ) -> None:
         clean_storylines = self._coerce_json_list(storylines)
-        clean_anchor_nodes = self._coerce_json_list(anchor_nodes)
+        raw_nodes = self._coerce_json_list(anchor_nodes)
+        skeleton_rows, prop_updates = anchor_nodes_to_skeleton_rows(raw_nodes)
         with self.db.connection() as conn:
+            row = conn.execute(
+                "SELECT story_runtime_json FROM stories WHERE story_id = ?",
+                (story_id,),
+            ).fetchone()
+            if not row:
+                raise KeyError(f"Story not found: {story_id}")
+            rt = parse_story_runtime(self.db.loads(row["story_runtime_json"] or "{}"))
+            rt["anchor_properties"] = {**rt["anchor_properties"], **prop_updates}
             conn.execute(
                 """
                 UPDATE stories
-                SET storylines_json = ?, anchor_nodes_json = ?
+                SET storylines_json = ?, anchor_nodes_json = ?, story_runtime_json = ?
                 WHERE story_id = ?
                 """,
-                (self.db.dumps(clean_storylines), self.db.dumps(clean_anchor_nodes), story_id),
+                (self.db.dumps(clean_storylines), self.db.dumps(skeleton_rows), self.db.dumps(rt), story_id),
             )
 
     def patch_story(self, story_id: str, patch: StoryPatch) -> dict:
@@ -339,6 +430,9 @@ class StoryRepository:
         if "output_language" in data and data["output_language"] is not None:
             fields.append("output_language = ?")
             values.append(str(data["output_language"]))
+        if "require_chapter_review" in data and data["require_chapter_review"] is not None:
+            fields.append("require_chapter_review = ?")
+            values.append(1 if data["require_chapter_review"] else 0)
         if not fields:
             return story
         values.append(story_id)

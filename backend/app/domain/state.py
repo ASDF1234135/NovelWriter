@@ -123,6 +123,7 @@ class AgentWorkflowState(TypedDict):
     pending_cast_updates: NotRequired[list[dict[str, Any]]]
     pending_cast_evolutions: NotRequired[list[dict[str, Any]]]
     extraction_gate_failure_streak: NotRequired[int]
+    last_chapter_extraction_metrics: NotRequired[dict[str, Any]]
     extraction_hitl_limit: NotRequired[int]
     manual_entity_remap: NotRequired[list[dict[str, Any]]]
     mandatory_extraction_skips: NotRequired[list[str]]
@@ -181,6 +182,7 @@ class AgentWorkflowState(TypedDict):
     volume_stretch_required: NotRequired[bool]
     volume_stretch_applied_to_chapter: NotRequired[int]
     word_count: NotRequired[int]
+    require_chapter_review: NotRequired[bool]
 
 
 class SafeAuthorPayload(BaseModel):
@@ -408,6 +410,7 @@ def build_initial_state(
         plan_warnings=[],
         author_extraction_surface_hints=[],
         extraction_gate_failure_streak=0,
+        last_chapter_extraction_metrics={},
         extraction_hitl_limit=4,
         manual_entity_remap=[],
         mandatory_extraction_skips=[],
@@ -478,6 +481,7 @@ def normalize_workflow_state(state: dict[str, Any]) -> dict[str, Any]:
         "previous_chapter_tail_excerpt": "",
         "author_extraction_surface_hints": [],
         "extraction_gate_failure_streak": 0,
+        "last_chapter_extraction_metrics": {},
         "extraction_hitl_limit": 4,
         "manual_entity_remap": [],
         "mandatory_extraction_skips": [],
@@ -530,6 +534,7 @@ def normalize_workflow_state(state: dict[str, Any]) -> dict[str, Any]:
         "anchor_hitl_required": False,
         "volume_stretch_required": False,
         "word_count": 0,
+        "require_chapter_review": False,
     }
     for key, val in defaults.items():
         if key not in state:

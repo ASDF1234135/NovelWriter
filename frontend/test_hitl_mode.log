@@ -1,0 +1,10 @@
+﻿
+ RUN  v2.1.9 C:/myProject/NovelBuilder_v2/frontend
+
+ ??src/features/hitl-panel/HitlPanel.mode.test.tsx > HitlPanel mode switching > expands the advanced (expert) section when its summary is clicked
+
+ Test Files  1 passed (1)
+      Tests  1 passed (1)
+   Start at  23:21:50
+   Duration  6.08s (transform 819ms, setup 265ms, collect 1.61s, tests 267ms, environment 1.63s, prepare 228ms)
+

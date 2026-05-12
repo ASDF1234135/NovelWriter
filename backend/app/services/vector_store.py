@@ -31,6 +31,10 @@ class VectorStore(Protocol):
     def search(self, story_id: str, query: str, limit: int = 5) -> list[VectorDocument]:
         ...
 
+    def retrieve_vectors_by_chunk_ids(self, story_id: str, chunk_ids: list[str]) -> dict[str, list[float]]:
+        """Return stored embedding vectors keyed by chunk_id (no text fetch). Missing ids omitted."""
+        ...
+
 
 def deterministic_embedding(text: str, size: int) -> list[float]:
     digest = hashlib.sha256(text.encode("utf-8")).digest()
@@ -63,6 +67,7 @@ class InMemoryVectorStore:
     embedding_client: EmbeddingClient = field(default_factory=lambda: DeterministicEmbeddingClient(64))
     story_documents: dict[str, list[VectorDocument]] = field(default_factory=lambda: defaultdict(list))
     story_vectors: dict[str, list[list[float]]] = field(default_factory=lambda: defaultdict(list))
+    chunk_vector_by_story_chunk: dict[tuple[str, str], list[float]] = field(default_factory=dict)
 
     def add_documents(self, story_id: str, documents: list[VectorDocument]) -> None:
         if not documents:
@@ -70,10 +75,28 @@ class InMemoryVectorStore:
         vectors = self.embedding_client.embed_texts([document.text_chunk for document in documents])
         self.story_documents[story_id].extend(documents)
         self.story_vectors[story_id].extend(vectors)
+        for document, vector in zip(documents, vectors, strict=False):
+            cid = str(document.metadata.get("chunk_id") or "").strip()
+            if cid:
+                self.chunk_vector_by_story_chunk[(story_id, cid)] = vector
 
     def remove_story(self, story_id: str) -> None:
         self.story_documents.pop(story_id, None)
         self.story_vectors.pop(story_id, None)
+        drop = [k for k in list(self.chunk_vector_by_story_chunk.keys()) if k[0] == story_id]
+        for k in drop:
+            self.chunk_vector_by_story_chunk.pop(k, None)
+
+    def retrieve_vectors_by_chunk_ids(self, story_id: str, chunk_ids: list[str]) -> dict[str, list[float]]:
+        out: dict[str, list[float]] = {}
+        for raw in chunk_ids:
+            cid = str(raw or "").strip()
+            if not cid:
+                continue
+            vec = self.chunk_vector_by_story_chunk.get((story_id, cid))
+            if vec is not None:
+                out[cid] = vec
+        return out
 
     def search(self, story_id: str, query: str, limit: int = 5) -> list[VectorDocument]:
         documents = self.story_documents.get(story_id, [])
@@ -258,6 +281,53 @@ class QdrantVectorStore:
             payload.pop("story_id", None)
             documents.append(VectorDocument(text_chunk=text_chunk, metadata=payload))
         return documents
+
+    def retrieve_vectors_by_chunk_ids(self, story_id: str, chunk_ids: list[str]) -> dict[str, list[float]]:
+        uniq = list(dict.fromkeys(str(x).strip() for x in chunk_ids if str(x).strip()))
+        if not uniq:
+            return {}
+        flt = models.Filter(
+            must=[
+                models.FieldCondition(key="story_id", match=models.MatchValue(value=story_id)),
+                models.FieldCondition(key="chunk_id", match=models.MatchAny(any=uniq)),
+            ]
+        )
+
+        def _coerce_vec(raw: object) -> list[float] | None:
+            if isinstance(raw, list) and raw and isinstance(raw[0], (int, float)):
+                return [float(x) for x in raw]
+            if isinstance(raw, dict):
+                for _k, v in raw.items():
+                    if isinstance(v, list) and v and isinstance(v[0], (int, float)):
+                        return [float(x) for x in v]
+            return None
+
+        found: dict[str, list[float]] = {}
+        offset = None
+        while True:
+            records, offset = self.client.scroll(
+                collection_name=self.collection_name,
+                scroll_filter=flt,
+                limit=min(256, max(len(uniq), 1) * 2),
+                offset=offset,
+                with_vectors=True,
+                with_payload=True,
+            )
+            if not records:
+                break
+            for rec in records:
+                payload = dict(rec.payload or {})
+                cid = str(payload.get("chunk_id") or "").strip()
+                if not cid or cid not in uniq or cid in found:
+                    continue
+                vec = _coerce_vec(getattr(rec, "vector", None))
+                if vec is not None:
+                    found[cid] = vec
+            if offset is None:
+                break
+            if len(found) >= len(uniq):
+                break
+        return found
 
     def remove_story(self, story_id: str) -> None:
         query_filter = models.Filter(

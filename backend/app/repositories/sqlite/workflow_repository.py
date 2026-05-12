@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, UTC
+from typing import Any
 from uuid import uuid4
 
 from app.domain.schema import StateTransactionRecord, StateTransactionStatus, WorkflowRun, WorkflowStatus, WorkflowStepLog
@@ -98,6 +99,60 @@ class WorkflowRepository:
         if not row:
             raise KeyError(f"Workflow run not found: {run_id}")
         return self.db.loads(row["current_state_json"])
+
+    def list_run_summaries_for_story(
+        self,
+        story_id: str,
+        *,
+        chapter_id: int | None = None,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Lightweight run listing for metrics (no current_state_json). Newest first."""
+        lim = max(1, min(int(limit), 500))
+        off = max(0, int(offset))
+        with self.db.connection() as conn:
+            if chapter_id is None:
+                rows = conn.execute(
+                    """
+                    SELECT run_id, story_id, chapter_id, status, current_agent, requires_hitl,
+                           hitl_reason, hitl_decision_mode, created_at, updated_at
+                    FROM workflow_runs
+                    WHERE story_id = ?
+                    ORDER BY updated_at DESC, run_id DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    (story_id, lim, off),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT run_id, story_id, chapter_id, status, current_agent, requires_hitl,
+                           hitl_reason, hitl_decision_mode, created_at, updated_at
+                    FROM workflow_runs
+                    WHERE story_id = ? AND chapter_id = ?
+                    ORDER BY updated_at DESC, run_id DESC
+                    LIMIT ? OFFSET ?
+                    """,
+                    (story_id, chapter_id, lim, off),
+                ).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            out.append(
+                {
+                    "run_id": row["run_id"],
+                    "story_id": row["story_id"],
+                    "chapter_id": int(row["chapter_id"]),
+                    "status": row["status"],
+                    "current_agent": row["current_agent"],
+                    "requires_hitl": bool(row["requires_hitl"]),
+                    "hitl_reason": row["hitl_reason"],
+                    "hitl_decision_mode": row["hitl_decision_mode"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                }
+            )
+        return out
 
     def append_step(self, log: WorkflowStepLog) -> None:
         with self.db.connection() as conn:

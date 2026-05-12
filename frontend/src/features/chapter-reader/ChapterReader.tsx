@@ -21,6 +21,18 @@ type Props = {
   onSelectChapter: (chapterId: number) => Promise<void>;
   onDownloadChapter: (chapterId: number) => Promise<void>;
   rightRail?: ReactNode;
+  /**
+   * When provided, replaces the default article body (drafted chapter content). Used by the
+   * post-reader human-review HITL to render an editable review surface within the reading area.
+   */
+  articleOverride?: ReactNode;
+  /**
+   * Disable the chapter-list buttons (left rail) so the user cannot navigate away mid-review.
+   * Pairs with `articleOverride` for the post-reader chapter-review gate.
+   */
+  disableChapterSelection?: boolean;
+  /** Title shown above the article when `articleOverride` is rendered. */
+  reviewModeTitle?: string;
 };
 
 export function ChapterReader({
@@ -33,6 +45,9 @@ export function ChapterReader({
   onSelectChapter,
   onDownloadChapter,
   rightRail,
+  articleOverride,
+  disableChapterSelection,
+  reviewModeTitle,
 }: Props) {
   const { locale } = useI18n();
   const content = chapter?.content ?? "";
@@ -68,8 +83,9 @@ export function ChapterReader({
                       key={item.chapter_key}
                       type="button"
                       onClick={() => onSelectChapter(item.chapter_id)}
-                      disabled={busy}
-                      className={`w-full rounded-lg px-3 py-2 text-left font-label text-sm transition-colors ${
+                      disabled={busy || disableChapterSelection}
+                      title={disableChapterSelection ? reviewModeTitle ?? "" : undefined}
+                      className={`w-full rounded-lg px-3 py-2 text-left font-label text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
                         item.chapter_id === currentChapterId
                           ? "bg-primary/20 text-primary"
                           : "bg-surface-container-highest/60 text-on-surface hover:bg-surface-container-high"
@@ -109,7 +125,9 @@ export function ChapterReader({
                   </div>
                 ) : null}
               </header>
-              {chapter ? (
+              {articleOverride ? (
+                articleOverride
+              ) : chapter ? (
                 <article className="prose-manuscript font-body text-lg leading-[1.8] text-on-surface/90 first-letter:float-left first-letter:mr-3 first-letter:font-bold first-letter:text-7xl first-letter:text-primary">
                   <pre className="whitespace-pre-wrap font-body text-lg leading-[1.8]">{chapter.content}</pre>
                 </article>

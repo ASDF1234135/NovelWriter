@@ -18,6 +18,7 @@ from app.domain.schema import (
 )
 from app.core.config import get_settings
 from app.domain.state import AgentWorkflowState, apply_length_bounds_to_state
+from app.domain.story_runtime import parse_story_runtime
 from app.repositories.sqlite.workflow_repository import WorkflowRepository
 from app.services.workflow.context import WorkflowContext
 from app.services.workflow.nodes.author import run_author
@@ -43,8 +44,11 @@ from app.services.workflow.chunking import build_chapter_chunks, extract_prev_ta
 
 LLM_NODE_TIMEOUT_MS = 10 * 60 * 1000
 LOGIC_NODE_TIMEOUT_MS = 3 * 60 * 1000
-# extraction_gate runs multi-phase LLM extraction; allow longer than default logic nodes.
-EXTRACTION_GATE_TIMEOUT_MS = 6 * 60 * 1000
+# extraction_gate runs multi-phase LLM extraction; base budget covers entity/memory/relation
+# extractors plus the first validation pass. Each potential alignment repair round adds
+# extra headroom (see _extraction_gate_timeout_ms below).
+EXTRACTION_GATE_BASE_TIMEOUT_MS = 6 * 60 * 1000
+EXTRACTION_GATE_PER_REPAIR_BUDGET_MS = 2 * 60 * 1000
 
 
 class WorkflowNodeTimeoutError(TimeoutError):
@@ -54,11 +58,22 @@ class WorkflowNodeTimeoutError(TimeoutError):
         super().__init__(f"Node '{node_name}' exceeded timeout {timeout_ms}ms")
 
 
+def _extraction_gate_timeout_ms() -> int:
+    """Base extraction budget + 2 minutes per potential alignment repair round.
+
+    Repairs are bounded by ``settings.extraction_relation_align_retry_max`` (default 2,
+    max 4). With defaults this yields 10 min; the absolute cap is 14 min.
+    """
+    settings = get_settings()
+    max_repairs = max(0, int(getattr(settings, "extraction_relation_align_retry_max", 0) or 0))
+    return EXTRACTION_GATE_BASE_TIMEOUT_MS + max_repairs * EXTRACTION_GATE_PER_REPAIR_BUDGET_MS
+
+
 def _timeout_ms_for_node(node_name: str) -> int:
     if node_name in {"director", "planner", "author", "reader"}:
         return LLM_NODE_TIMEOUT_MS
     if node_name == "extraction_gate":
-        return EXTRACTION_GATE_TIMEOUT_MS
+        return _extraction_gate_timeout_ms()
     return LOGIC_NODE_TIMEOUT_MS
 
 
@@ -642,15 +657,18 @@ def build_chapter_graph(context: WorkflowContext):
             best_score = output["literary_score"]
             best_content = state["current_draft"]
         if output["is_approved"]:
-            # Keep external route name stable for callers/tests, but internally we route to chunker.
-            route = "extraction_gate"
+            # Route to the chapter_review_gate; gate decides pass-through vs HITL.
+            route = "chapter_review_gate"
             current_draft = state["current_draft"]
+            next_resume = "chapter_review_gate"
         elif draft_loop_retry_count > state.get("draft_loop_retry_limit", 3):
-            route = "extraction_gate"
+            route = "chapter_review_gate"
             current_draft = best_content or state["current_draft"]
+            next_resume = "chapter_review_gate"
         else:
             route = "author"
             current_draft = state["current_draft"]
+            next_resume = "author"
         reader_feedback = list(state["reader_feedback"])
         if not output["is_approved"]:
             reader_feedback.append(
@@ -671,7 +689,7 @@ def build_chapter_graph(context: WorkflowContext):
             "last_reader_score": output["literary_score"],
             "last_agent": "reader",
             "reader_route": route,
-            "resume_from": "author" if route == "author" else "chunker",
+            "resume_from": next_resume,
         }
         recorder.record_and_update_run(
             "reader",
@@ -680,6 +698,51 @@ def build_chapter_graph(context: WorkflowContext):
             {**state, **merged},
             latency_ms=elapsed_ms(start),
             route_decision=route,
+        )
+        return merged
+
+    def chapter_review_gate_node(state: AgentWorkflowState) -> dict:
+        """Pause after reader approval when require_chapter_review flag is set.
+
+        Pass-through when the flag is false; otherwise emit a HITL with three options:
+        APPROVE_DRAFT, RERUN_KEEP_DIRECTOR, ABANDON_CHAPTER.
+        """
+        start = timed()
+        require_review = bool(state.get("require_chapter_review") or False)
+        if not require_review:
+            merged: dict[str, Any] = {
+                "last_agent": "chapter_review_gate",
+                "resume_from": "chunker",
+            }
+            recorder.record_and_update_run(
+                "chapter_review_gate",
+                dict(state),
+                merged,
+                {**state, **merged},
+                latency_ms=elapsed_ms(start),
+                route_decision="chunker",
+            )
+            return merged
+        merged = {
+            "requires_hitl": True,
+            "hitl_reason": HitlReason.CHAPTER_DRAFT_REVIEW,
+            "hitl_decision_mode": "MANUAL_EDIT",
+            "workflow_status": WorkflowStatus.WAITING_HITL.value,
+            "pending_hitl_options": [
+                {"id": "APPROVE_DRAFT", "label": "通過（可修改）"},
+                {"id": "RERUN_KEEP_DIRECTOR", "label": "保留劇情節點重跑"},
+                {"id": "ABANDON_CHAPTER", "label": "放棄此次生成"},
+            ],
+            "resume_from": "chunker",
+            "last_agent": "chapter_review_gate",
+        }
+        recorder.record_and_update_run(
+            "chapter_review_gate",
+            dict(state),
+            merged,
+            {**state, **merged},
+            latency_ms=elapsed_ms(start),
+            route_decision="hitl",
         )
         return merged
 
@@ -975,40 +1038,35 @@ def build_chapter_graph(context: WorkflowContext):
                 status="completed",
             )
             pending_ext = state.get("pending_chapter_extraction") or {}
-            # Persist anchor DAG state inside bible_json (runtime progression state).
             story = context.story_repository.get_story(state["story_id"]) or {}
-            bible = dict(story.get("bible_json") or {})
-            bible["resolved_anchors"] = list(state.get("resolved_anchors") or [])
-            bible["anchor_candidates"] = list(state.get("anchor_candidates") or [])
-            context.story_repository.update_story_bible_json(state["story_id"], bible)
+            rt = dict(parse_story_runtime(story.get("story_runtime_json")))
+            rt["resolved_anchors"] = list(state.get("resolved_anchors") or [])
+            rt["anchor_candidates"] = list(state.get("anchor_candidates") or [])
+            lore = list(state.get("lore_mysteries_progression") or [])
+            narrative = str(state.get("narrative_script") or "")
+            mentions_memory = ("記憶" in narrative) or ("memory" in narrative.lower())
+            if lore and mentions_memory:
+                for item in lore:
+                    if not isinstance(item, dict):
+                        continue
+                    pending_stages = list(item.get("pending_stages") or [])
+                    if not pending_stages:
+                        continue
+                    stage = pending_stages.pop(0)
+                    revealed = list(item.get("revealed_stages") or [])
+                    if isinstance(stage, dict):
+                        stage["chapter_revealed"] = int(state["chapter_id"])
+                        revealed.append(stage)
+                    item["revealed_stages"] = revealed
+                    item["pending_stages"] = pending_stages
+                    break
+            rt["lore_mysteries_progression"] = lore
+            context.story_repository.update_story_runtime_json(state["story_id"], rt)
             context.story_repository.update_story_macro_topology(
                 state["story_id"],
                 storylines=list(story.get("storylines_json") or []),
                 anchor_nodes=list(state.get("anchor_nodes") or story.get("anchor_nodes_json") or []),
             )
-            lore = list(state.get("lore_mysteries_progression") or [])
-            if lore:
-                narrative = str(state.get("narrative_script") or "")
-                mentions_memory = ("記憶" in narrative) or ("memory" in narrative.lower())
-                if mentions_memory:
-                    for item in lore:
-                        if not isinstance(item, dict):
-                            continue
-                        pending_stages = list(item.get("pending_stages") or [])
-                        if not pending_stages:
-                            continue
-                        stage = pending_stages.pop(0)
-                        revealed = list(item.get("revealed_stages") or [])
-                        if isinstance(stage, dict):
-                            stage["chapter_revealed"] = int(state["chapter_id"])
-                            revealed.append(stage)
-                        item["revealed_stages"] = revealed
-                        item["pending_stages"] = pending_stages
-                        break
-                story = context.story_repository.get_story(state["story_id"]) or {}
-                bible = dict(story.get("bible_json") or {})
-                bible["lore_mysteries_progression"] = lore
-                context.story_repository.update_story_bible_json(state["story_id"], bible)
             for raw in list(state.get("pending_cast_updates") or []):
                 if not isinstance(raw, dict):
                     continue
@@ -1073,6 +1131,9 @@ def build_chapter_graph(context: WorkflowContext):
     def route_reader(state: AgentWorkflowState) -> str:
         return state["reader_route"]
 
+    def route_chapter_review_gate(state: AgentWorkflowState) -> str:
+        return "hitl" if state.get("requires_hitl") else "chunker"
+
     def route_extraction_gate(state: AgentWorkflowState) -> str:
         r = str(state.get("extraction_route") or "")
         if r == "author":
@@ -1121,6 +1182,7 @@ def build_chapter_graph(context: WorkflowContext):
     graph.add_node("author", _timeout_node("author", author_node))
     graph.add_node("draft_supervisor", _timeout_node("draft_supervisor", draft_supervisor_node))
     graph.add_node("reader", _timeout_node("reader", reader_node))
+    graph.add_node("chapter_review_gate", _timeout_node("chapter_review_gate", chapter_review_gate_node))
     graph.add_node("chunker", _timeout_node("chunker", chunker_node))
     graph.add_node("vectorize_chunks", _timeout_node("vectorize_chunks", vectorize_chunks_node))
     graph.add_node("extraction_gate", _timeout_node("extraction_gate", extraction_gate_node))
@@ -1144,6 +1206,9 @@ def build_chapter_graph(context: WorkflowContext):
             "graph_rag": "graph_rag",
             "draft_supervisor": "draft_supervisor",
             "reader": "reader",
+            "chapter_review_gate": "chapter_review_gate",
+            "chunker": "chunker",
+            "vectorize_chunks": "vectorize_chunks",
             "profile_expander": "profile_expander",
             "state_updater": "state_updater",
             "commit_to_databases": "commit_to_databases",
@@ -1180,7 +1245,12 @@ def build_chapter_graph(context: WorkflowContext):
     graph.add_conditional_edges(
         "reader",
         route_reader,
-        {"author": "author", "extraction_gate": "chunker"},
+        {"author": "author", "chapter_review_gate": "chapter_review_gate"},
+    )
+    graph.add_conditional_edges(
+        "chapter_review_gate",
+        route_chapter_review_gate,
+        {"chunker": "chunker", "hitl": "hitl"},
     )
     graph.add_edge("chunker", "vectorize_chunks")
     graph.add_edge("vectorize_chunks", "extraction_gate")

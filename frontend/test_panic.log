@@ -1,0 +1,10 @@
+﻿
+ RUN  v2.1.9 C:/myProject/NovelBuilder_v2/frontend
+
+ ??src/features/hitl-panel/HitlPanel.actions.test.tsx > HitlPanel actions > panic button sends ABORT_AND_RESTART decision
+
+ Test Files  1 passed (1)
+      Tests  1 passed | 3 skipped (4)
+   Start at  23:36:31
+   Duration  3.08s (transform 545ms, setup 227ms, collect 1.06s, tests 181ms, environment 1.16s, prepare 134ms)
+

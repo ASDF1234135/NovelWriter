@@ -88,7 +88,12 @@ def run_state_updater(state: dict, context: WorkflowContext) -> dict:
     }
     new_ids: set[str] = set()
     mutations: list[NodeMutation | EdgeMutation] = []
-    resolved_entities, resolved_name_index = _resolve_extracted_entities(extracted.entities, existing_nodes_by_id)
+    resolved_entities, resolved_name_index, extraction_node_id_remap = _resolve_extracted_entities(
+        extracted.entities, existing_nodes_by_id
+    )
+    relations_resolved = _rewrite_relation_endpoints_after_entity_resolve(
+        list(extracted.relations), extraction_node_id_remap
+    )
     node_types = {node_id: node.node_type for node_id, node in existing_nodes_by_id.items()}
     node_types.update({node_id: resolved["node_type"] for node_id, resolved in resolved_entities.items()})
     extracted_event_node_ids = [nid for nid, r in resolved_entities.items() if r["node_type"] == NodeType.EVENT]
@@ -126,7 +131,7 @@ def run_state_updater(state: dict, context: WorkflowContext) -> dict:
         )
 
     known_ids = existing_ids | new_ids | required_reference_ids
-    for relation in extracted.relations:
+    for relation in relations_resolved:
         edge = _build_relation_mutation(
             relation,
             resolved_name_index,
@@ -183,10 +188,40 @@ def run_state_updater(state: dict, context: WorkflowContext) -> dict:
     return output.model_dump(mode="json")
 
 
+def _rewrite_relation_endpoints_after_entity_resolve(
+    relations: list[ExtractedRelation],
+    extraction_node_id_remap: dict[str, str],
+) -> list[ExtractedRelation]:
+    """Align relation source/target node_ids with IDs chosen in _resolve_extracted_entities (e.g. slug -> cast)."""
+    if not extraction_node_id_remap:
+        return list(relations)
+
+    def resolve_endpoint(node_id: str) -> str:
+        raw = (node_id or "").strip()
+        if not raw:
+            return node_id
+        y = raw
+        visited: set[str] = set()
+        while y in extraction_node_id_remap and y not in visited:
+            visited.add(y)
+            y = extraction_node_id_remap[y]
+        return y
+
+    out: list[ExtractedRelation] = []
+    for rel in relations:
+        r = rel.model_copy(deep=True)
+        if r.source_node_id:
+            r.source_node_id = resolve_endpoint(r.source_node_id)
+        if r.target_node_id:
+            r.target_node_id = resolve_endpoint(r.target_node_id)
+        out.append(r)
+    return out
+
+
 def _resolve_extracted_entities(
     entities: list[ExtractedEntity],
     existing_nodes_by_id: dict[str, GraphNode],
-) -> tuple[dict[str, dict], dict[str, str]]:
+) -> tuple[dict[str, dict], dict[str, str], dict[str, str]]:
     existing_name_index: dict[str, GraphNode] = {}
     for node in existing_nodes_by_id.values():
         existing_name_index[node.canonical_name.casefold()] = node
@@ -194,6 +229,7 @@ def _resolve_extracted_entities(
             existing_name_index[str(alias).casefold()] = node
 
     resolved_entities: dict[str, dict] = {}
+    extraction_node_id_remap: dict[str, str] = {}
     resolved_name_index: dict[str, str] = {
         name: node.node_id
         for name, node in existing_name_index.items()
@@ -212,6 +248,13 @@ def _resolve_extracted_entities(
                     break
 
         node_id = existing_node.node_id if existing_node is not None else (entity.node_id or stable_entity_id(entity.node_type, entity.canonical_name))
+        raw_extrinsic_id = (entity.node_id or "").strip()
+        if raw_extrinsic_id and raw_extrinsic_id != node_id:
+            extraction_node_id_remap[raw_extrinsic_id] = node_id
+        elif existing_node is not None and not raw_extrinsic_id:
+            stable_key = stable_entity_id(entity.node_type, entity.canonical_name)
+            if stable_key != node_id:
+                extraction_node_id_remap[stable_key] = node_id
         node_type = existing_node.node_type if existing_node is not None else entity.node_type
         properties = _build_node_properties(entity, node_type)
         if existing_node is not None:
@@ -227,7 +270,7 @@ def _resolve_extracted_entities(
         resolved_name_index[entity.canonical_name.casefold()] = node_id
         for alias in entity.aliases:
             resolved_name_index[alias.casefold()] = node_id
-    return resolved_entities, resolved_name_index
+    return resolved_entities, resolved_name_index, extraction_node_id_remap
 
 
 def _build_node_properties(entity: ExtractedEntity, node_type: NodeType) -> dict:

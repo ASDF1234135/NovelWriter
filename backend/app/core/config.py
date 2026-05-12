@@ -99,6 +99,13 @@ class Settings(BaseSettings):
     # Relation extractor: chunk canonical_entities into batches (smaller N reduces provider timeouts).
     # 0 = legacy single call with all entities in one prompt.
     extraction_relation_entity_batch_size: int = 12
+    # Phase 2 bridge: 1-hop EVENT candidates via Phase 1 hubs, epoch filter, vector-store sim + overlap, top-K.
+    extraction_phase2_bridge_top_k: int = Field(default=0, ge=0, le=64)
+    extraction_phase2_bridge_pool_cap: int = Field(default=128, ge=1, le=2000)
+    extraction_phase2_bridge_sim_weight: float = Field(default=0.6, ge=0.0, le=1.0)
+    extraction_phase2_bridge_overlap_weight: float = Field(default=0.4, ge=0.0, le=1.0)
+    # Relation validation: LLM repair rounds when endpoints cannot be resolved (id + name index fail).
+    extraction_relation_align_retry_max: int = Field(default=2, ge=0, le=4)
     # Second-pass Author call: extraction surface hints (lightweight model recommended).
     author_hints_llm_model: str = ""
     author_hints_temperature: float = 0.1

@@ -20,6 +20,8 @@ export type StoryInput = {
   plan_retry_limit: number;
   draft_loop_retry_limit: number;
   output_language?: StoryOutputLanguage;
+  /** Story-level default for pausing after reader for human draft review. */
+  require_chapter_review?: boolean;
 };
 
 export type ImportMergeMode = "replace" | "merge";
@@ -40,6 +42,7 @@ export type StoryPatch = {
   macro_author_notes?: string;
   cast_seed?: StoryCastSeedEntry[];
   output_language?: StoryOutputLanguage;
+  require_chapter_review?: boolean | null;
 };
 
 export type VolumePlan = {
@@ -265,6 +268,7 @@ export type HitlContextPayloadType =
   | "draft_loop"
   | "context_prune"
   | "output_language"
+  | "chapter_review"
   | "generic";
 
 export type HitlContextMetadata = {
@@ -273,7 +277,17 @@ export type HitlContextMetadata = {
   graph_rag_context_tier?: number | null;
   expected_output_language?: string | null;
   language_detection_summary?: string | null;
+  reader_score?: number | null;
 };
+
+/** Stable WorkflowStatus union mirroring backend WorkflowStatus enum. */
+export type WorkflowStatus =
+  | "IDLE"
+  | "RUNNING"
+  | "WAITING_HITL"
+  | "COMPLETED"
+  | "FAILED"
+  | "CANCELLED";
 
 export type HitlContextPayload = {
   primary_issue: string;
@@ -389,4 +403,61 @@ export type ChapterContent = {
   title: string;
   content: string;
   status: string;
+};
+
+/** Matches backend workflow metrics API (snake_case JSON). */
+export type WorkflowMetricsRollup = {
+  runs_included: number;
+  timeouts_count: number;
+  failed_count: number;
+  completed_count: number;
+  waiting_hitl_count: number;
+  running_count: number;
+  sum_wall_clock_ms: number;
+  sum_steps_latency_ms: number;
+  sum_plan_retry_count: number;
+  sum_draft_retry_count: number;
+  sum_reader_retry_count: number;
+  sum_hitl_actions: number;
+  sum_align_retry_attempts: number;
+  sum_extraction_gate_invocations: number;
+  avg_entity_kept_ratio: number | null;
+  avg_relation_kept_ratio: number | null;
+};
+
+export type WorkflowMetricsSingleRun = {
+  run_id: string;
+  story_id: string;
+  chapter_id: number;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  wall_clock_ms: number | null;
+  steps_sum_latency_ms: number;
+  plan_retry_count: number;
+  draft_retry_count: number;
+  reader_retry_count: number;
+  draft_loop_retry_count: number;
+  plan_supervisor_reroute_planner_steps: number;
+  author_step_count: number;
+  extraction_gate_author_routes: number;
+  extraction_gate_hitl_routes: number;
+  failure_type: string;
+  timeout_bucket: string;
+  workflow_status: string;
+  hitl_actions_total: number;
+  hitl_abort_restart_count: number;
+  hitl_action_counts_by_type: Record<string, number>;
+  last_chapter_extraction_metrics: Record<string, unknown>;
+  extraction_kept_ratios: Record<string, number | null>;
+  extraction_from_steps: Record<string, unknown>;
+  agent_step_stats: Record<string, Record<string, unknown>>;
+};
+
+export type WorkflowMetricsResponse = {
+  story_id: string;
+  scope: string;
+  chapter_id: number | null;
+  rollup: WorkflowMetricsRollup;
+  runs: WorkflowMetricsSingleRun[];
 };
