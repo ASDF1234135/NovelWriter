@@ -40,6 +40,8 @@ type Props = {
   setAiFreedomLevel: (next: AiFreedomLevel) => void;
   /** Called when user clicks the primary Run button; parent decides whether to open a confirm modal first. */
   onRequestRunChapter: () => void;
+  /** Workflow stage track + quick nav; rendered in the same footer block as the run button. */
+  workflowProgressSlot?: ReactNode;
 };
 
 /**
@@ -70,6 +72,7 @@ export function ChapterRunComposer({
   aiFreedomLevel,
   setAiFreedomLevel,
   onRequestRunChapter,
+  workflowProgressSlot,
 }: Props) {
   const { t } = useI18n();
   const fallbackHardRulesRef = useRef<HTMLTextAreaElement | null>(null);
@@ -296,24 +299,31 @@ export function ChapterRunComposer({
         </div>
       </section>
 
-      <div className="sticky bottom-3 z-10 flex flex-wrap items-center justify-end gap-3 rounded-2xl border border-outline-variant/25 bg-surface-container/95 px-4 py-3 shadow-[0_18px_44px_rgba(0,0,0,0.45)] backdrop-blur-md">
-        {chapterAlreadyCompleted ? (
-          <span className="rounded-full border border-tertiary/30 bg-tertiary/10 px-3 py-1 font-label text-[10px] font-bold uppercase tracking-wider text-tertiary">
-            {t("app.write.chapterCompleteBadge", undefined, { n: nextChapterId })}
-          </span>
+      <footer className="sticky bottom-3 z-10 overflow-hidden rounded-2xl border border-outline-variant/25 bg-surface-container/95 shadow-[0_18px_44px_rgba(0,0,0,0.45)] backdrop-blur-md">
+        {workflowProgressSlot ? (
+          <div className="border-b border-outline-variant/15 bg-surface-container-low/50 px-4 py-3 md:px-5">
+            {workflowProgressSlot}
+          </div>
         ) : null}
-        <button
-          type="button"
-          className="btn-primary-gradient h-11 min-w-[10rem] px-6"
-          onClick={onRequestRunChapter}
-          disabled={formDisabled}
-        >
-          <span className="material-symbols-outlined text-base" aria-hidden>
-            auto_awesome
-          </span>
-          {t("app.write.runChapter")}
-        </button>
-      </div>
+        <div className="flex flex-wrap items-center justify-end gap-3 px-4 py-3 md:px-5">
+          {chapterAlreadyCompleted ? (
+            <span className="mr-auto rounded-full border border-tertiary/30 bg-tertiary/10 px-3 py-1 font-label text-[10px] font-bold uppercase tracking-wider text-tertiary">
+              {t("app.write.chapterCompleteBadge", undefined, { n: nextChapterId })}
+            </span>
+          ) : null}
+          <button
+            type="button"
+            className="btn-primary-gradient h-11 min-w-[10rem] px-6"
+            onClick={onRequestRunChapter}
+            disabled={formDisabled}
+          >
+            <span className="material-symbols-outlined text-base" aria-hidden>
+              auto_awesome
+            </span>
+            {t("app.write.runChapter")}
+          </button>
+        </div>
+      </footer>
     </div>
   );
 }

@@ -36,6 +36,38 @@ export function idUnderStoryPrefix(storyId: string, rawId: string): string {
   return s.startsWith(`${storyId}_`) ? s : `${storyId}_${s}`;
 }
 
+type AnchorNodePut = NonNullable<MacroPlanPutBody["anchor_nodes"]>[number];
+
+/** Post-compile / portable export: roots UNLOCKED, dependents LOCKED; never emit RESOLVED. */
+export function resetAnchorNodesForProjectExport(nodes: AnchorNodePut[]): AnchorNodePut[] {
+  const initial: AnchorNodePut[] = nodes.map((n) => {
+    const deps = [...(n.depends_on ?? [])].filter((d) => String(d).trim());
+    return {
+      ...n,
+      status: deps.length === 0 ? ("UNLOCKED" as const) : ("LOCKED" as const),
+    };
+  });
+  const byId = new Map(initial.map((n) => [String(n.id), n]));
+  return initial.map((n) => {
+    const lockedParent = (n.depends_on ?? []).some((pid) => {
+      const p = byId.get(String(pid));
+      return p && String(p.status ?? "LOCKED").toUpperCase() === "LOCKED";
+    });
+    if (lockedParent && String(n.status ?? "LOCKED").toUpperCase() === "UNLOCKED") {
+      return { ...n, status: "LOCKED" as const };
+    }
+    return n;
+  });
+}
+
+export function buildMacroPutBodyForExport(data: MacroCompileData): MacroPlanPutBody {
+  const body = buildMacroPutBody(data);
+  if (body.anchor_nodes?.length) {
+    body.anchor_nodes = resetAnchorNodesForProjectExport(body.anchor_nodes);
+  }
+  return body;
+}
+
 export function buildMacroPutBody(data: MacroCompileData): MacroPlanPutBody {
   const derivedAnchorNodes =
     data.anchor_nodes && data.anchor_nodes.length > 0

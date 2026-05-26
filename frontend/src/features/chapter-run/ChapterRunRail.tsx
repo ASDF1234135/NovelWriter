@@ -16,7 +16,7 @@ type Props = {
 /**
  * Two-button reference launcher:
  * - “Story settings” opens a window with the world overview (read-only).
- * - “Plot DAG” opens a window with the anchor topology (read-only, with edit hint).
+ * - “Plot DAG” opens a window with the anchor topology (fullscreen + edit mode for changes).
  */
 export function ChapterRunRail({
   bibleSlot,
@@ -103,13 +103,6 @@ export function ChapterRunRail({
                 <div className="min-h-0 flex-1 overflow-y-auto p-4 md:p-6">
                   {windowOpen === "bible" ? bibleSlot : dagSlot}
                 </div>
-                {windowOpen === "dag" ? (
-                  <footer className="border-t border-outline-variant/10 px-5 py-3">
-                    <p className="font-body text-xs leading-relaxed text-on-surface-variant">
-                      {t("chapterRail.dagEditableHint")}
-                    </p>
-                  </footer>
-                ) : null}
               </div>
             </div>,
             dialogMount,

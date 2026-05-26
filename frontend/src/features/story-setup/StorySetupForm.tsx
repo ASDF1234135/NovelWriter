@@ -1,6 +1,6 @@
-import { type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
-import { ConfirmModal } from "../../components/ConfirmModal";
-import type { ImportMergeMode, StoryInput, StoryOutputLanguage } from "../../types";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import type { StoryInput, StoryOutputLanguage } from "../../types";
+import { ProjectBundleFileActions } from "./ProjectBundleFileActions";
 import { useI18n } from "../../i18n/useI18n";
 import {
   MAX_TOTAL_WORDS,
@@ -63,11 +63,13 @@ type Props = {
   /** True when creating a new story (show 建立故事); false when editing existing. */
   showCreateButton?: boolean;
   onExportProjectBundle?: () => void;
-  onImportProjectBundle?: (jsonText: string, mode: ImportMergeMode) => Promise<void>;
+  onImportProjectBundle?: (jsonText: string) => Promise<void>;
   /** Preview lines for import confirmation modal (paired with `onImportProjectBundle`). */
   getImportBundlePreview?: (jsonText: string) => { storyLine: string; macroLine: string };
   onBusy?: (busy: boolean) => void;
   onError?: (message: string) => void;
+  /** Shown inside the wizard when macro compile exists and no chapter is completed yet. */
+  compiledResultsSlot?: ReactNode;
 };
 
 type WizardState = {
@@ -79,7 +81,6 @@ type WizardState = {
   planRetryLimit: number;
   draftLoopRetryLimit: number;
   outputLanguage: StoryOutputLanguage;
-  requireChapterReview: boolean;
   parts: DecomposedNotes;
   /** True once the user has explicitly typed in the total words field; gates language-driven default resets. */
   wordsManual: boolean;
@@ -101,7 +102,6 @@ function hydrateFromStoryInput(input: StoryInput): WizardState {
     planRetryLimit: input.plan_retry_limit,
     draftLoopRetryLimit: input.draft_loop_retry_limit,
     outputLanguage: language,
-    requireChapterReview: Boolean(input.require_chapter_review),
     parts: ensureSubplotSeed(parts, resolveVolumeCount(branchOverride, input.target_total_words, language)),
     wordsManual: true,
   };
@@ -123,7 +123,6 @@ function buildStoryPayload(state: WizardState): StoryInput {
     macro_author_notes: composeNotes(state.parts, volumes),
     cast_seed: [],
     output_language: state.outputLanguage,
-    require_chapter_review: state.requireChapterReview,
   };
 }
 
@@ -180,7 +179,6 @@ function resolveSeedDefaults(locale: "zh-Hant" | "zh-Hans" | "en"): WizardState 
     planRetryLimit: 3,
     draftLoopRetryLimit: 3,
     outputLanguage,
-    requireChapterReview: false,
     parts: {
       world: "",
       characters: "",
@@ -208,19 +206,13 @@ export function StorySetupForm({
   getImportBundlePreview,
   onBusy,
   onError,
+  compiledResultsSlot,
 }: Props) {
   const { locale, t } = useI18n();
   const seedDefaults = useMemo(() => resolveSeedDefaults(locale), [locale]);
   const [state, setState] = useState<WizardState>(seedDefaults);
   const [phase, setPhase] = useState<PhaseIndex>(1);
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const importInputRef = useRef<HTMLInputElement | null>(null);
-  const [importModeOpen, setImportModeOpen] = useState(false);
-  const [importConfirmOpen, setImportConfirmOpen] = useState(false);
-  const importPendingTextRef = useRef<string | null>(null);
-  const [importPreview, setImportPreview] = useState<
-    { mode: ImportMergeMode; storyLine: string; macroLine: string } | null
-  >(null);
   // Set right before parent-initiated re-hydration to keep the user on phase 3
   // after the first "Create & generate" click (instead of bouncing back to 1).
   const justSubmittedRef = useRef(false);
@@ -274,59 +266,6 @@ export function StorySetupForm({
   async function handleCompileClick() {
     if (!onCompile || locked) return;
     await onCompile();
-  }
-
-  function cancelSetupImportFlow() {
-    importPendingTextRef.current = null;
-    setImportModeOpen(false);
-    setImportConfirmOpen(false);
-    setImportPreview(null);
-  }
-
-  function openSetupImportConfirm(mode: ImportMergeMode) {
-    const text = importPendingTextRef.current;
-    if (!text || !getImportBundlePreview) return;
-    try {
-      const { storyLine, macroLine } = getImportBundlePreview(text);
-      setImportPreview({ mode, storyLine, macroLine });
-      setImportModeOpen(false);
-      setImportConfirmOpen(true);
-    } catch (err) {
-      onError?.(err instanceof Error ? err.message : t("setup.importFailed"));
-      cancelSetupImportFlow();
-    }
-  }
-
-  async function handleImportProjectBundleFile(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (!file || !onImportProjectBundle || !getImportBundlePreview) return;
-    onError?.("");
-    try {
-      const text = await file.text();
-      importPendingTextRef.current = text;
-      setImportModeOpen(true);
-    } catch (err) {
-      onError?.(err instanceof Error ? err.message : t("setup.importFailed"));
-    }
-  }
-
-  async function confirmSetupImportProjectBundle() {
-    const text = importPendingTextRef.current;
-    const prev = importPreview;
-    if (!text || !prev || !onImportProjectBundle) return;
-    setImportConfirmOpen(false);
-    setImportPreview(null);
-    importPendingTextRef.current = null;
-    onBusy?.(true);
-    onError?.("");
-    try {
-      await onImportProjectBundle(text, prev.mode);
-    } catch (err) {
-      onError?.(err instanceof Error ? err.message : t("setup.importFailed"));
-    } finally {
-      onBusy?.(false);
-    }
   }
 
   function patchState<K extends keyof WizardState>(key: K, value: WizardState[K]) {
@@ -544,7 +483,6 @@ export function StorySetupForm({
               onVolumesCommit={handleVolumeCountCommit}
               onPlanRetryChange={(v) => patchState("planRetryLimit", v)}
               onDraftRetryChange={(v) => patchState("draftLoopRetryLimit", v)}
-              onRequireReviewChange={(v) => patchState("requireChapterReview", v)}
               onVolumeGoalChange={setVolumeGoal}
               onVolumeGoalsReset={() => patchVolumeGoals(() => [])}
               onSubplotAdd={addSubplotEntry}
@@ -555,6 +493,22 @@ export function StorySetupForm({
             />
           ) : null}
         </div>
+
+        {compiledResultsSlot ? (
+          <div className="setup-phase-enter border-t border-outline-variant/12 pt-6">
+            <div className="rounded-2xl border border-secondary/20 bg-gradient-to-br from-secondary/6 via-surface-container/40 to-surface-container-low/80 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] md:p-5">
+              <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+                <p className="font-label text-[10px] font-bold uppercase tracking-[0.28em] text-secondary">
+                  {t("app.setup.compiledResultsKicker")}
+                </p>
+                <span className="font-body text-[11px] italic text-on-surface-variant/80">
+                  {t("setup.compiledResultsInFormHint")}
+                </span>
+              </div>
+              {compiledResultsSlot}
+            </div>
+          </div>
+        ) : null}
 
         <WizardFooter
           phase={phase}
@@ -570,71 +524,14 @@ export function StorySetupForm({
         />
       </form>
 
-      <div className="relative mt-8 border-t border-outline-variant/10 pt-6">
-        <p className="font-label text-[10px] font-bold uppercase tracking-[0.25em] text-secondary">
-          {t("setup.projectFiles")}
-        </p>
-        <input
-          ref={importInputRef}
-          type="file"
-          accept="application/json,.json"
-          className="hidden"
-          onChange={(e) => void handleImportProjectBundleFile(e)}
-        />
-        <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-          <button
-            type="button"
-            className="btn-secondary flex-1 justify-center"
-            onClick={onExportProjectBundle}
-            disabled={!onExportProjectBundle}
-          >
-            {t("setup.exportProjectJson")}
-          </button>
-          <button
-            type="button"
-            className="btn-secondary flex-1 justify-center"
-            onClick={() => importInputRef.current?.click()}
-            disabled={!onImportProjectBundle || fieldDisabled}
-          >
-            {t("setup.importProjectJson")}
-          </button>
-        </div>
-      </div>
-
-      <ConfirmModal
-        mount={typeof document !== "undefined" ? document.body : null}
-        open={importModeOpen}
-        danger
-        title={t("app.confirm.importModeTitle")}
-        message={t("app.confirm.importModeBody")}
-        cancelLabel={t("common.cancel")}
-        secondaryLabel={t("app.confirm.importMerge")}
-        onSecondary={() => openSetupImportConfirm("merge")}
-        confirmLabel={t("app.confirm.importReplace")}
-        onConfirm={() => openSetupImportConfirm("replace")}
-        onCancel={cancelSetupImportFlow}
-      />
-      <ConfirmModal
-        mount={typeof document !== "undefined" ? document.body : null}
-        open={importConfirmOpen && importPreview !== null}
-        title={t("app.confirm.importProjectTitle")}
-        message={
-          importPreview
-            ? t("app.confirm.importProjectBody", undefined, {
-                modeLabel:
-                  importPreview.mode === "replace" ? t("app.confirm.importReplace") : t("app.confirm.importMerge"),
-                storyLine: importPreview.storyLine,
-                macroLine: importPreview.macroLine,
-              })
-            : ""
-        }
-        confirmLabel={t("app.confirm.importProjectConfirm")}
-        cancelLabel={t("common.cancel")}
-        onConfirm={() => void confirmSetupImportProjectBundle()}
-        onCancel={() => {
-          setImportConfirmOpen(false);
-          setImportModeOpen(true);
-        }}
+      <ProjectBundleFileActions
+        className="relative mt-8 border-t border-outline-variant/10 pt-6"
+        onExportProjectBundle={onExportProjectBundle}
+        onImportProjectBundle={onImportProjectBundle}
+        getImportBundlePreview={getImportBundlePreview}
+        disabled={fieldDisabled}
+        onBusy={onBusy}
+        onError={onError}
       />
     </section>
   );
@@ -895,7 +792,6 @@ type PhaseThreeProps = {
   onVolumesCommit: () => void;
   onPlanRetryChange: (v: number) => void;
   onDraftRetryChange: (v: number) => void;
-  onRequireReviewChange: (v: boolean) => void;
   onVolumeGoalChange: (volume: number, goal: string) => void;
   onVolumeGoalsReset: () => void;
   onSubplotAdd: (tier: SubplotTier) => void;
@@ -916,7 +812,6 @@ function PhaseThreePanel({
   onVolumesCommit,
   onPlanRetryChange,
   onDraftRetryChange,
-  onRequireReviewChange,
   onVolumeGoalChange,
   onVolumeGoalsReset,
   onSubplotAdd,
@@ -1027,7 +922,7 @@ function PhaseThreePanel({
           </span>
         </button>
         {advancedOpen ? (
-          <div className="setup-phase-enter mt-3 grid grid-cols-1 gap-4 md:grid-cols-3">
+          <div className="setup-phase-enter mt-3 grid grid-cols-1 gap-4 md:grid-cols-2">
             <div className="space-y-1">
               <label className="auteur-label">{t("setup.planRetryLimit")}</label>
               <input
@@ -1054,22 +949,6 @@ function PhaseThreePanel({
                 readOnly={locked}
               />
             </div>
-            <label className="flex items-start gap-3 rounded-xl border border-outline-variant/15 bg-surface-container-highest/40 p-3">
-              <input
-                type="checkbox"
-                className="mt-1 h-4 w-4 accent-primary"
-                checked={state.requireChapterReview}
-                onChange={(e) => onRequireReviewChange(e.target.checked)}
-                disabled={fieldDisabled}
-                aria-describedby="setup-require-review-hint"
-              />
-              <span className="flex min-w-0 flex-col">
-                <span className="auteur-label">{t("setup.requireChapterReview")}</span>
-                <span id="setup-require-review-hint" className="font-body text-xs text-on-surface-variant">
-                  {t("setup.requireChapterReviewHint")}
-                </span>
-              </span>
-            </label>
           </div>
         ) : null}
       </div>

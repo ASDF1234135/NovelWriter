@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 import type { MacroCompileData, MacroPlanPutBody } from "../types";
 import {
   buildMacroPutBody,
+  buildMacroPutBodyForExport,
   idUnderStoryPrefix,
   mergeMacroPlan,
   namespaceMacroPlanIdsForStory,
   parseMacroImportJson,
+  resetAnchorNodesForProjectExport,
 } from "./macroPlanBundle";
 
 const sampleMacroData: MacroCompileData = {
@@ -67,6 +69,48 @@ describe("macroPlanBundle", () => {
     expect(merged.storylines?.map((s) => s.id).sort()).toEqual(["keep", "new_sl", "story_x_main"].sort());
     const keep = merged.storylines?.find((s) => s.id === "keep");
     expect(keep?.title).toBe("B");
+  });
+
+  it("resetAnchorNodesForProjectExport clears RESOLVED and restores post-compile LOCKED/UNLOCKED", () => {
+    const nodes = [
+      {
+        id: "a1",
+        storyline_ids: [],
+        volume_id: "v1",
+        node_kind: "NORMAL" as const,
+        title: "root",
+        description: "d",
+        depends_on: [] as string[],
+        status: "RESOLVED" as const,
+      },
+      {
+        id: "a2",
+        storyline_ids: [],
+        volume_id: "v1",
+        node_kind: "NORMAL" as const,
+        title: "child",
+        description: "d2",
+        depends_on: ["a1"],
+        status: "RESOLVED" as const,
+      },
+    ];
+    const out = resetAnchorNodesForProjectExport(nodes);
+    expect(out.find((n) => n.id === "a1")?.status).toBe("UNLOCKED");
+    expect(out.find((n) => n.id === "a2")?.status).toBe("LOCKED");
+  });
+
+  it("buildMacroPutBodyForExport never emits RESOLVED statuses", () => {
+    const data: MacroCompileData = {
+      ...sampleMacroData,
+      anchor_nodes: [
+        {
+          ...sampleMacroData.anchor_nodes![0],
+          status: "RESOLVED",
+        },
+      ],
+    };
+    const body = buildMacroPutBodyForExport(data);
+    expect(body.anchor_nodes.every((n) => n.status !== "RESOLVED")).toBe(true);
   });
 
   it("namespaceMacroPlanIdsForStory remaps storyline, anchor, depends_on, involved_entities", () => {

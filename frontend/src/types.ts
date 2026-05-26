@@ -24,8 +24,6 @@ export type StoryInput = {
   require_chapter_review?: boolean;
 };
 
-export type ImportMergeMode = "replace" | "merge";
-
 export type StorySettingsExportPayload = {
   kind: "story_settings";
   version: 1;

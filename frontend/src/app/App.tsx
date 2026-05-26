@@ -60,7 +60,6 @@ import type {
   ChapterContent,
   ChapterSummary,
   GraphSnapshot,
-  ImportMergeMode,
   MacroCompileData,
   MacroPlanPutBody,
   StoryCastSeedEntry,
@@ -77,11 +76,14 @@ import { SetupAnchorDagDetailPanel } from "./views/SetupAnchorDagDetailPanel";
 import { AppShell, type AppView, type TaskFlowStageId } from "./AppShell";
 import {
   buildMacroPutBody,
+  buildMacroPutBodyForExport,
   idUnderStoryPrefix,
-  mergeMacroPlan,
   namespaceMacroPlanIdsForStory,
   parseMacroImportJson,
 } from "./macroPlanBundle";
+import { refreshStoriesListCache, upsertStoriesListCacheItem } from "../lib/storiesListCache";
+import { queryClient } from "./queryClient";
+import { ProjectBundleFileActions } from "../features/story-setup/ProjectBundleFileActions";
 import { localizeUserFacingError } from "../i18n/userFacingError";
 import { useI18n } from "../i18n/useI18n";
 import { downloadCompletedChaptersZip } from "../lib/chapterBulkDownload";
@@ -255,6 +257,14 @@ function parseStorySettingsImportJson(raw: string): StoryInput {
     });
   }
 
+  const branchRaw = candidate.branch_count_override;
+  const branch_count_override =
+    branchRaw === null || branchRaw === undefined
+      ? null
+      : Number.isFinite(Number(branchRaw))
+        ? Number(branchRaw)
+        : null;
+
   return {
     title,
     premise,
@@ -262,9 +272,11 @@ function parseStorySettingsImportJson(raw: string): StoryInput {
     macro_author_notes: String(candidate.macro_author_notes ?? ""),
     cast_seed,
     target_total_words,
+    branch_count_override,
     plan_retry_limit,
     draft_loop_retry_limit,
     output_language: normalizeOutputLanguage(candidate.output_language),
+    require_chapter_review: Boolean(candidate.require_chapter_review),
   };
 }
 
@@ -302,29 +314,36 @@ function parseProjectBundleJson(raw: string): { story?: StoryInput; macro_plan?:
   throw new Error("不支援的專案 JSON kind");
 }
 
-function mergeStorySettings(current: StoryInput, incoming: StoryInput): StoryInput {
-  const currentCast = current.cast_seed ?? [];
-  const incomingCast = incoming.cast_seed ?? [];
-  const seen = new Set(currentCast.map((x) => x.canonical_name.trim()));
-  const mergedCast = [...currentCast];
-  for (const entry of incomingCast) {
-    const key = entry.canonical_name.trim();
-    if (!key || seen.has(key)) continue;
-    mergedCast.push(entry);
-    seen.add(key);
-  }
+async function persistStoryInput(storyId: string, input: StoryInput): Promise<StoryDetailResponse> {
+  return patchStory(storyId, {
+    title: input.title,
+    premise: input.premise,
+    target_total_words: input.target_total_words,
+    branch_count_override: input.branch_count_override ?? null,
+    plan_retry_limit: input.plan_retry_limit,
+    draft_loop_retry_limit: input.draft_loop_retry_limit,
+    macro_author_notes: input.macro_author_notes ?? "",
+    cast_seed: input.cast_seed ?? [],
+    output_language: normalizeOutputLanguage(input.output_language),
+  });
+}
+
+function macroDataFromSnapshot(snap: Awaited<ReturnType<typeof fetchMacroSnapshot>>): MacroCompileData {
   return {
-    title: current.title.trim() ? current.title : incoming.title,
-    premise: current.premise.trim() ? current.premise : incoming.premise,
-    bible: Object.keys(current.bible ?? {}).length ? current.bible : incoming.bible,
-    macro_author_notes: current.macro_author_notes?.trim() ? current.macro_author_notes : incoming.macro_author_notes,
-    cast_seed: mergedCast,
-    target_total_words: current.target_total_words > 0 ? current.target_total_words : incoming.target_total_words,
-    plan_retry_limit: Number.isFinite(current.plan_retry_limit) ? current.plan_retry_limit : incoming.plan_retry_limit,
-    draft_loop_retry_limit: Number.isFinite(current.draft_loop_retry_limit)
-      ? current.draft_loop_retry_limit
-      : incoming.draft_loop_retry_limit,
-    output_language: normalizeOutputLanguage(current.output_language ?? incoming.output_language),
+    story_id: snap.story_id,
+    bible: snap.bible ?? {},
+    macro_author_notes: snap.macro_author_notes,
+    cast_seed: snap.cast_seed,
+    volumes: snap.volumes,
+    anchors: snap.anchors,
+    storylines: snap.storylines ?? [],
+    anchor_nodes: snap.anchor_nodes ?? [],
+    cast: snap.cast,
+    protagonist_character_id: snap.protagonist_character_id,
+    macro_topology_mode: snap.macro_topology_mode,
+    topology_locked: snap.topology_locked,
+    has_completed_chapter: snap.has_completed_chapter,
+    macro_edit_locked: snap.macro_edit_locked,
   };
 }
 
@@ -401,7 +420,8 @@ export default function App() {
   const [chapterOutline, setChapterOutline] = useState("");
   const [chapterHardRules, setChapterHardRules] = useState("");
   const [aiFreedomLevel, setAiFreedomLevel] = useState<AiFreedomLevel>("balanced");
-  const [requireChapterReview, setRequireChapterReview] = useState<boolean>(false);
+  /** Per-run chapter review choice; reset when the run-confirm modal opens. */
+  const [runConfirmReviewChoice, setRunConfirmReviewChoice] = useState<boolean | null>(null);
   const [selectedAnchorIds, setSelectedAnchorIds] = useState<string[]>([]);
   const [writingPreamble, setWritingPreamble] = useState<WritingPreambleResponse | null>(null);
   /** Toggles the full Bible editor drawer on the chapter-run page; rail keeps a read-only summary by default. */
@@ -531,10 +551,6 @@ export default function App() {
       navigate("/library", { replace: true });
     }
   }, [location.pathname, navigate]);
-
-  useEffect(() => {
-    setRequireChapterReview(Boolean(persistedStoryConfig?.require_chapter_review));
-  }, [persistedStoryConfig?.require_chapter_review, storyId]);
 
   useEffect(() => {
     const reason = String(workflow?.state?.hitl_reason ?? workflow?.run?.hitl_reason ?? "");
@@ -942,7 +958,7 @@ export default function App() {
       const snap = await fetchMacroSnapshot(selectedId);
       macroCompileWasRunning = (snap.macro_compile_status ?? "IDLE") === "RUNNING";
       setStoryId(selectedId);
-      setStoryTitle(title?.trim() || detail.title || "");
+      setStoryTitle(detail.title || title?.trim() || "");
       setMacroData({
         story_id: snap.story_id,
         bible: snap.bible ?? {},
@@ -1113,7 +1129,6 @@ export default function App() {
         macro_author_notes: storyConfigSnapshot.macro_author_notes ?? "",
         cast_seed: storyConfigSnapshot.cast_seed ?? [],
         output_language: normalizeOutputLanguage(storyConfigSnapshot.output_language),
-        require_chapter_review: Boolean(storyConfigSnapshot.require_chapter_review),
       });
       setPersistedStoryConfig(storyConfigSnapshot);
     } catch (err) {
@@ -1272,10 +1287,11 @@ export default function App() {
    */
   function openRunConfirm() {
     if (!storyId) return;
+    setRunConfirmReviewChoice(null);
     setRunConfirmOpen(true);
   }
 
-  async function handleRunChapter() {
+  async function handleRunChapter(reviewAfterDraft: boolean) {
     if (!storyId) return;
     setError("");
     setNotice("");
@@ -1292,7 +1308,7 @@ export default function App() {
         aiFreedomLevel,
         selectedAnchorIds: useManualAnchors ? selectedAnchorIds : undefined,
         nextAnchorIds: useManualAnchors ? autoNextAnchorIds : undefined,
-        requireChapterReview,
+        requireChapterReview: reviewAfterDraft,
       };
       const initial = await runChapter(storyId, nextGeneratableChapterId, {
         ...runOptions,
@@ -1340,7 +1356,7 @@ export default function App() {
       story: includeMacro ? { ...story, bible: {} } : story,
     };
     if (includeMacro && macroData) {
-      payload.macro_plan = buildMacroPutBody(macroData);
+      payload.macro_plan = buildMacroPutBodyForExport(macroData);
     }
     downloadJsonFile(`${storyId}-project.json`, payload);
   }
@@ -1364,92 +1380,46 @@ export default function App() {
     return { storyLine, macroLine };
   }
 
-  async function applyImportProjectBundle(jsonText: string, mode: ImportMergeMode) {
+  async function applyImportProjectBundle(jsonText: string) {
     if (!storyId) return;
     const { story: parsedStory, macro_plan: parsedMacroRaw } = parseProjectBundleJson(jsonText);
     const parsedMacro = parsedMacroRaw ? namespaceMacroPlanIdsForStory(parsedMacroRaw, storyId) : undefined;
-    const modeLabel = mode === "replace" ? t("app.confirm.importReplace") : t("app.confirm.importMerge");
 
+    let detail: StoryDetailResponse | null = null;
     if (parsedStory) {
-      const current =
-        storyConfigSnapshot ??
-        ({
-          title: "",
-          premise: "",
-          bible: {},
-          macro_author_notes: "",
-          cast_seed: [],
-          target_total_words: 100000,
-          plan_retry_limit: 3,
-          draft_loop_retry_limit: 3,
-          output_language: "zh-Hant",
-        } satisfies StoryInput);
-      const merged = mode === "replace" ? parsedStory : mergeStorySettings(current, parsedStory);
-      if (parsedMacro && (!merged.bible || Object.keys(merged.bible).length === 0) && isObjectRecord(parsedMacro.bible)) {
-        merged.bible = parsedMacro.bible as Record<string, unknown>;
+      const storyToSave = { ...parsedStory };
+      if (
+        parsedMacro &&
+        (!storyToSave.bible || Object.keys(storyToSave.bible).length === 0) &&
+        isObjectRecord(parsedMacro.bible)
+      ) {
+        storyToSave.bible = parsedMacro.bible as Record<string, unknown>;
       }
-      await patchStory(storyId, {
-        title: merged.title,
-        premise: merged.premise,
-        target_total_words: merged.target_total_words,
-        branch_count_override: merged.branch_count_override ?? null,
-        plan_retry_limit: merged.plan_retry_limit,
-        draft_loop_retry_limit: merged.draft_loop_retry_limit,
-        macro_author_notes: merged.macro_author_notes ?? "",
-        cast_seed: merged.cast_seed ?? [],
-        output_language: normalizeOutputLanguage(merged.output_language),
-        require_chapter_review: Boolean(merged.require_chapter_review),
-      });
-      setStoryConfigSnapshot(merged);
-      setPersistedStoryConfig(merged);
-      setStoryTitle(merged.title);
+      detail = await persistStoryInput(storyId, storyToSave);
     }
 
     if (parsedMacro) {
-      const current = macroData ? buildMacroPutBody(macroData) : null;
-      const body = mode === "replace" || !current ? parsedMacro : mergeMacroPlan(current, parsedMacro);
-      const putResult = await putMacroPlan(storyId, body);
-      setMacroData({
-        story_id: putResult.story_id,
-        bible: putResult.bible ?? {},
-        macro_author_notes: putResult.macro_author_notes,
-        cast_seed: putResult.cast_seed,
-        volumes: putResult.volumes,
-        anchors: putResult.anchors,
-        storylines: putResult.storylines ?? [],
-        anchor_nodes: putResult.anchor_nodes ?? [],
-        cast: putResult.cast,
-        protagonist_character_id: putResult.protagonist_character_id,
-        macro_topology_mode: putResult.macro_topology_mode,
-        topology_locked: putResult.topology_locked,
-      });
-      try {
-        const snap = await fetchMacroSnapshot(storyId);
-        setMacroData({
-          story_id: snap.story_id,
-          bible: snap.bible ?? {},
-          macro_author_notes: snap.macro_author_notes,
-          cast_seed: snap.cast_seed,
-          volumes: snap.volumes,
-          anchors: snap.anchors,
-          storylines: snap.storylines ?? [],
-          anchor_nodes: snap.anchor_nodes ?? [],
-          cast: snap.cast,
-          protagonist_character_id: snap.protagonist_character_id,
-          macro_topology_mode: snap.macro_topology_mode,
-          topology_locked: snap.topology_locked,
-          has_completed_chapter: snap.has_completed_chapter,
-          macro_edit_locked: snap.macro_edit_locked,
-        });
-      } catch {
-        /* fallback to put result above */
-      }
+      await putMacroPlan(storyId, parsedMacro);
     }
 
-    if (parsedStory || parsedMacro) {
-      setConfigVersion((v) => v + 1);
-      setNotice(t("app.import.doneNotice", undefined, { modeLabel }));
+    if (!parsedStory && !parsedMacro) return;
+
+    const fallbackLang = storyConfigSnapshot?.output_language ?? "zh-Hant";
+    detail = await fetchStoryDetail(storyId);
+    const fromServer = storyDetailToInput(detail, fallbackLang);
+    setStoryConfigSnapshot(fromServer);
+    setPersistedStoryConfig(fromServer);
+    setStoryTitle(detail.title);
+
+    if (parsedMacro) {
+      const snap = await fetchMacroSnapshot(storyId);
+      setMacroData(macroDataFromSnapshot(snap));
     }
+
+    upsertStoriesListCacheItem(queryClient, detail);
+    await refreshStoriesListCache(queryClient);
+    setConfigVersion((v) => v + 1);
+    setNotice(t("app.import.doneNotice"));
   }
 
   function patchSetupAnchorNode(patch: Partial<NonNullable<MacroCompileData["anchor_nodes"]>[number]>) {
@@ -2154,6 +2124,12 @@ export default function App() {
                     </div>
                   </section>
                 </div>
+                <ProjectBundleFileActions
+                  className="mt-6 border-t border-outline-variant/10 pt-6"
+                  onExportProjectBundle={hasMacroCompiled ? exportProjectBundle : undefined}
+                  disabled={busy}
+                  onError={setError}
+                />
               </div>
             ) : (
               <StorySetupForm
@@ -2164,30 +2140,91 @@ export default function App() {
                 onCompile={storyId && !hasAnyCompletedChapter ? handleMacroCompile : undefined}
                 compileBusy={compileInProgress}
                 showCreateButton={!storyId}
-                onExportProjectBundle={storyId ? exportProjectBundle : undefined}
+                onExportProjectBundle={storyId && hasMacroCompiled ? exportProjectBundle : undefined}
                 onImportProjectBundle={storyId && !hasAnyCompletedChapter ? applyImportProjectBundle : undefined}
                 getImportBundlePreview={storyId && !hasAnyCompletedChapter ? buildImportBundlePreviewLines : undefined}
                 onBusy={setBusy}
                 onError={setError}
                 disabled={busy}
+                compiledResultsSlot={
+                  storyId && hasMacroCompiled && !hasAnyCompletedChapter ? (
+                    <ChapterRunRail
+                      showCompiledBadge
+                      anchorNodeCount={setupAnchorNodes.length}
+                      bibleSlot={
+                        <MacroPlanPanel
+                          macroData={macroData}
+                          storyId={storyId || null}
+                          onMacroDataUpdate={setMacroData}
+                          onBusy={setBusy}
+                          onError={setError}
+                          editLocked={false}
+                        />
+                      }
+                      dagSlot={
+                        setupAnchorNodes.length > 0 ? (
+                          <AnchorDagSection
+                            locale={locale}
+                            detailOpen={dagDetailPanelOpen}
+                            onDetailOpenChange={setDagDetailPanelOpen}
+                            onFullscreenChange={setAnchorDagFullscreen}
+                            graph={(dagFs) => (
+                              <AnchorNodesGraphView
+                                nodes={setupAnchorNodes.map((n) => ({
+                                  id: String(n.id),
+                                  title: String(n.title ?? ""),
+                                  status: n.status,
+                                  node_kind: n.node_kind,
+                                  storyline_ids: [...(n.storyline_ids ?? [])],
+                                  depends_on: [...(n.depends_on ?? [])],
+                                }))}
+                                storylines={macroData?.storylines}
+                                selectedId={setupSelectedAnchorNodeId}
+                                onSelect={(nodeId) => setSetupSelectedAnchorNodeId(nodeId)}
+                                height={dagFs.active ? dagGraphHeight : 480}
+                                layoutEpoch={dagLayoutEpoch}
+                                detailPanelOpen={dagDetailPanelOpen}
+                                onToggleDetailPanel={() => setDagDetailPanelOpen((o) => !o)}
+                                fullscreen={dagFs}
+                                interactionMode={dagInteractionMode}
+                                onInteractionModeChange={handleDagInteractionModeChange}
+                                linkPick={dagLinkPick}
+                                onResolveLinkPick={resolveDagLinkPick}
+                                onCanvasCreateNode={({ x, y }) => createAnchorNodeAtGraphPosition(x, y)}
+                                onGraphDeleteNode={requestDeleteSetupAnchorNodeFromGraph}
+                                onGraphStartLinkParent={(childId) => setDagLinkPick({ mode: "parent", childId })}
+                                onGraphStartLinkChild={(parentId) => setDagLinkPick({ mode: "child", parentId })}
+                                onRemoveDependency={removeDependencyEdge}
+                                pendingManualPosition={dagPendingManualPosition}
+                                onConsumePendingManualPosition={() => setDagPendingManualPosition(null)}
+                                validationHighlights={dagValidationHighlights}
+                                readOnly={false}
+                              />
+                            )}
+                            detail={
+                              <SetupAnchorDagDetailPanel
+                                storyId={storyId.trim() ? storyId : null}
+                                setupSelectedAnchorNode={setupSelectedAnchorNode}
+                                selectedResolved={selectedResolved}
+                                topologyLocked={Boolean(macroData?.topology_locked)}
+                                dagFieldsEditable={dagFieldsEditable}
+                                selectedAnchorLockedParentIds={selectedAnchorLockedParentIds}
+                                onPatchAnchor={patchSetupAnchorNode}
+                                onRequestDelete={requestDeleteSetupAnchorNode}
+                              />
+                            }
+                          />
+                        ) : (
+                          <div className="rounded-lg border border-outline-variant/15 bg-surface-container-low/60 px-3 py-10 text-center font-body text-xs text-on-surface-variant">
+                            {t("chapterRail.dagEmpty")}
+                          </div>
+                        )
+                      }
+                    />
+                  ) : undefined
+                }
               />
             )}
-
-            {storyId && hasMacroCompiled && !hasAnyCompletedChapter ? (
-              <div className="mt-6 rounded-2xl border border-outline-variant/15 bg-surface-container-low/60 p-5">
-                <p className="mb-3 font-label text-[10px] font-bold uppercase tracking-[0.28em] text-secondary">
-                  {t("app.setup.compiledResultsKicker")}
-                </p>
-                <MacroPlanPanel
-                  macroData={macroData}
-                  storyId={storyId || null}
-                  onMacroDataUpdate={setMacroData}
-                  onBusy={setBusy}
-                  onError={setError}
-                  editLocked={false}
-                />
-              </div>
-            ) : null}
 
             {storyId && hasMacroCompiled && !hasChapterRun ? (
               <div className="mt-6 flex flex-col gap-2 rounded-xl border border-secondary/25 bg-secondary/8 px-4 py-4 md:flex-row md:items-center md:justify-between">
@@ -2427,7 +2464,7 @@ export default function App() {
                         ) : null
                       }
                       anchorNodeCount={setupAnchorNodes.length}
-                    disabled={!storyId}
+                      disabled={!storyId}
                     />
                   }
                   chapterOutline={chapterOutline}
@@ -2456,66 +2493,68 @@ export default function App() {
                   aiFreedomLevel={aiFreedomLevel}
                   setAiFreedomLevel={setAiFreedomLevel}
                   onRequestRunChapter={openRunConfirm}
-                />
-
-                <WorkflowProgressTrack
-                  workflow={workflow}
-                  compact
-                  starting={busy}
-                  headerActions={
-                    storyId && (workflow || hasChapterRun) ? (
-                      <>
-                        <button
-                          type="button"
-                          disabled={!hasChapterRun || busy}
-                          className={`inline-flex items-center gap-1 rounded-md border border-outline-variant/30 px-2 py-0.5 font-label text-[10px] font-semibold uppercase tracking-wider ${
-                            !hasChapterRun || busy
-                              ? "cursor-not-allowed opacity-40"
-                              : "text-on-surface-variant hover:border-secondary/40 hover:text-secondary"
-                          }`}
-                          onClick={() => handleViewChange("review")}
-                          title={
-                            !hasChapterRun ? t("app.nav.needChapterRun") : t("app.write.goReviewHitl")
-                          }
-                        >
-                          <span className="material-symbols-outlined text-sm" aria-hidden>
-                            fact_check
-                          </span>
-                          <span className="hidden md:inline">{t("app.write.goReviewHitl")}</span>
-                          <span className="md:hidden">{t("common.reviewFix")}</span>
-                        </button>
-                        <button
-                          type="button"
-                          disabled={!hasChapterRun || busy}
-                          className={`inline-flex items-center gap-1 rounded-md border border-outline-variant/30 px-2 py-0.5 font-label text-[10px] font-semibold uppercase tracking-wider ${
-                            !hasChapterRun || busy
-                              ? "cursor-not-allowed opacity-40"
-                              : "text-on-surface-variant hover:border-secondary/40 hover:text-secondary"
-                          }`}
-                          onClick={() => handleViewChange("graph")}
-                          title={!hasChapterRun ? t("app.nav.needChapterRun") : t("app.write.goGraph")}
-                        >
-                          <span className="material-symbols-outlined text-sm" aria-hidden>
-                            hub
-                          </span>
-                          <span className="hidden md:inline">{t("app.write.goGraph")}</span>
-                          <span className="md:hidden">{t("common.graph")}</span>
-                        </button>
-                        <button
-                          type="button"
-                          disabled={busy}
-                          className="inline-flex items-center gap-1 rounded-md border border-outline-variant/30 px-2 py-0.5 font-label text-[10px] font-semibold uppercase tracking-wider text-on-surface-variant hover:border-secondary/40 hover:text-secondary disabled:cursor-not-allowed disabled:opacity-40"
-                          onClick={() => setWorkflowDetailsOpen(true)}
-                          title={t("workspace.details.title")}
-                        >
-                          <span className="material-symbols-outlined text-sm" aria-hidden>
-                            monitoring
-                          </span>
-                          <span className="hidden md:inline">{t("workspace.details.title")}</span>
-                          <span className="md:hidden">{t("workspace.details.title")}</span>
-                        </button>
-                      </>
-                    ) : null
+                  workflowProgressSlot={
+                    <WorkflowProgressTrack
+                      workflow={workflow}
+                      compact
+                      embedded
+                      starting={busy}
+                      headerActions={
+                        storyId && (workflow || hasChapterRun) ? (
+                          <>
+                            <button
+                              type="button"
+                              disabled={!hasChapterRun || busy}
+                              className={`inline-flex items-center gap-1 rounded-md border border-outline-variant/30 px-2 py-0.5 font-label text-[10px] font-semibold uppercase tracking-wider ${
+                                !hasChapterRun || busy
+                                  ? "cursor-not-allowed opacity-40"
+                                  : "text-on-surface-variant hover:border-secondary/40 hover:text-secondary"
+                              }`}
+                              onClick={() => handleViewChange("review")}
+                              title={
+                                !hasChapterRun ? t("app.nav.needChapterRun") : t("app.write.goReviewHitl")
+                              }
+                            >
+                              <span className="material-symbols-outlined text-sm" aria-hidden>
+                                fact_check
+                              </span>
+                              <span className="hidden md:inline">{t("app.write.goReviewHitl")}</span>
+                              <span className="md:hidden">{t("common.reviewFix")}</span>
+                            </button>
+                            <button
+                              type="button"
+                              disabled={!hasChapterRun || busy}
+                              className={`inline-flex items-center gap-1 rounded-md border border-outline-variant/30 px-2 py-0.5 font-label text-[10px] font-semibold uppercase tracking-wider ${
+                                !hasChapterRun || busy
+                                  ? "cursor-not-allowed opacity-40"
+                                  : "text-on-surface-variant hover:border-secondary/40 hover:text-secondary"
+                              }`}
+                              onClick={() => handleViewChange("graph")}
+                              title={!hasChapterRun ? t("app.nav.needChapterRun") : t("app.write.goGraph")}
+                            >
+                              <span className="material-symbols-outlined text-sm" aria-hidden>
+                                hub
+                              </span>
+                              <span className="hidden md:inline">{t("app.write.goGraph")}</span>
+                              <span className="md:hidden">{t("common.graph")}</span>
+                            </button>
+                            <button
+                              type="button"
+                              disabled={busy}
+                              className="inline-flex items-center gap-1 rounded-md border border-outline-variant/30 px-2 py-0.5 font-label text-[10px] font-semibold uppercase tracking-wider text-on-surface-variant hover:border-secondary/40 hover:text-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                              onClick={() => setWorkflowDetailsOpen(true)}
+                              title={t("workspace.details.title")}
+                            >
+                              <span className="material-symbols-outlined text-sm" aria-hidden>
+                                monitoring
+                              </span>
+                              <span className="hidden md:inline">{t("workspace.details.title")}</span>
+                              <span className="md:hidden">{t("workspace.details.title")}</span>
+                            </button>
+                          </>
+                        ) : null
+                      }
+                    />
                   }
                 />
               </>
@@ -2586,26 +2625,36 @@ export default function App() {
                     {t("chapterRun.runConfirm.compileLockWarn")}
                   </p>
                 ) : null}
-                <label className="mt-4 flex items-start gap-3 rounded-xl border border-outline-variant/20 bg-surface-container px-3 py-3">
-                  <input
-                    type="checkbox"
-                    className="mt-0.5 h-4 w-4 accent-primary"
-                    checked={requireChapterReview}
-                    onChange={(e) => setRequireChapterReview(e.target.checked)}
-                    aria-describedby="run-confirm-review-hint"
-                  />
-                  <span className="flex min-w-0 flex-col">
-                    <span className="font-label text-[11px] font-bold uppercase tracking-wider text-secondary">
-                      {t("chapterRun.runConfirm.reviewToggle")}
-                    </span>
-                    <span
-                      id="run-confirm-review-hint"
-                      className="mt-0.5 font-body text-xs leading-relaxed text-on-surface-variant"
-                    >
-                      {t("chapterRun.runConfirm.reviewHint")}
-                    </span>
-                  </span>
-                </label>
+                <fieldset className="mt-4 rounded-xl border border-outline-variant/20 bg-surface-container px-3 py-3">
+                  <legend className="px-1 font-label text-[11px] font-bold uppercase tracking-wider text-secondary">
+                    {t("chapterRun.runConfirm.reviewQuestion")}
+                  </legend>
+                  <p id="run-confirm-review-hint" className="mt-1 font-body text-xs leading-relaxed text-on-surface-variant">
+                    {t("chapterRun.runConfirm.reviewHint")}
+                  </p>
+                  <div className="mt-3 flex flex-col gap-2">
+                    <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-outline-variant/15 bg-surface-container-high/60 px-3 py-2.5 has-[:checked]:border-primary/40 has-[:checked]:bg-primary/8">
+                      <input
+                        type="radio"
+                        name="run-confirm-review"
+                        className="mt-0.5 h-4 w-4 accent-primary"
+                        checked={runConfirmReviewChoice === true}
+                        onChange={() => setRunConfirmReviewChoice(true)}
+                      />
+                      <span className="font-body text-sm text-on-surface">{t("chapterRun.runConfirm.reviewYes")}</span>
+                    </label>
+                    <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-outline-variant/15 bg-surface-container-high/60 px-3 py-2.5 has-[:checked]:border-primary/40 has-[:checked]:bg-primary/8">
+                      <input
+                        type="radio"
+                        name="run-confirm-review"
+                        className="mt-0.5 h-4 w-4 accent-primary"
+                        checked={runConfirmReviewChoice === false}
+                        onChange={() => setRunConfirmReviewChoice(false)}
+                      />
+                      <span className="font-body text-sm text-on-surface">{t("chapterRun.runConfirm.reviewNo")}</span>
+                    </label>
+                  </div>
+                </fieldset>
                 <div className="mt-5 flex flex-wrap justify-end gap-2">
                   <button
                     type="button"
@@ -2619,10 +2668,12 @@ export default function App() {
                     type="button"
                     className="btn-primary-gradient h-10 min-w-[8rem] px-5 text-sm"
                     onClick={() => {
+                      if (runConfirmReviewChoice === null) return;
+                      const reviewAfterDraft = runConfirmReviewChoice;
                       setRunConfirmOpen(false);
-                      void handleRunChapter();
+                      void handleRunChapter(reviewAfterDraft);
                     }}
-                    disabled={busy}
+                    disabled={busy || runConfirmReviewChoice === null}
                   >
                     <span className="material-symbols-outlined text-base" aria-hidden>
                       auto_awesome

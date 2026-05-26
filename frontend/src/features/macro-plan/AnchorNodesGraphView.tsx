@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import G6 from "@antv/g6";
 import { useI18n } from "../../i18n/useI18n";
 import type { AnchorDagFullscreenApi } from "./AnchorDagSection";
+import { DagEditHelpDialog } from "./DagEditHelpDialog";
 
 export type StorylineLite = {
   id: string;
@@ -167,7 +168,7 @@ export function AnchorNodesGraphView({
   validationHighlights = null,
   readOnly = false,
 }: AnchorNodesGraphViewProps) {
-  const { locale } = useI18n();
+  const { locale, t } = useI18n();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const graphRef = useRef<import("@antv/g6").IGraph | null>(null);
   const onSelectRef = useRef(onSelect);
@@ -866,15 +867,6 @@ export function AnchorNodesGraphView({
         : fullscreen?.active
           ? "離開全螢幕"
           : "全螢幕顯示";
-  const editModeTip =
-    locale === "en"
-      ? interactionMode === "edit"
-        ? "Switch to view mode"
-        : "Edit DAG: context menus & links"
-      : interactionMode === "edit"
-        ? "切換為檢視模式"
-        : "編輯 DAG：右鍵選單與依賴連線";
-
   const linkPickLabel =
     linkPick?.mode === "parent"
       ? locale === "en"
@@ -893,11 +885,40 @@ export function AnchorNodesGraphView({
   return (
     <div
       className="relative overflow-hidden rounded-2xl border border-outline-variant/20 bg-gradient-to-b from-[#040a16] to-[#070f22] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.04)]"
-      style={{ minHeight: height + 48 }}
+      style={{
+        minHeight:
+          height +
+          48 +
+          (readOnly && fullscreen ? 44 : 0) +
+          (!readOnly && onInteractionModeChange ? 44 : 0),
+      }}
       onContextMenu={(e) => {
         if (!readOnly && interactionMode === "edit") e.preventDefault();
       }}
     >
+      {readOnly && fullscreen ? (
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-400/30 bg-gradient-to-r from-amber-950/55 via-amber-900/35 to-transparent px-3 py-2.5">
+          <div className="flex min-w-0 items-start gap-2">
+            <span
+              className="material-symbols-outlined mt-0.5 shrink-0 text-lg text-amber-300/95"
+              aria-hidden
+            >
+              visibility
+            </span>
+            <p className="font-body text-xs leading-relaxed text-amber-50/95">{t("app.dag.previewBanner")}</p>
+          </div>
+          <button
+            type="button"
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-amber-400/45 bg-amber-400/15 px-3 py-2 font-label text-[10px] font-bold uppercase tracking-wider text-amber-50 shadow-[0_0_20px_rgba(251,191,36,0.12)] transition hover:border-amber-300/60 hover:bg-amber-400/25"
+            onClick={() => fullscreen.toggle()}
+          >
+            <span className="material-symbols-outlined text-base" aria-hidden>
+              fullscreen
+            </span>
+            {t("app.dag.enterFullscreenEdit")}
+          </button>
+        </div>
+      ) : null}
       <div className="flex flex-wrap items-center gap-2 border-b border-white/5 px-3 py-2.5">
         <label className="flex min-w-[min(100%,14rem)] flex-1 flex-col gap-1.5">
           <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-amber-200/90">{highlightLabel}</span>
@@ -955,27 +976,7 @@ export function AnchorNodesGraphView({
               restart_alt
             </span>
           </button>
-          {!readOnly && onInteractionModeChange ? (
-            <>
-              <span className="h-7 w-px shrink-0 bg-white/12" aria-hidden />
-              <button
-                type="button"
-                onClick={() => onInteractionModeChange(interactionMode === "edit" ? "view" : "edit")}
-                aria-pressed={interactionMode === "edit"}
-                aria-label={editModeTip}
-                title={editModeTip}
-                className={
-                  interactionMode === "edit"
-                    ? "flex h-10 w-10 items-center justify-center rounded-xl bg-amber-400/20 text-amber-50 ring-1 ring-amber-400/50"
-                    : "flex h-10 w-10 items-center justify-center rounded-xl text-amber-100/90 hover:bg-amber-400/12"
-                }
-              >
-                <span className="material-symbols-outlined text-[22px] leading-none" aria-hidden>
-                  {interactionMode === "edit" ? "edit_off" : "edit"}
-                </span>
-              </button>
-            </>
-          ) : null}
+          <DagEditHelpDialog showTrigger={Boolean(onInteractionModeChange) || readOnly} />
           {!readOnly && onToggleDetailPanel ? (
             <>
               <span className="h-7 w-px shrink-0 bg-white/12" aria-hidden />
@@ -994,6 +995,49 @@ export function AnchorNodesGraphView({
           ) : null}
         </div>
       </div>
+      {!readOnly && onInteractionModeChange ? (
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/5 bg-[#060d18]/80 px-3 py-2">
+          <span className="font-label text-[10px] font-bold uppercase tracking-[0.2em] text-amber-200/80">
+            {t("app.dag.interactionModeLabel")}
+          </span>
+          <div
+            className="flex w-full max-w-md items-stretch overflow-hidden rounded-xl border border-amber-400/35 bg-[#0a1528]/90 p-0.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] sm:w-auto sm:min-w-[14rem]"
+            role="group"
+            aria-label={t("app.dag.interactionModeLabel")}
+          >
+            <button
+              type="button"
+              onClick={() => onInteractionModeChange("view")}
+              aria-pressed={interactionMode === "view"}
+              className={
+                interactionMode === "view"
+                  ? "inline-flex flex-1 items-center justify-center gap-1.5 rounded-[10px] bg-amber-400/22 px-4 py-2 font-label text-[10px] font-bold uppercase tracking-wider text-amber-50 ring-1 ring-amber-400/40"
+                  : "inline-flex flex-1 items-center justify-center gap-1.5 rounded-[10px] px-4 py-2 font-label text-[10px] font-semibold uppercase tracking-wider text-amber-100/65 transition hover:bg-white/5 hover:text-amber-50"
+              }
+            >
+              <span className="material-symbols-outlined text-base" aria-hidden>
+                visibility
+              </span>
+              {t("app.dag.modeView")}
+            </button>
+            <button
+              type="button"
+              onClick={() => onInteractionModeChange("edit")}
+              aria-pressed={interactionMode === "edit"}
+              className={
+                interactionMode === "edit"
+                  ? "inline-flex flex-1 items-center justify-center gap-1.5 rounded-[10px] bg-amber-400/22 px-4 py-2 font-label text-[10px] font-bold uppercase tracking-wider text-amber-50 ring-1 ring-amber-400/40"
+                  : "inline-flex flex-1 items-center justify-center gap-1.5 rounded-[10px] px-4 py-2 font-label text-[10px] font-semibold uppercase tracking-wider text-amber-100/65 transition hover:bg-white/5 hover:text-amber-50"
+              }
+            >
+              <span className="material-symbols-outlined text-base" aria-hidden>
+                edit
+              </span>
+              {t("app.dag.modeEdit")}
+            </button>
+          </div>
+        </div>
+      ) : null}
       {linkPick ? (
         <div className="flex items-center justify-between gap-2 border-b border-amber-400/25 bg-amber-950/35 px-3 py-1.5">
           <span className="font-label text-[11px] text-amber-100/95">{linkPickLabel}</span>

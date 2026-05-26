@@ -20,6 +20,8 @@ type Props = {
   layout?: "default" | "compact" | "ribbon";
   /** Optional actions shown in the header next to the status pill (e.g. next-step buttons). */
   headerActions?: ReactNode;
+  /** When true, omit outer card chrome — for embedding inside another panel (e.g. chapter-run footer). */
+  embedded?: boolean;
 };
 
 const STAGE_GROUPS = [
@@ -67,6 +69,7 @@ export function WorkflowProgressTrack({
   compact = false,
   layout,
   headerActions,
+  embedded = false,
 }: Props) {
   const { locale, t } = useI18n();
   const activeIndex = getActiveStepIndex(workflow);
@@ -239,10 +242,14 @@ export function WorkflowProgressTrack({
       </div>
     ) : null;
 
+  const sectionClass = embedded
+    ? "space-y-3"
+    : `rounded-xl border border-outline-variant/15 bg-surface-container-low/60 ${isCompact ? "p-3" : "p-4"}`;
+
   return (
-    <section className={`rounded-xl border border-outline-variant/15 bg-surface-container-low/60 ${isCompact ? "p-3" : "p-4"}`}>
+    <section className={sectionClass}>
       {liveActivityBar}
-      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+      <div className={`flex flex-wrap items-center justify-between gap-2 ${embedded ? "" : "mb-2"}`}>
         <p className="font-label text-[10px] font-bold uppercase tracking-wider text-secondary">
           {locale === "en" ? "Writing stages" : locale === "zh-Hans" ? "撰写阶段" : "撰寫階段"}
         </p>
