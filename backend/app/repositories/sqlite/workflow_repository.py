@@ -154,6 +154,28 @@ class WorkflowRepository:
             )
         return out
 
+    def get_latest_active_run_for_story(self, story_id: str) -> dict[str, Any] | None:
+        """Newest RUNNING or WAITING_HITL run for UI reconnect; no state/steps loaded."""
+        with self.db.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT run_id, story_id, chapter_id, status
+                FROM workflow_runs
+                WHERE story_id = ? AND status IN (?, ?)
+                ORDER BY updated_at DESC, run_id DESC
+                LIMIT 1
+                """,
+                (story_id, WorkflowStatus.RUNNING.value, WorkflowStatus.WAITING_HITL.value),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "run_id": row["run_id"],
+            "story_id": row["story_id"],
+            "chapter_id": int(row["chapter_id"]),
+            "status": row["status"],
+        }
+
     def append_step(self, log: WorkflowStepLog) -> None:
         with self.db.connection() as conn:
             conn.execute(

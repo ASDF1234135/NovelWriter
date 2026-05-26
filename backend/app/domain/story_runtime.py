@@ -177,6 +177,27 @@ def normalize_anchor_candidates_from_hydrated(
     ]
 
 
+def merge_runtime_resolved_anchors_for_commit(
+    persisted: list[str] | None,
+    from_state: list[str] | None,
+    *,
+    node_ids: set[str] | None = None,
+) -> tuple[list[str], bool]:
+    """Union persisted and workflow resolved ids; block wiping progress with an empty state list.
+
+    Returns (merged_ids, blocked_regression). ``blocked_regression`` is True when the state
+    carried no resolved ids but SQLite already had progress (chapter-review rerun bug).
+    """
+    prev = [str(x).strip() for x in (persisted or []) if str(x).strip()]
+    new = [str(x).strip() for x in (from_state or []) if str(x).strip()]
+    if node_ids is not None:
+        prev = [x for x in prev if x in node_ids]
+        new = [x for x in new if x in node_ids]
+    if prev and not new:
+        return sorted(dict.fromkeys(prev)), True
+    return sorted(dict.fromkeys(prev + new)), False
+
+
 def resolved_anchors_from_skeleton_and_legacy(
     *,
     bible_resolved: list[str] | None,

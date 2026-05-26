@@ -106,8 +106,10 @@ def _refresh_anchor_runtime_state(story_repository: StoryRepository, state: dict
     state["anchor_nodes"] = nodes
     node_ids = {str(n.get("id") or "").strip() for n in nodes if str(n.get("id") or "").strip()}
     rt = story.get("story_runtime_json") if isinstance(story.get("story_runtime_json"), dict) else {}
+    # Treat empty list like missing so chapter-review rerun reloads DB progress
+    # (build_initial_state seeds resolved_anchors=[]).
     resolved_raw = state.get("resolved_anchors")
-    if resolved_raw is None:
+    if not resolved_raw:
         resolved_raw = rt.get("resolved_anchors") or []
     resolved = [str(x).strip() for x in resolved_raw if str(x).strip() in node_ids]
     state["resolved_anchors"] = sorted(dict.fromkeys(resolved))
@@ -1449,6 +1451,12 @@ class WorkflowService:
             "steps": self.workflow_repository.list_steps(run_id),
         }
 
+    def get_latest_active_workflow_run(self, story_id: str) -> dict | None:
+        story = self.story_repository.get_story(story_id)
+        if not story:
+            raise KeyError(f"Story not found: {story_id}")
+        return self.workflow_repository.get_latest_active_run_for_story(story_id)
+
     def get_story_workflow_metrics(self, story_id: str, *, limit: int = 200, offset: int = 0) -> dict:
         story = self.story_repository.get_story(story_id)
         if not story:
@@ -1629,6 +1637,8 @@ class WorkflowService:
         if request.option_id == "relax_word_count":
             state["target_word_count"] = max(800, int(state["target_word_count"] * 0.6))
             apply_length_bounds_to_state(state)
+            if prev_hitl_reason == HitlReason.DRAFT_LOOP_EXCEEDED:
+                resume = "author"
         if request.option_id in ("force_rewrite_plan", "allow_adjust_anchor"):
             state["plan_retry_count"] = 0
             state["plan_feedback"] = []
@@ -1889,6 +1899,8 @@ class WorkflowService:
             resolved.update(str(x).strip() for x in request.resolved_anchor_ids if str(x).strip())
             state["resolved_anchors"] = sorted(resolved)
             # Keep standard graph handoff to ensure pending cast evolution materializes.
+            state["resume_from"] = "profile_expander"
+        elif request.action == "continue_unresolved":
             state["resume_from"] = "profile_expander"
         elif request.action == "delay_anchor":
             delayed = {str(x).strip() for x in request.delayed_anchor_ids if str(x).strip()}

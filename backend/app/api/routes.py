@@ -127,6 +127,17 @@ def get_story_workflow_metrics(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.get("/stories/{story_id}/workflows/latest-active")
+def get_latest_active_workflow(
+    story_id: str,
+    workflow_service: WorkflowService = Depends(get_workflow_service),
+) -> dict | None:
+    try:
+        return workflow_service.get_latest_active_workflow_run(story_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.patch("/stories/{story_id}")
 def patch_story(
     story_id: str,

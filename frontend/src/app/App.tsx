@@ -12,8 +12,7 @@ import {
   fetchStoryDetail,
   fetchWritingPreamble,
   regenerateChapterSummary,
-  fetchStoryWorkflowMetrics,
-  fetchChapterWorkflowMetrics,
+  fetchLatestActiveWorkflow,
   fetchWorkflow,
   macroCompile,
   putMacroPlan,
@@ -29,13 +28,14 @@ import {
   sendHitlDecision,
   sendOutlineEdit,
   sendStateInjection,
+  waitForMacroCompileCompletion,
   type MacroCompileProgress,
 } from "../api";
-import { AgentOutputView } from "../features/agent-output/AgentOutputView";
-import { ChapterReader } from "../features/chapter-reader/ChapterReader";
-import { ChapterReviewGate } from "../features/chapter-review/ChapterReviewGate";
 import { GraphView } from "../features/graph-view/GraphView";
-import { HitlPanel } from "../features/hitl-panel/HitlPanel";
+import { HitlDevPanel } from "../features/hitl-panel/HitlDevPanel";
+import { HitlFloatingDock } from "../features/hitl-panel/HitlFloatingDock";
+import type { HitlChapterReviewPayload } from "../features/hitl-panel/HitlPanel";
+import { ReviewShell } from "../features/review-shell/ReviewShell";
 import { AnchorDagSection } from "../features/macro-plan/AnchorDagSection";
 import { AnchorNodesGraphView } from "../features/macro-plan/AnchorNodesGraphView";
 import {
@@ -47,13 +47,14 @@ import {
   type DagValidateLocale,
 } from "../features/macro-plan/anchorDagValidate";
 import { MacroPlanPanel } from "../features/macro-plan/MacroPlanPanel";
+import { MacroBibleSummary } from "../features/macro-plan/MacroBibleSummary";
+import { ChapterRunRail } from "../features/chapter-run/ChapterRunRail";
+import { ChapterRunComposer } from "../features/chapter-run/ChapterRunComposer";
 import { StoryLibrary } from "../features/story-library/StoryLibrary";
 import { StorySetupForm } from "../features/story-setup/StorySetupForm";
-import { WorkflowMetricsDashboard } from "../features/workflow-metrics/WorkflowMetricsDashboard";
-import { WorkflowMonitor } from "../features/workflow-monitor/WorkflowMonitor";
-import { HitlDevDropdown } from "../features/workflow-monitor/HitlDevDropdown";
 import { WorkflowProgressTrack } from "../features/workflow-monitor/WorkflowProgressTrack";
-import { ExportCenter } from "../features/export-center/ExportCenter";
+import { StoryWorkflowDetailsDrawer } from "../features/workflow-monitor/StoryWorkflowDetailsDrawer";
+import { LandingPage } from "../features/landing/LandingPage";
 import type {
   AiFreedomLevel,
   ChapterContent,
@@ -83,6 +84,7 @@ import {
 } from "./macroPlanBundle";
 import { localizeUserFacingError } from "../i18n/userFacingError";
 import { useI18n } from "../i18n/useI18n";
+import { downloadCompletedChaptersZip } from "../lib/chapterBulkDownload";
 
 /** Same heuristic as backend OUTLINE_MIN_CHARS_FOR_FULL_BINDING — UX hint only. */
 const OUTLINE_FULL_BINDING_MIN_CHARS = 100;
@@ -90,19 +92,19 @@ const OUTLINE_FULL_BINDING_MIN_CHARS = 100;
 const CHAPTER_SUMMARIZER_LLM_SOURCE = "CHAPTER_SUMMARIZER_LLM";
 
 const VIEW_PATH_MAP: Record<AppView, string> = {
+  home: "/",
   library: "/library",
   setup: "/setup",
   write: "/write",
   review: "/review",
   graph: "/graph",
-  export: "/export",
-  workflowMetrics: "/workflow-metrics",
 };
 
 function pathToView(pathname: string): AppView {
   const cleaned = pathname.replace(/\/+$/, "") || "/";
   switch (cleaned) {
     case "/":
+      return "home";
     case "/library":
       return "library";
     case "/setup":
@@ -113,10 +115,10 @@ function pathToView(pathname: string): AppView {
       return "review";
     case "/graph":
       return "graph";
-    case "/export":
-      return "export";
     case "/workflow-metrics":
-      return "workflowMetrics";
+      return "write";
+    case "/export":
+      return "library";
     default:
       return "library";
   }
@@ -143,13 +145,12 @@ function coerceAnchorsLockedWhenParentLocked(
 
 function navTargetLabel(target: AppView, tfn: (key: string, fallback?: string, params?: Record<string, string | number>) => string): string {
   const keys: Record<AppView, string> = {
+    home: "app.navTarget.home",
     library: "app.navTarget.library",
     setup: "app.navTarget.setup",
     write: "app.navTarget.write",
     review: "app.navTarget.review",
     graph: "app.navTarget.graph",
-    workflowMetrics: "app.navTarget.workflowMetrics",
-    export: "app.navTarget.export",
   };
   return tfn(keys[target]);
 }
@@ -350,7 +351,7 @@ function computeNextGeneratableChapterId(chapters: ChapterSummary[]): number {
 }
 
 export default function App() {
-  const { locale, t } = useI18n();
+  const { locale, setLocale, t } = useI18n();
   const navigate = useNavigate();
   const location = useLocation();
   const view = pathToView(location.pathname);
@@ -402,34 +403,26 @@ export default function App() {
   const [aiFreedomLevel, setAiFreedomLevel] = useState<AiFreedomLevel>("balanced");
   const [requireChapterReview, setRequireChapterReview] = useState<boolean>(false);
   const [selectedAnchorIds, setSelectedAnchorIds] = useState<string[]>([]);
-  const [manualAnchorSelectionOpen, setManualAnchorSelectionOpen] = useState(false);
   const [writingPreamble, setWritingPreamble] = useState<WritingPreambleResponse | null>(null);
-  const [preamblePanelOpen, setPreamblePanelOpen] = useState(false);
-  const [writePanelTab, setWritePanelTab] = useState<"progress" | "logs">("progress");
-  const [reviewPanelTab, setReviewPanelTab] = useState<"progress" | "logs">("progress");
+  /** Toggles the full Bible editor drawer on the chapter-run page; rail keeps a read-only summary by default. */
+  const [bibleDrawerOpen, setBibleDrawerOpen] = useState(false);
+  /** Mobile / narrow viewports: rail collapses to a top accordion. */
+  // (former) mobile rail accordion state — reference is now Step 2 in composer.
+  const [railOpenMobile] = useState(false);
+  /** Run-chapter confirm modal: collects the per-run review opt-in before kicking off the pipeline. */
+  const [runConfirmOpen, setRunConfirmOpen] = useState(false);
   const [compileSaveModalOpen, setCompileSaveModalOpen] = useState(false);
-  const [toolbarImportModeOpen, setToolbarImportModeOpen] = useState(false);
-  const [toolbarImportConfirmOpen, setToolbarImportConfirmOpen] = useState(false);
-  const toolbarPendingImportTextRef = useRef<string | null>(null);
-  const [toolbarImportPreview, setToolbarImportPreview] = useState<{
-    mode: ImportMergeMode;
-    storyLine: string;
-    macroLine: string;
-  } | null>(null);
   const [compileInProgress, setCompileInProgress] = useState(false);
   const [compileProgress, setCompileProgress] = useState<MacroCompileProgress | null>(null);
   const [regenSummaryBusyChapter, setRegenSummaryBusyChapter] = useState<number | null>(null);
   const [configVersion, setConfigVersion] = useState(0);
-  const [hasExportedChapter, setHasExportedChapter] = useState(false);
-  const [hasExportedProject, setHasExportedProject] = useState(false);
-  const [navCount, setNavCount] = useState(0);
   const [stageVisitCount, setStageVisitCount] = useState<Record<TaskFlowStageId, number>>({
     projectSetup: 0,
     planStructure: 0,
     writeChapter: 0,
     reviewFix: 0,
-    export: 0,
   });
+  const [workflowDetailsOpen, setWorkflowDetailsOpen] = useState(false);
   const [setupSelectedAnchorNodeId, setSetupSelectedAnchorNodeId] = useState<string | null>(null);
   const [dagLayoutEpoch, setDagLayoutEpoch] = useState(0);
   const [anchorDagFullscreen, setAnchorDagFullscreen] = useState(false);
@@ -454,12 +447,10 @@ export default function App() {
   );
   /** Cleared on story change; next non-empty `anchorTopoSig` bumps `dagLayoutEpoch` once (initial fit / reload). */
   const dagAnchorTopoSnapRef = useRef<string>("");
-  const [flowStartedAt, setFlowStartedAt] = useState<number | null>(null);
   const workflowEventsUnsubRef = useRef<(() => void) | null>(null);
   const storyIdRef = useRef(storyId);
   const chapterIdRef = useRef(chapterId);
   const chapterHardRulesRef = useRef<HTMLTextAreaElement | null>(null);
-  const toolbarImportInputRef = useRef<HTMLInputElement | null>(null);
 
   function navigateToViewPath(nextView: AppView, replace = false) {
     const targetPath = VIEW_PATH_MAP[nextView];
@@ -468,8 +459,42 @@ export default function App() {
     }
   }
 
+  function exitStoryToLibrary() {
+    workflowEventsUnsubRef.current?.();
+    workflowEventsUnsubRef.current = null;
+    setStoryId("");
+    setStoryTitle("");
+    setWorkflow(null);
+    setMacroData(null);
+    setGraph(null);
+    setChapters([]);
+    setSelectedChapter(null);
+    setChapterId(1);
+    setChapterAlreadyCompleted(false);
+    setWritingPreamble(null);
+    setStoryConfigSnapshot(null);
+    setPersistedStoryConfig(null);
+    setStageVisitCount({ projectSetup: 0, planStructure: 0, writeChapter: 0, reviewFix: 0 });
+    setConfigVersion((v) => v + 1);
+    setError("");
+    setNotice("");
+    setBibleDrawerOpen(false);
+    setCompileInProgress(false);
+    setCompileProgress(null);
+    setWorkflowDetailsOpen(false);
+    navigate("/library");
+  }
+
+  function handleBrandClick() {
+    if (storyId) {
+      exitStoryToLibrary();
+    } else {
+      navigateToViewPath("home");
+    }
+  }
+
   function requestNavigateToView(nextView: AppView, replace = false) {
-    if (dagInteractionMode === "edit" && view === "setup" && nextView !== "setup") {
+    if (dagInteractionMode === "edit" && view === "write" && nextView !== "write") {
       setDagNavAwayPending({ target: nextView, replace });
       return;
     }
@@ -491,10 +516,21 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!storyId && (view === "write" || view === "review" || view === "graph" || view === "export" || view === "workflowMetrics")) {
+    if (!storyId && (view === "write" || view === "review" || view === "graph")) {
       navigateToViewPath("library");
     }
   }, [storyId, view]);
+
+  /** Legacy URLs from older builds → canonical routes + optional workflow details drawer. */
+  useEffect(() => {
+    const cleaned = location.pathname.replace(/\/+$/, "") || "/";
+    if (cleaned === "/workflow-metrics") {
+      setWorkflowDetailsOpen(true);
+      navigate("/write", { replace: true });
+    } else if (cleaned === "/export") {
+      navigate("/library", { replace: true });
+    }
+  }, [location.pathname, navigate]);
 
   useEffect(() => {
     setRequireChapterReview(Boolean(persistedStoryConfig?.require_chapter_review));
@@ -792,9 +828,11 @@ export default function App() {
     setBusy(true);
     setError("");
     setNotice("");
+    let newStoryId: string | null = null;
     try {
       const story = await createStory(payload);
-      setStoryId(String(story.story_id));
+      newStoryId = String(story.story_id);
+      setStoryId(newStoryId);
       setStoryTitle(payload.title);
       setStoryConfigSnapshot(payload);
       setPersistedStoryConfig(payload);
@@ -805,15 +843,42 @@ export default function App() {
       setChapters([]);
       setSelectedChapter(null);
       setWritingPreamble(null);
-      setHasExportedChapter(false);
-      setHasExportedProject(false);
-      setNavCount(0);
-      setFlowStartedAt(Date.now());
-      setStageVisitCount({ projectSetup: 1, planStructure: 0, writeChapter: 0, reviewFix: 0, export: 0 });
+      setStageVisitCount({ projectSetup: 1, planStructure: 0, writeChapter: 0, reviewFix: 0 });
       navigateToViewPath("setup");
     } catch (err) {
       reportApiError(err, "errors.createStoryFailed");
+      setBusy(false);
+      return;
+    }
+    // Chain straight into the first macro compile — the user clicked
+    // "Create & start generating", so we don't bounce them back to phase 1
+    // just to click "Compile" again. The StorySetupForm preserves the current
+    // phase across this re-hydration via its justSubmittedRef.
+    setCompileInProgress(true);
+    setCompileProgress({ status: "QUEUED", percent: 5, message: t("compile.progress.queued") });
+    try {
+      const result = await macroCompile(newStoryId, (progress) => {
+        setCompileProgress(progress);
+      });
+      setMacroData(result);
+      try {
+        setGraph(await fetchGraph(newStoryId));
+      } catch {
+        /* optional */
+      }
+      try {
+        const detail = await fetchStoryDetail(newStoryId);
+        const nextConfig = storyDetailToInput(detail, payload.output_language ?? "zh-Hant");
+        setStoryConfigSnapshot(nextConfig);
+        setPersistedStoryConfig(nextConfig);
+      } catch {
+        /* optional refresh */
+      }
+    } catch (err) {
+      reportApiError(err, "errors.macroCompileFailed");
     } finally {
+      setCompileInProgress(false);
+      setCompileProgress(null);
       setBusy(false);
     }
   }
@@ -833,11 +898,7 @@ export default function App() {
     setWritingPreamble(null);
     setStoryConfigSnapshot(null);
     setPersistedStoryConfig(null);
-    setHasExportedChapter(false);
-    setHasExportedProject(false);
-    setNavCount(0);
-    setFlowStartedAt(null);
-    setStageVisitCount({ projectSetup: 0, planStructure: 0, writeChapter: 0, reviewFix: 0, export: 0 });
+    setStageVisitCount({ projectSetup: 0, planStructure: 0, writeChapter: 0, reviewFix: 0 });
     setConfigVersion((v) => v + 1);
     setError("");
     navigateToViewPath("setup");
@@ -859,11 +920,7 @@ export default function App() {
     setWritingPreamble(null);
     setStoryConfigSnapshot(null);
     setPersistedStoryConfig(null);
-    setHasExportedChapter(false);
-    setHasExportedProject(false);
-    setNavCount(0);
-    setFlowStartedAt(null);
-    setStageVisitCount({ projectSetup: 0, planStructure: 0, writeChapter: 0, reviewFix: 0, export: 0 });
+    setStageVisitCount({ projectSetup: 0, planStructure: 0, writeChapter: 0, reviewFix: 0 });
     setConfigVersion((v) => v + 1);
     setError("");
     requestNavigateToView("library");
@@ -875,6 +932,7 @@ export default function App() {
     setNotice("");
     workflowEventsUnsubRef.current?.();
     workflowEventsUnsubRef.current = null;
+    let macroCompileWasRunning = false;
     try {
       const detail = await fetchStoryDetail(selectedId);
       const nextConfig = storyDetailToInput(detail, storyConfigSnapshot?.output_language ?? "zh-Hant");
@@ -882,9 +940,9 @@ export default function App() {
       setPersistedStoryConfig(nextConfig);
       setConfigVersion((v) => v + 1);
       const snap = await fetchMacroSnapshot(selectedId);
+      macroCompileWasRunning = (snap.macro_compile_status ?? "IDLE") === "RUNNING";
       setStoryId(selectedId);
       setStoryTitle(title?.trim() || detail.title || "");
-      setWorkflow(null);
       setMacroData({
         story_id: snap.story_id,
         bible: snap.bible ?? {},
@@ -912,16 +970,82 @@ export default function App() {
       setSelectedChapter(null);
       setChapterId(1);
       setChapterAlreadyCompleted(false);
-      setHasExportedChapter(false);
-      setHasExportedProject(false);
-      setNavCount(0);
-      setFlowStartedAt(Date.now());
-      setStageVisitCount({ projectSetup: 1, planStructure: 0, writeChapter: 0, reviewFix: 0, export: 0 });
-      navigateToViewPath("setup");
+      setStageVisitCount({ projectSetup: 1, planStructure: 0, writeChapter: 0, reviewFix: 0 });
+
+      let postLoadView: AppView = "setup";
+      let skipDefaultNavigate = false;
+      try {
+        const active = await fetchLatestActiveWorkflow(selectedId);
+        if (active) {
+          const wf = await fetchWorkflow(active.run_id);
+          setWorkflow(wf);
+          const st = String(wf.state.workflow_status ?? "");
+          const terminal = st === "COMPLETED" || st === "FAILED" || st === "CANCELLED";
+          const waitingHitl = wf.run.requires_hitl === true || st === "WAITING_HITL";
+          if (terminal) {
+            await finalizeWorkflowRunUi(active.run_id);
+            skipDefaultNavigate = st === "COMPLETED" || st === "CANCELLED";
+          } else if (waitingHitl) {
+            const reason = String(wf.state.hitl_reason ?? wf.run.hitl_reason ?? "");
+            if (reason === "Chapter_Draft_Review") {
+              postLoadView = "review";
+            }
+          } else {
+            attachWorkflowEventStream(active.run_id);
+            postLoadView = "write";
+          }
+        } else {
+          setWorkflow(null);
+        }
+      } catch {
+        setWorkflow(null);
+      }
+      if (!skipDefaultNavigate) {
+        navigateToViewPath(postLoadView);
+      }
     } catch (err) {
       reportApiError(err, "errors.loadStoryFailed");
     } finally {
       setBusy(false);
+    }
+    if (macroCompileWasRunning && storyIdRef.current === selectedId) {
+      setCompileInProgress(true);
+      setCompileProgress({
+        status: "RUNNING",
+        percent: 45,
+        message: t("compile.progress.resuming"),
+      });
+      void (async () => {
+        try {
+          const result = await waitForMacroCompileCompletion(selectedId, (progress) => {
+            setCompileProgress(progress);
+          });
+          if (storyIdRef.current !== selectedId) return;
+          setMacroData(result);
+          try {
+            setGraph(await fetchGraph(selectedId));
+          } catch {
+            /* optional */
+          }
+          try {
+            const detailAfter = await fetchStoryDetail(selectedId);
+            const nextCfg = storyDetailToInput(detailAfter, storyConfigSnapshot?.output_language ?? "zh-Hant");
+            setStoryConfigSnapshot(nextCfg);
+            setPersistedStoryConfig(nextCfg);
+          } catch {
+            /* optional */
+          }
+        } catch (err) {
+          if (storyIdRef.current === selectedId) {
+            reportApiError(err, "errors.macroCompileFailed");
+          }
+        } finally {
+          if (storyIdRef.current === selectedId) {
+            setCompileInProgress(false);
+            setCompileProgress(null);
+          }
+        }
+      })();
     }
   }
 
@@ -1010,34 +1134,6 @@ export default function App() {
     setBusy(false);
   }
 
-  async function handleSaveStorySettings(payload: StoryInput) {
-    if (!storyId) return;
-    setBusy(true);
-    setError("");
-    setNotice("");
-    try {
-      await patchStory(storyId, {
-        title: payload.title,
-        premise: payload.premise,
-        target_total_words: payload.target_total_words,
-        branch_count_override: payload.branch_count_override ?? null,
-        plan_retry_limit: payload.plan_retry_limit,
-        draft_loop_retry_limit: payload.draft_loop_retry_limit,
-        macro_author_notes: payload.macro_author_notes ?? "",
-        cast_seed: payload.cast_seed ?? [],
-        output_language: normalizeOutputLanguage(payload.output_language),
-        require_chapter_review: Boolean(payload.require_chapter_review),
-      });
-      setStoryConfigSnapshot(payload);
-      setPersistedStoryConfig(payload);
-      setStoryTitle(payload.title);
-    } catch (err) {
-      reportApiError(err, "errors.saveSettingsFailed");
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function finalizeWorkflowRunUi(runId: string) {
     try {
       const wf = await fetchWorkflow(runId);
@@ -1055,7 +1151,23 @@ export default function App() {
         setGraph(await fetchGraph(sid));
         setChapters(await fetchChapters(sid));
         try {
-          setMacroData(await fetchMacroSnapshot(sid));
+          const snap = await fetchMacroSnapshot(sid);
+          setMacroData({
+            story_id: snap.story_id,
+            bible: snap.bible ?? {},
+            macro_author_notes: snap.macro_author_notes,
+            cast_seed: snap.cast_seed,
+            volumes: snap.volumes,
+            anchors: snap.anchors,
+            storylines: snap.storylines ?? [],
+            anchor_nodes: snap.anchor_nodes ?? [],
+            cast: snap.cast,
+            protagonist_character_id: snap.protagonist_character_id,
+            macro_topology_mode: snap.macro_topology_mode,
+            topology_locked: snap.topology_locked,
+            has_completed_chapter: snap.has_completed_chapter,
+            macro_edit_locked: snap.macro_edit_locked,
+          });
         } catch {
           /* optional */
         }
@@ -1143,7 +1255,7 @@ export default function App() {
     } else if (waiting) {
       workflowEventsUnsubRef.current?.();
       workflowEventsUnsubRef.current = null;
-      // Chapter-review HITL renders in the reading area, not the panel.
+      // Chapter-review HITL is rendered inside HitlPanel (ChapterReviewGate).
       const reason = String(wf.state.hitl_reason ?? wf.run.hitl_reason ?? "");
       if (reason === "Chapter_Draft_Review") {
         navigateToViewPath("review");
@@ -1154,12 +1266,17 @@ export default function App() {
     }
   }
 
+  /**
+   * Pre-flight before opening the confirm modal: same guards `handleRunChapter` would surface,
+   * just hoisted so the modal never opens for an invalid state.
+   */
+  function openRunConfirm() {
+    if (!storyId) return;
+    setRunConfirmOpen(true);
+  }
+
   async function handleRunChapter() {
     if (!storyId) return;
-    if (manualAnchorSelectionOpen && selectedAnchorIds.length < 1) {
-      setError(t("app.write.manualAnchorRequired"));
-      return;
-    }
     setError("");
     setNotice("");
     workflowEventsUnsubRef.current?.();
@@ -1168,12 +1285,13 @@ export default function App() {
     setSelectedChapter(null);
     setBusy(true);
     try {
+      const useManualAnchors = selectedAnchorIds.length >= 1;
       const runOptions = {
         chapterOutline,
         chapterHardRules,
         aiFreedomLevel,
-        selectedAnchorIds: manualAnchorSelectionOpen ? selectedAnchorIds : undefined,
-        nextAnchorIds: manualAnchorSelectionOpen ? autoNextAnchorIds : undefined,
+        selectedAnchorIds: useManualAnchors ? selectedAnchorIds : undefined,
+        nextAnchorIds: useManualAnchors ? autoNextAnchorIds : undefined,
         requireChapterReview,
       };
       const initial = await runChapter(storyId, nextGeneratableChapterId, {
@@ -1225,7 +1343,6 @@ export default function App() {
       payload.macro_plan = buildMacroPutBody(macroData);
     }
     downloadJsonFile(`${storyId}-project.json`, payload);
-    setHasExportedProject(true);
   }
 
   function buildImportBundlePreviewLines(jsonText: string): { storyLine: string; macroLine: string } {
@@ -1307,7 +1424,23 @@ export default function App() {
         topology_locked: putResult.topology_locked,
       });
       try {
-        setMacroData(await fetchMacroSnapshot(storyId));
+        const snap = await fetchMacroSnapshot(storyId);
+        setMacroData({
+          story_id: snap.story_id,
+          bible: snap.bible ?? {},
+          macro_author_notes: snap.macro_author_notes,
+          cast_seed: snap.cast_seed,
+          volumes: snap.volumes,
+          anchors: snap.anchors,
+          storylines: snap.storylines ?? [],
+          anchor_nodes: snap.anchor_nodes ?? [],
+          cast: snap.cast,
+          protagonist_character_id: snap.protagonist_character_id,
+          macro_topology_mode: snap.macro_topology_mode,
+          topology_locked: snap.topology_locked,
+          has_completed_chapter: snap.has_completed_chapter,
+          macro_edit_locked: snap.macro_edit_locked,
+        });
       } catch {
         /* fallback to put result above */
       }
@@ -1316,64 +1449,6 @@ export default function App() {
     if (parsedStory || parsedMacro) {
       setConfigVersion((v) => v + 1);
       setNotice(t("app.import.doneNotice", undefined, { modeLabel }));
-    }
-  }
-
-  function openToolbarImportConfirm(mode: ImportMergeMode) {
-    const text = toolbarPendingImportTextRef.current;
-    if (!text) return;
-    try {
-      const { storyLine, macroLine } = buildImportBundlePreviewLines(text);
-      setToolbarImportPreview({ mode, storyLine, macroLine });
-      setToolbarImportModeOpen(false);
-      setToolbarImportConfirmOpen(true);
-    } catch (err) {
-      reportApiError(err, "errors.importJsonFailed");
-      toolbarPendingImportTextRef.current = null;
-      setToolbarImportModeOpen(false);
-    }
-  }
-
-  function cancelToolbarImportFlow() {
-    toolbarPendingImportTextRef.current = null;
-    setToolbarImportModeOpen(false);
-    setToolbarImportConfirmOpen(false);
-    setToolbarImportPreview(null);
-  }
-
-  async function handleToolbarImportProjectBundle(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (!file || !storyId) return;
-    if (hasCompletedChapter) {
-      setError(t("app.setup.macroLockedShortNotice"));
-      return;
-    }
-    setError("");
-    try {
-      const text = await file.text();
-      toolbarPendingImportTextRef.current = text;
-      setToolbarImportModeOpen(true);
-    } catch (err) {
-      reportApiError(err, "errors.importJsonFailed");
-    }
-  }
-
-  async function handleToolbarImportConfirmed() {
-    const text = toolbarPendingImportTextRef.current;
-    const prev = toolbarImportPreview;
-    if (!text || !prev) return;
-    setToolbarImportConfirmOpen(false);
-    setToolbarImportPreview(null);
-    toolbarPendingImportTextRef.current = null;
-    setBusy(true);
-    setError("");
-    try {
-      await applyImportProjectBundle(text, prev.mode);
-    } catch (err) {
-      reportApiError(err, "errors.importJsonFailed");
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -1665,7 +1740,7 @@ export default function App() {
       runHitlAction(sendContextPrune, payload, "errors.contextPruneFailed"),
   };
 
-  /** Chapter-review HITL action handlers used by ChapterReviewGate. */
+  /** Chapter-review HITL actions used by HitlPanel ChapterReviewGate. */
   const chapterReviewHandlers = {
     onApprove: async (content: string, edited: boolean) => {
       if (edited) {
@@ -1683,6 +1758,33 @@ export default function App() {
     onAbandon: async () =>
       runHitlAction(sendHitlDecision, "ABANDON_CHAPTER", "errors.sendChoiceFailed"),
   };
+
+  async function handleDownloadAllCompletedZip() {
+    if (!storyId) return;
+    setBusy(true);
+    setError("");
+    try {
+      await downloadCompletedChaptersZip(storyId, chapters);
+    } catch (err) {
+      reportApiError(err, "errors.downloadZipFailed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const { onAnchorDelay: _omitHitlAnchorDelay, ...hitlDockHandlers } = hitlHandlers;
+  void _omitHitlAnchorDelay;
+  const hitlChapterReviewForDock: HitlChapterReviewPayload | null =
+    view === "review" && chapterReviewActive && workflow
+      ? {
+          draft: String(workflow.state?.current_draft ?? workflow.state?.best_draft_content ?? ""),
+          readerScore:
+            typeof workflow.state?.last_reader_score === "number" ? Number(workflow.state.last_reader_score) : null,
+          onApprove: chapterReviewHandlers.onApprove,
+          onAbandon: chapterReviewHandlers.onAbandon,
+          onRerun: chapterReviewHandlers.onRerun,
+        }
+      : null;
 
   const showStorySection = Boolean(storyId) || view === "setup";
   const compileProgressText = useMemo(() => {
@@ -1709,9 +1811,16 @@ export default function App() {
     if (macroData?.has_completed_chapter || macroData?.macro_edit_locked) return true;
     return chapters.some((c) => String(c.status ?? "").toLowerCase() === "completed");
   }, [macroData?.has_completed_chapter, macroData?.macro_edit_locked, chapters]);
+  const hasAnyCompletedChapter = useMemo(
+    () => macroData?.has_completed_chapter === true || chapters.some((c) => String(c.status ?? "").toLowerCase() === "completed"),
+    [macroData?.has_completed_chapter, chapters],
+  );
   const hasChapterRun = Boolean(workflow || chapters.length > 0);
-  const hasReviewed = Boolean(selectedChapter || chapters.length > 0);
-  const hasExported = hasExportedChapter || hasExportedProject;
+  const chapterRunContextHeadline = storyTitle.trim() || (hasMacroCompiled ? storySummary : "");
+  const completedChaptersZipCount = useMemo(
+    () => chapters.filter((c) => String(c.status ?? "").toLowerCase() === "completed").length,
+    [chapters],
+  );
   const workflowMiniStatus = useMemo(() => {
     if (!workflow) return t("workflow.mini.notRun");
     const status = String(workflow.state.workflow_status ?? workflow.run.status ?? "");
@@ -1752,9 +1861,8 @@ export default function App() {
     if (nextView === view) return;
     const markStageVisit = (stage: TaskFlowStageId) => {
       setStageVisitCount((prev) => ({ ...prev, [stage]: prev[stage] + 1 }));
-      setNavCount((prev) => prev + 1);
     };
-    if (!storyId && nextView !== "library" && nextView !== "setup") {
+    if (!storyId && nextView !== "library" && nextView !== "setup" && nextView !== "home") {
       setNotice(t("app.nav.selectStoryFirst"));
       requestNavigateToView("library");
       return;
@@ -1764,12 +1872,12 @@ export default function App() {
       requestNavigateToView("setup");
       return;
     }
-    if ((nextView === "review" || nextView === "export") && !hasChapterRun) {
+    if (nextView === "review" && !hasChapterRun) {
       setNotice(t("app.nav.needChapterRun"));
       requestNavigateToView("write");
       return;
     }
-    if (dagInteractionMode === "edit" && view === "setup" && nextView !== "setup") {
+    if (dagInteractionMode === "edit" && view === "write" && nextView !== "write") {
       setDagNavAwayPending({ target: nextView, replace: false });
       return;
     }
@@ -1777,10 +1885,8 @@ export default function App() {
       markStageVisit(hasMacroCompiled ? "planStructure" : "projectSetup");
     } else if (nextView === "write") {
       markStageVisit("writeChapter");
-    } else if (nextView === "review" || nextView === "graph" || nextView === "workflowMetrics") {
+    } else if (nextView === "review" || nextView === "graph") {
       markStageVisit("reviewFix");
-    } else if (nextView === "export") {
-      markStageVisit("export");
     }
     navigateToViewPath(nextView);
   }
@@ -1796,22 +1902,19 @@ export default function App() {
     const target = pending.target;
     const markStageVisit = (stage: TaskFlowStageId) => {
       setStageVisitCount((prev) => ({ ...prev, [stage]: prev[stage] + 1 }));
-      setNavCount((prev) => prev + 1);
     };
     if (target === "setup") {
       markStageVisit(hasMacroCompiled ? "planStructure" : "projectSetup");
     } else if (target === "write") {
       markStageVisit("writeChapter");
-    } else if (target === "review" || target === "graph" || target === "workflowMetrics") {
+    } else if (target === "review" || target === "graph") {
       markStageVisit("reviewFix");
-    } else if (target === "export") {
-      markStageVisit("export");
     }
     navigateToViewPath(target, pending.replace);
   }
 
   const anchorDagFsOverlay =
-    view === "setup" && anchorDagFullscreen && (error || failureNotice || notice) ? (
+    view === "write" && anchorDagFullscreen && (error || failureNotice || notice) ? (
       <div className="flex flex-col gap-2">
         {error ? (
           <div className="rounded-xl border border-error/40 bg-error/10 px-3 py-2 font-label text-xs text-error shadow-lg backdrop-blur-sm">
@@ -1831,7 +1934,54 @@ export default function App() {
       </div>
     ) : null;
 
-  const hideTopAlertsForAnchorFs = view === "setup" && anchorDagFullscreen;
+  const hideTopAlertsForAnchorFs = view === "write" && anchorDagFullscreen;
+
+  const workspaceToolbarActions =
+    storyId && (view === "setup" || view === "write" || view === "review" || view === "graph") ? (
+      <button
+        type="button"
+        className="inline-flex items-center gap-1.5 rounded-full border border-outline-variant/30 bg-surface-container-high/70 px-3 py-1.5 font-label text-[10px] font-bold uppercase tracking-[0.2em] text-on-surface-variant transition-colors hover:border-secondary/40 hover:text-secondary"
+        onClick={() => setWorkflowDetailsOpen(true)}
+      >
+        <span className="material-symbols-outlined text-sm" aria-hidden>
+          info
+        </span>
+        <span className="hidden sm:inline">{t("workspace.details.title")}</span>
+      </button>
+    ) : null;
+
+  if (view === "home") {
+    return (
+      <div className="relative min-h-screen bg-background text-on-surface">
+        <div className="pointer-events-none fixed inset-0 -z-10 opacity-30">
+          <div className="absolute right-[10%] top-[20%] h-[500px] w-[500px] rounded-full bg-primary/5 blur-[120px]" />
+          <div className="absolute bottom-[10%] left-[5%] h-[400px] w-[400px] rounded-full bg-secondary/5 blur-[100px]" />
+        </div>
+        <header className="sticky top-0 z-50 flex h-16 w-full items-center justify-between border-b border-outline-variant/10 bg-[#161d2f] px-6 font-headline text-sm tracking-tight md:px-8">
+          <div className="text-xl font-bold uppercase tracking-widest text-primary">{t("app.brand.wordmark")}</div>
+          <div className="flex items-center gap-3">
+            <button type="button" className="btn-secondary text-xs font-label uppercase tracking-wider" onClick={() => navigate("/library")}>
+              {t("landing.ctaPrimary")}
+            </button>
+            <select
+              aria-label="UI language selector"
+              className="rounded border border-outline-variant/30 bg-surface-container-low px-2 py-1 text-xs text-on-surface"
+              value={locale}
+              onChange={(e) => setLocale(e.target.value as typeof locale)}
+            >
+              <option value="zh-Hant">{t("lang.zhHant")}</option>
+              <option value="zh-Hans">{t("lang.zhHans")}</option>
+              <option value="en">{t("lang.en")}</option>
+            </select>
+          </div>
+        </header>
+        <LandingPage />
+        <footer className="border-t border-outline-variant/10 py-6 text-center font-label text-xs uppercase tracking-widest text-outline">
+          {locale === "en" ? "Auteur AI · Narrative Assistant" : locale === "zh-Hans" ? "Auteur AI · 叙事辅助" : "Auteur AI · 敘事輔助"}
+        </footer>
+      </div>
+    );
+  }
 
   return (
     <AppShell
@@ -1841,6 +1991,8 @@ export default function App() {
       showStorySection={showStorySection}
       storySectionLabel={storySectionLabel}
       workflowMiniStatus={workflowMiniStatus}
+      onBrandClick={handleBrandClick}
+      workspaceToolbarActions={workspaceToolbarActions}
     >
       <div className="mx-4 mt-4 min-h-[3.5rem]">
         {!hideTopAlertsForAnchorFs && error ? (
@@ -1876,65 +2028,192 @@ export default function App() {
       ) : null}
 
       {view === "setup" ? (
-        <div className="min-h-[calc(100vh-12rem)] px-4 pb-12 pt-8 md:px-10 lg:px-12">
-          <div className="mb-10 max-w-7xl">
-            <span className="mb-2 block font-label text-xs font-semibold uppercase tracking-[0.3em] text-secondary">
-              {t("app.setup.kicker")}
-            </span>
-            <h1 className="mb-3 font-headline text-4xl font-black tracking-tighter text-on-surface">
-              {t("app.setup.title")}
-            </h1>
-            <p className="max-w-2xl font-body text-lg italic text-on-surface-variant">{t("app.setup.subtitle")}</p>
-          </div>
-
-          {storyId && !hasCompletedChapter ? (
-            <div className="mb-4 max-w-7xl rounded-xl border border-tertiary/25 bg-tertiary/5 px-4 py-3 font-body text-sm leading-relaxed text-on-surface">
-              <span className="font-headline font-bold text-tertiary">{t("app.setup.rerunCompileTitle")}</span>
-              {t("app.setup.rerunCompileBody")}
+        <div className="min-h-[calc(100vh-12rem)] px-4 pb-16 pt-10 md:px-10 lg:px-12">
+          <div className="mx-auto max-w-5xl">
+            <div className="mb-10 grid grid-cols-1 gap-6 md:grid-cols-[1fr_auto] md:items-end">
+              <div>
+                <span className="mb-2 block font-label text-xs font-semibold uppercase tracking-[0.32em] text-secondary">
+                  {t("app.setup.kicker")}
+                </span>
+                <h1 className="mb-3 font-headline text-5xl font-black tracking-tighter text-on-surface md:text-6xl">
+                  {t("app.setup.title")}
+                </h1>
+                <p className="max-w-2xl font-body text-lg italic leading-relaxed text-on-surface-variant">
+                  {t("app.setup.subtitle")}
+                </p>
+              </div>
+              <div className="hidden md:block">
+                <div className="rounded-full border border-outline-variant/20 bg-surface-container-low px-4 py-2 font-label text-[10px] font-semibold uppercase tracking-[0.3em] text-on-surface-variant">
+                  <span className="text-secondary">{t("app.setup.storyIdLabel")}：</span>
+                  <span className="ml-1 font-mono normal-case tracking-normal text-on-surface">
+                    {storyId || t("app.setup.storyIdMissing")}
+                  </span>
+                </div>
+              </div>
             </div>
-          ) : null}
 
-          {storyId && hasCompletedChapter ? (
-            <div className="mb-4 max-w-7xl rounded-xl border border-warning/35 bg-warning/10 px-4 py-3 font-body text-sm leading-relaxed text-on-surface">
-              <span className="mr-2 font-headline font-bold text-warning">{t("app.setup.macroLockedTitle")}</span>
-              {t("app.setup.macroLockedBody")}
+            {storyId && !hasAnyCompletedChapter ? (
+              <div className="mb-4 rounded-xl border border-tertiary/25 bg-tertiary/5 px-4 py-3 font-body text-sm leading-relaxed text-on-surface">
+                <span className="font-headline font-bold text-tertiary">{t("app.setup.rerunCompileTitle")}</span>
+                {t("app.setup.rerunCompileBody")}
+              </div>
+            ) : null}
+
+            {storyId && hasAnyCompletedChapter ? (
+              <div className="mb-4 rounded-xl border border-warning/35 bg-warning/10 px-4 py-3 font-body text-sm leading-relaxed text-on-surface">
+                <span className="mr-2 font-headline font-bold text-warning">{t("app.setup.macroLockedTitle")}</span>
+                {t("app.setup.macroLockedBody")}
+              </div>
+            ) : null}
+
+            <div className="mb-6 rounded-xl border border-outline-variant/10 bg-surface-container-low/70 px-5 py-3 font-body text-sm text-on-surface-variant md:hidden">
+              <span className="font-label text-[10px] uppercase tracking-[0.28em] text-secondary">
+                {t("app.setup.storyIdLabel")}
+              </span>
+              <span className="ml-2 font-mono text-on-surface">
+                {storyId || t("app.setup.storyIdMissing")}
+              </span>
+              <span className="ml-2">· {storySummary}</span>
             </div>
-          ) : null}
 
-          <div className="mb-8 max-w-7xl rounded-xl border border-outline-variant/10 bg-surface-container-low/80 p-4 font-label shadow-glow">
-            <div className="mb-3 flex flex-wrap items-center gap-3">
-              <button
-                type="button"
-                className="btn-primary-gradient flex items-center gap-2 text-sm"
-                onClick={handleMacroCompile}
-                disabled={!storyId || busy || workflowConflictLocked || hasCompletedChapter}
-                title={hasCompletedChapter ? t("app.setup.macroLockedShortNotice") : undefined}
-              >
-                <span className="material-symbols-outlined text-lg">auto_awesome</span>
-                {t("app.setup.compileCta")}
-              </button>
-              <button type="button" className="btn-secondary" onClick={storyId ? exportProjectBundle : undefined} disabled={!storyId || busy}>
-                {t("setup.exportProjectJson")}
-              </button>
-              <button
-                type="button"
-                className="btn-secondary"
-                onClick={() => toolbarImportInputRef.current?.click()}
-                disabled={!storyId || busy || hasCompletedChapter}
-                title={hasCompletedChapter ? t("app.setup.macroLockedShortNotice") : undefined}
-              >
-                {t("setup.importProjectJson")}
-              </button>
-              <input
-                ref={toolbarImportInputRef}
-                type="file"
-                accept="application/json,.json"
-                className="hidden"
-                onChange={(e) => void handleToolbarImportProjectBundle(e)}
+            {storyId && hasAnyCompletedChapter ? (
+              <div className="rounded-2xl border border-outline-variant/15 bg-surface-container-low/60 p-5">
+                <p className="mb-3 font-label text-[10px] font-bold uppercase tracking-[0.28em] text-secondary">
+                  {t("app.setup.compiledResultsKicker")}
+                </p>
+                <div className="grid gap-5">
+                  <section className="rounded-xl border border-outline-variant/15 bg-surface-container/40 p-4">
+                    <MacroPlanPanel
+                      macroData={macroData}
+                      storyId={storyId || null}
+                      onMacroDataUpdate={setMacroData}
+                      onBusy={setBusy}
+                      onError={setError}
+                      editLocked
+                    />
+                  </section>
+
+                  <section className="rounded-xl border border-outline-variant/15 bg-surface-container/40 p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="font-label text-[10px] font-bold uppercase tracking-[0.28em] text-secondary">
+                        {t("chapterRail.window.dagTitle")}
+                      </p>
+                      <span className="rounded-full border border-outline-variant/25 bg-surface-container-high px-2 py-0.5 font-label text-[10px] font-semibold tabular-nums text-on-surface-variant">
+                        {t("chapterRail.dagNodeCount", undefined, { n: setupAnchorNodes.length })}
+                      </span>
+                    </div>
+                    <p className="mt-2 font-body text-xs leading-relaxed text-on-surface-variant">
+                      {t("chapterRail.dagEditableHint")}
+                    </p>
+                    <div className="mt-3 overflow-hidden rounded-xl border border-outline-variant/12">
+                      {setupAnchorNodes.length > 0 ? (
+                        <AnchorDagSection
+                          locale={locale}
+                          detailOpen={false}
+                          onFullscreenChange={setAnchorDagFullscreen}
+                          graph={(dagFs) => (
+                            <AnchorNodesGraphView
+                              nodes={setupAnchorNodes.map((n) => ({
+                                id: String(n.id),
+                                title: String(n.title ?? ""),
+                                status: n.status,
+                                node_kind: n.node_kind,
+                                storyline_ids: [...(n.storyline_ids ?? [])],
+                                depends_on: [...(n.depends_on ?? [])],
+                              }))}
+                              storylines={macroData?.storylines}
+                              selectedId={setupSelectedAnchorNodeId}
+                              onSelect={() => {}}
+                              height={dagFs.active ? dagGraphHeight : 520}
+                              layoutEpoch={dagLayoutEpoch}
+                              detailPanelOpen={false}
+                              onToggleDetailPanel={() => {}}
+                              fullscreen={dagFs}
+                              interactionMode="view"
+                              onInteractionModeChange={() => {}}
+                              linkPick={null}
+                              onResolveLinkPick={() => {}}
+                              onCanvasCreateNode={() => {}}
+                              onGraphDeleteNode={() => {}}
+                              onGraphStartLinkParent={() => {}}
+                              onGraphStartLinkChild={() => {}}
+                              onRemoveDependency={() => {}}
+                              pendingManualPosition={null}
+                              onConsumePendingManualPosition={() => {}}
+                              validationHighlights={null}
+                              readOnly
+                            />
+                          )}
+                          detail={null}
+                        />
+                      ) : (
+                        <div className="px-3 py-10 text-center font-body text-xs text-on-surface-variant">
+                          {t("chapterRail.dagEmpty")}
+                        </div>
+                      )}
+                    </div>
+                  </section>
+                </div>
+              </div>
+            ) : (
+              <StorySetupForm
+                resetKey={`${storyId || "new"}-${configVersion}`}
+                initialValues={storyId ? storyConfigSnapshot : null}
+                onValuesChange={storyId ? setStoryConfigSnapshot : undefined}
+                onSubmit={handleCreateStory}
+                onCompile={storyId && !hasAnyCompletedChapter ? handleMacroCompile : undefined}
+                compileBusy={compileInProgress}
+                showCreateButton={!storyId}
+                onExportProjectBundle={storyId ? exportProjectBundle : undefined}
+                onImportProjectBundle={storyId && !hasAnyCompletedChapter ? applyImportProjectBundle : undefined}
+                getImportBundlePreview={storyId && !hasAnyCompletedChapter ? buildImportBundlePreviewLines : undefined}
+                onBusy={setBusy}
+                onError={setError}
+                disabled={busy}
               />
-            </div>
+            )}
+
+            {storyId && hasMacroCompiled && !hasAnyCompletedChapter ? (
+              <div className="mt-6 rounded-2xl border border-outline-variant/15 bg-surface-container-low/60 p-5">
+                <p className="mb-3 font-label text-[10px] font-bold uppercase tracking-[0.28em] text-secondary">
+                  {t("app.setup.compiledResultsKicker")}
+                </p>
+                <MacroPlanPanel
+                  macroData={macroData}
+                  storyId={storyId || null}
+                  onMacroDataUpdate={setMacroData}
+                  onBusy={setBusy}
+                  onError={setError}
+                  editLocked={false}
+                />
+              </div>
+            ) : null}
+
+            {storyId && hasMacroCompiled && !hasChapterRun ? (
+              <div className="mt-6 flex flex-col gap-2 rounded-xl border border-secondary/25 bg-secondary/8 px-4 py-4 md:flex-row md:items-center md:justify-between">
+                <p className="font-body text-sm leading-relaxed text-on-surface">{t("app.setup.ctaMacroReadyHint")}</p>
+                <button type="button" className="btn-primary-gradient shrink-0" onClick={() => handleViewChange("write")}>
+                  {t("app.setup.ctaGotoChapterRun")} →
+                </button>
+              </div>
+            ) : null}
+
+            {storyId && hasCompletedChapter && hasChapterRun ? (
+              <div className="mt-6 flex flex-col gap-3 rounded-xl border border-outline-variant/15 bg-surface-container-low/60 px-4 py-4">
+                <p className="font-body text-sm text-on-surface-variant">{t("app.setup.ctaLockedHint")}</p>
+                <div className="flex flex-wrap gap-2">
+                  <button type="button" className="btn-secondary" onClick={() => handleViewChange("review")}>
+                    {t("app.setup.ctaGotoReview")} →
+                  </button>
+                  <button type="button" className="btn-secondary" onClick={() => handleViewChange("graph")}>
+                    {t("app.setup.ctaGotoGraph")} →
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
             {compileInProgress ? (
-              <div className="rounded-xl border border-secondary/30 bg-secondary/8 px-3 py-2">
+              <div className="mt-4 rounded-xl border border-secondary/30 bg-secondary/8 px-3 py-2">
                 <p className="font-mono text-xs text-secondary">
                   <span className="mr-2 inline-block h-2 w-2 animate-pulse rounded-full bg-secondary" />
                   {compileProgressText} ({Math.max(0, Math.min(100, Number(compileProgress?.percent ?? 5)))}%)
@@ -1948,36 +2227,103 @@ export default function App() {
               </div>
             ) : null}
           </div>
+        </div>
+      ) : null}
 
-          <div className="mb-6 max-w-7xl rounded-xl border border-outline-variant/10 bg-surface-container-low px-6 py-4 font-label text-sm text-on-surface-variant">
-            <span className="text-secondary">{t("app.setup.storyIdLabel")}</span>{" "}
-            {storyId || t("app.setup.storyIdMissing")} · {storySummary}
-          </div>
+      {view === "review" ? (
+        <ReviewShell
+          storyId={storyId}
+          chapterId={chapterId}
+          chapters={chapters}
+          selectedChapter={selectedChapter}
+          outputLanguage={normalizeOutputLanguage(storyConfigSnapshot?.output_language ?? "zh-Hant")}
+          busy={busy}
+          workflow={workflow}
+          setWorkflow={setWorkflow}
+          workflowHitlActive={workflowHitlActive}
+          onSelectChapter={async (nextChapterId) => {
+            if (!storyId) return;
+            setBusy(true);
+            setError("");
+            try {
+              setChapterId(nextChapterId);
+              setSelectedChapter(await fetchChapter(storyId, nextChapterId));
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : "";
+              if (msg.includes("Chapter not found")) {
+                setNotice(t("app.chapter.notOnDisk"));
+                setSelectedChapter(null);
+              } else {
+                reportApiError(err, "errors.loadChapterFailed");
+              }
+            } finally {
+              setBusy(false);
+            }
+          }}
+          onDownloadChapter={async (nextChapterId) => {
+            if (!storyId) return;
+            setBusy(true);
+            setError("");
+            try {
+              await downloadChapterTxt(storyId, nextChapterId);
+            } catch (err) {
+              reportApiError(err, "errors.downloadChapterFailed");
+            } finally {
+              setBusy(false);
+            }
+          }}
+          onDownloadAllCompletedZip={handleDownloadAllCompletedZip}
+          completedChaptersZipCount={completedChaptersZipCount}
+          onBackToChapterRun={() => handleViewChange("write")}
+        />
+      ) : null}
 
-          <div className="grid max-w-7xl grid-cols-1 items-start gap-8 lg:grid-cols-12">
-            <div className="lg:col-span-5">
-              <StorySetupForm
-                resetKey={`${storyId || "new"}-${configVersion}`}
-                initialValues={storyId ? storyConfigSnapshot : null}
-                onValuesChange={storyId ? setStoryConfigSnapshot : undefined}
-                onSubmit={handleCreateStory}
-                onSaveSettings={storyId ? handleSaveStorySettings : undefined}
-                showCreateButton={!storyId}
-                onExportProjectBundle={storyId ? exportProjectBundle : undefined}
-                onImportProjectBundle={storyId && !hasCompletedChapter ? applyImportProjectBundle : undefined}
-                getImportBundlePreview={storyId && !hasCompletedChapter ? buildImportBundlePreviewLines : undefined}
-                onBusy={setBusy}
-                onError={setError}
-                disabled={busy}
-              />
+      {view === "graph" ? (
+        <div className="min-h-[calc(100vh-12rem)] bg-background p-4 md:p-8">
+          <div className="mb-6 flex flex-col gap-4 border-b border-outline-variant/10 pb-6 md:flex-row md:items-start md:justify-between">
+            <div className="max-w-xl">
+              <h1 className="font-headline text-xl font-bold tracking-tight text-on-surface md:text-2xl">{t("common.graph")}</h1>
+              <p className="mt-2 text-sm leading-relaxed text-on-surface-variant">{t("app.graph.pageHint")}</p>
             </div>
-            <div className="lg:col-span-7">
-              <div className="rounded-xl border border-outline-variant/10 bg-surface-container-low/50 p-3">
-                <div className="mb-3 px-1">
-                  <h3 className="font-label text-xs font-semibold uppercase tracking-wider text-on-surface-variant">
-                    {t("app.setup.worldEditorTitle")}
-                  </h3>
-                </div>
+            <div className="flex flex-wrap items-center gap-3 md:shrink-0">
+              <button type="button" className="btn-secondary" onClick={() => handleViewChange("write")}>
+                {t("app.graph.backWrite")}
+              </button>
+              <button type="button" className="btn-secondary" onClick={() => handleViewChange("setup")}>
+                {t("app.graph.backSetup")}
+              </button>
+              <span className="rounded-full border border-outline-variant/25 bg-surface-container-high px-3 py-1.5 text-xs font-medium text-on-surface-variant">
+                {t("app.graph.readOnly")}
+              </span>
+            </div>
+          </div>
+          <GraphView graph={graph} protagonistCharacterId={macroData?.protagonist_character_id} readOnly />
+        </div>
+      ) : null}
+
+      {view === "write" ? (
+        <div className="min-h-[calc(100vh-12rem)] bg-background px-4 py-6 md:px-8 md:py-8">
+          <div className="mx-auto flex w-full max-w-7xl flex-col gap-6">
+            {bibleDrawerOpen ? (
+              <section className="flex flex-col gap-4">
+                <header className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <span className="mb-1 block font-label text-[10px] font-semibold uppercase tracking-[0.3em] text-secondary">
+                      {t("app.write.compileResultKicker")}
+                    </span>
+                    <h2 className="font-headline text-2xl font-bold tracking-tight text-on-surface">
+                      {t("chapterRail.bibleDrawerTitle")}
+                    </h2>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => setBibleDrawerOpen(false)}
+                  >
+                    <span className="material-symbols-outlined text-base">arrow_back</span>
+                    {t("chapterRail.closeBibleDrawer")}
+                  </button>
+                </header>
                 <MacroPlanPanel
                   macroData={macroData}
                   storyId={storyId || null}
@@ -1986,531 +2332,309 @@ export default function App() {
                   onError={setError}
                   editLocked={hasCompletedChapter}
                 />
-              </div>
-            </div>
-          </div>
-          <div className="mt-8 max-w-7xl">
-            <div className="rounded-xl border border-outline-variant/10 bg-surface-container-low/50 p-3">
-              <div className="mb-3 px-1">
-                <h3 className="font-label text-xs font-semibold uppercase tracking-wider text-on-surface-variant">
-                  {t("app.setup.anchorDagTitle")}
-                </h3>
-              </div>
-              {setupAnchorNodes.length > 0 ? (
-                <AnchorDagSection
-                  locale={locale}
-                  fsOverlay={anchorDagFsOverlay}
-                  detailOpen={dagDetailPanelOpen}
-                  onDetailOpenChange={setDagDetailPanelOpen}
-                  onFullscreenChange={setAnchorDagFullscreen}
-                  toolbarExtras={
-                    <span className="text-[10px] text-on-surface-variant">
-                      {t("app.setup.anchorDagHint")}
+              </section>
+            ) : (
+              <>
+                <header className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <span className="mb-1 block font-label text-[10px] font-semibold uppercase tracking-[0.3em] text-secondary">
+                      {t("app.write.pageKicker")}
                     </span>
-                  }
-                  graph={(dagFs) => (
-                    <AnchorNodesGraphView
-                      nodes={setupAnchorNodes.map((n) => ({
-                        id: String(n.id),
-                        title: String(n.title ?? ""),
-                        status: n.status,
-                        node_kind: n.node_kind,
-                        storyline_ids: [...(n.storyline_ids ?? [])],
-                        depends_on: [...(n.depends_on ?? [])],
-                      }))}
-                      storylines={macroData?.storylines}
-                      selectedId={setupSelectedAnchorNodeId}
-                      onSelect={(nodeId) => setSetupSelectedAnchorNodeId(nodeId)}
-                      height={dagGraphHeight}
-                      layoutEpoch={dagLayoutEpoch}
-                      detailPanelOpen={dagDetailPanelOpen}
-                      onToggleDetailPanel={() => setDagDetailPanelOpen((o) => !o)}
-                      fullscreen={dagFs}
-                      interactionMode={dagInteractionMode}
-                      onInteractionModeChange={handleDagInteractionModeChange}
-                      linkPick={dagLinkPick}
-                      onResolveLinkPick={resolveDagLinkPick}
-                      onCanvasCreateNode={({ x, y }) => createAnchorNodeAtGraphPosition(x, y)}
-                      onGraphDeleteNode={requestDeleteSetupAnchorNodeFromGraph}
-                      onGraphStartLinkParent={(childId) => setDagLinkPick({ mode: "parent", childId })}
-                      onGraphStartLinkChild={(parentId) => setDagLinkPick({ mode: "child", parentId })}
-                      onRemoveDependency={removeDependencyEdge}
-                      pendingManualPosition={dagPendingManualPosition}
-                      onConsumePendingManualPosition={() => setDagPendingManualPosition(null)}
-                      validationHighlights={dagValidationHighlights}
-                    />
-                  )}
-                  detail={
-                    <SetupAnchorDagDetailPanel
-                      storyId={storyId.trim() ? storyId : null}
-                      setupSelectedAnchorNode={setupSelectedAnchorNode}
-                      selectedResolved={selectedResolved}
-                      topologyLocked={Boolean(macroData?.topology_locked)}
-                      dagFieldsEditable={dagFieldsEditable}
-                      busy={busy}
-                      selectedAnchorLockedParentIds={selectedAnchorLockedParentIds}
-                      onPatchAnchor={patchSetupAnchorNode}
-                    />
-                  }
-                />
-              ) : (
-                <div className="rounded-lg border border-outline-variant/20 bg-surface-container-low p-4 text-sm text-on-surface-variant">
-                  {t("app.dagDetail.noMapYet")}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {view === "review" ? (
-        <div className="flex min-h-[calc(100vh-12rem)] flex-col bg-surface-container-lowest lg:flex-row">
-          <ChapterReader
-            storyId={storyId}
-            currentChapterId={selectedChapter?.chapter_id ?? chapterId}
-            chapters={chapters}
-            chapter={selectedChapter}
-            outputLanguage={normalizeOutputLanguage(storyConfigSnapshot?.output_language ?? "zh-Hant")}
-            busy={busy}
-            disableChapterSelection={chapterReviewActive}
-            reviewModeTitle={chapterReviewActive ? t("chapterReview.title") : undefined}
-            articleOverride={
-              chapterReviewActive
-                ? (
-                    <ChapterReviewGate
-                      key={String(workflow?.run.run_id ?? "")}
-                      draft={String(workflow?.state?.current_draft ?? workflow?.state?.best_draft_content ?? "")}
-                      readerScore={
-                        typeof workflow?.state?.last_reader_score === "number"
-                          ? Number(workflow?.state?.last_reader_score)
-                          : null
-                      }
-                      busy={busy}
-                      onApprove={chapterReviewHandlers.onApprove}
-                      onAbandon={chapterReviewHandlers.onAbandon}
-                      onRerun={chapterReviewHandlers.onRerun}
-                    />
-                  )
-                : undefined
-            }
-            onSelectChapter={async (nextChapterId) => {
-              if (!storyId) return;
-              setBusy(true);
-              setError("");
-              try {
-                setChapterId(nextChapterId);
-                setSelectedChapter(await fetchChapter(storyId, nextChapterId));
-              } catch (err) {
-                const msg = err instanceof Error ? err.message : "";
-                if (msg.includes("Chapter not found")) {
-                  setNotice(t("app.chapter.notOnDisk"));
-                  setSelectedChapter(null);
-                } else {
-                  reportApiError(err, "errors.loadChapterFailed");
-                }
-              } finally {
-                setBusy(false);
-              }
-            }}
-            onDownloadChapter={async (nextChapterId) => {
-              if (!storyId) return;
-              setBusy(true);
-              setError("");
-              try {
-                await downloadChapterTxt(storyId, nextChapterId);
-                setHasExportedChapter(true);
-              } catch (err) {
-                reportApiError(err, "errors.downloadChapterFailed");
-              } finally {
-                setBusy(false);
-              }
-            }}
-            rightRail={
-              <div className="flex min-w-0 flex-col gap-4 p-4">
-                <WorkflowProgressTrack workflow={workflow} compact />
-                <section className="rounded-xl border border-outline-variant/15 bg-surface-container-low/70 p-2">
-                  <div
-                    className="inline-flex rounded-md bg-surface-container-lowest/40 p-1"
-                    role="tablist"
-                    aria-label={t("workflow.sidePanel.ariaReview")}
-                  >
-                    <button
-                      type="button"
-                      id="review-tab-progress"
-                      role="tab"
-                      aria-controls="review-panel-progress"
-                      aria-selected={reviewPanelTab === "progress"}
-                      className={`rounded-md px-3 py-1.5 text-xs font-semibold ${
-                        reviewPanelTab === "progress" ? "bg-primary/20 text-primary" : "text-on-surface-variant"
-                      }`}
-                      onClick={() => setReviewPanelTab("progress")}
-                      aria-pressed={reviewPanelTab === "progress"}
-                    >
-                      {t("workflow.sidePanel.tabProgress")}
-                    </button>
-                    <button
-                      type="button"
-                      id="review-tab-logs"
-                      role="tab"
-                      aria-controls="review-panel-logs"
-                      aria-selected={reviewPanelTab === "logs"}
-                      className={`rounded-md px-3 py-1.5 text-xs font-semibold ${
-                        reviewPanelTab === "logs" ? "bg-secondary/20 text-secondary" : "text-on-surface-variant"
-                      }`}
-                      onClick={() => setReviewPanelTab("logs")}
-                      aria-pressed={reviewPanelTab === "logs"}
-                    >
-                      {t("workflow.sidePanel.tabLogs")}
-                    </button>
+                    <h1 className="font-headline text-3xl font-black tracking-tight text-on-surface md:text-4xl">
+                      {t("app.write.pageTitle", undefined, { n: nextGeneratableChapterId })}
+                    </h1>
                   </div>
-                </section>
-                {reviewPanelTab === "progress" ? (
-                  <div
-                    id="review-panel-progress"
-                    role="tabpanel"
-                    aria-labelledby="review-tab-progress"
-                    className="flex min-w-0 flex-col gap-4"
-                  >
-                    <WorkflowMonitor workflow={workflow} variant="compact" />
-                    <HitlDevDropdown workflow={workflow} setWorkflow={setWorkflow} variant="compact" />
-                    <HitlPanel
-                      workflow={workflow}
-                      graph={graph}
-                      storyId={storyId || null}
-                      variant="compact"
-                      busy={busy}
-                      workflowError={workflowHitlActive ? error : ""}
-                      {...hitlHandlers}
-                    />
-                  </div>
-                ) : (
-                  <div id="review-panel-logs" role="tabpanel" aria-labelledby="review-tab-logs" className="min-w-0">
-                    <AgentOutputView workflow={workflow} variant="compact" />
-                  </div>
-                )}
-              </div>
-            }
-          />
-        </div>
-      ) : null}
-
-      {view === "graph" ? (
-        <div className="min-h-[calc(100vh-12rem)] bg-background p-4 md:p-8">
-          <div className="mb-4 flex items-center justify-end gap-3">
-            <button type="button" className="btn-secondary" onClick={() => requestNavigateToView("setup")}>
-              {t("app.graph.backSetup")}
-            </button>
-            <span className="rounded-full border border-secondary/20 bg-secondary/10 px-3 py-1 font-label text-[10px] font-bold uppercase tracking-widest text-secondary">
-              {t("app.graph.readOnly")}
-            </span>
-          </div>
-          <GraphView graph={graph} protagonistCharacterId={macroData?.protagonist_character_id} />
-        </div>
-      ) : null}
-
-      {view === "write" ? (
-        <div className="min-h-[calc(100vh-12rem)] bg-background px-4 py-6 md:px-8 md:py-8">
-          <div className="mx-auto flex w-full max-w-7xl flex-col gap-6">
-            <section className="rounded-xl border border-outline-variant/15 bg-surface-container-low/70 p-4 shadow-glow">
-              <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(180px,240px)_minmax(220px,280px)_auto] lg:items-end">
-                <div className="flex flex-col gap-1.5">
-                  <span className="font-label text-[10px] uppercase tracking-wider text-outline">
-                    {t("app.write.chapterToWrite")}
-                  </span>
-                  <div
-                    className="flex h-10 items-center rounded-lg border border-outline-variant/20 bg-surface-container-highest px-3 font-semibold text-on-surface"
-                    title={t("app.write.chapterToWriteHint")}
-                  >
-                    {t("app.write.chapterN", undefined, { n: nextGeneratableChapterId })}
-                  </div>
-                </div>
-                <label className="flex min-w-0 flex-col gap-1.5 font-body text-sm text-on-surface">
-                  <span className="font-label text-[10px] uppercase tracking-wider text-outline">
-                    {t("app.write.aiFreedom")}
-                  </span>
-                  <select
-                    value={aiFreedomLevel}
-                    onChange={(e) => setAiFreedomLevel(e.target.value as AiFreedomLevel)}
-                    disabled={!storyId || busy || workflowConflictLocked || chapterAlreadyCompleted}
-                    className="auteur-input h-10 w-full text-sm"
-                  >
-                    <option value="strict">{t("app.write.aiFreedom.strict")}</option>
-                    <option value="balanced">{t("app.write.aiFreedom.balanced")}</option>
-                    <option value="wild">{t("app.write.aiFreedom.wild")}</option>
-                  </select>
-                </label>
-                <div className="flex items-end">
-                  <button
-                    type="button"
-                    className="btn-primary-gradient h-10"
-                    onClick={handleRunChapter}
-                    disabled={!storyId || busy || workflowConflictLocked || chapterAlreadyCompleted}
-                  >
-                    {t("app.write.runChapter")}
-                  </button>
-                </div>
-              </div>
-              <label className="mt-3 flex items-start gap-3 rounded-lg border border-outline-variant/15 bg-surface-container-highest/40 px-3 py-2.5">
-                <input
-                  type="checkbox"
-                  className="mt-0.5 h-4 w-4 accent-primary"
-                  checked={requireChapterReview}
-                  onChange={(e) => setRequireChapterReview(e.target.checked)}
-                  disabled={!storyId || busy || workflowConflictLocked || chapterAlreadyCompleted}
-                  aria-describedby="app-write-review-hint"
-                />
-                <span className="flex min-w-0 flex-col">
-                  <span className="font-label text-[11px] font-bold uppercase tracking-wider text-secondary">
-                    {t("app.write.requireChapterReview")}
-                  </span>
-                  <span id="app-write-review-hint" className="font-body text-xs text-on-surface-variant">
-                    {t("app.write.requireChapterReviewHint")}
-                  </span>
-                </span>
-              </label>
-              {chapterAlreadyCompleted ? (
-                <div className="mt-3">
-                  <span className="rounded-full border border-tertiary/30 bg-tertiary/10 px-2 py-1 text-xs text-tertiary">
-                    {t("app.write.chapterCompleteBadge", undefined, { n: nextGeneratableChapterId })}
-                  </span>
-                </div>
-              ) : null}
-              {storyId ? (
-                <div className="mt-3 overflow-hidden rounded-xl border border-outline-variant/15 bg-surface-container/90">
-                  <button
-                    type="button"
-                    className="flex w-full items-center justify-between gap-2 px-4 py-3 text-left hover:bg-surface-container-highest/50"
-                    onClick={() => setPreamblePanelOpen((o) => !o)}
-                  >
-                    <span className="flex min-w-0 flex-1 items-center gap-2">
-                      <span className="font-label text-[11px] font-bold uppercase tracking-wider text-secondary">
-                        {t("app.write.preambleToggle")}
-                      </span>
-                      <span className="truncate font-body text-sm text-on-surface-variant">
-                        {t("app.write.preambleSummary", undefined, { n: Math.max(0, nextGeneratableChapterId - 1) })}
-                      </span>
+                  {!hasMacroCompiled ? (
+                    <span className="rounded-full border border-tertiary/30 bg-tertiary/10 px-3 py-1 font-label text-[10px] font-bold uppercase tracking-widest text-tertiary">
+                      {t("app.write.compileResultEmpty")}
                     </span>
-                    <span className="material-symbols-outlined shrink-0 text-on-surface-variant">
-                      {preamblePanelOpen ? "expand_less" : "expand_more"}
-                    </span>
-                  </button>
-                  {preamblePanelOpen && !writingPreamble ? (
-                    <div className="border-t border-outline-variant/10 px-4 py-3 font-body text-sm text-on-surface-variant">
-                      {t("app.write.preambleLoading")}
-                    </div>
                   ) : null}
-                  {preamblePanelOpen && writingPreamble ? (
-                    <div className="space-y-2 border-t border-outline-variant/10 px-4 py-3 font-body text-sm text-on-surface-variant">
-                      <p>
-                        {t("app.write.preamblePrevChapter")}
-                        {writingPreamble.plot_progress.previous_chapter.plot_summary || t("app.write.preambleNoSummary")}
-                      </p>
-                      {preambleHasNonLlmSummary ? (
-                        <p className="rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-xs text-on-surface">
-                          {t("app.write.preambleNonLlmWarn")}
-                        </p>
-                      ) : null}
-                      {writingPreamble.plot_progress.previous_chapter.chapter_id != null &&
-                      plotSummarySourceNeedsRegenerate(writingPreamble.plot_progress.previous_chapter.plot_summary_source) ? (
+                </header>
+
+                <ChapterRunComposer
+                  nextChapterId={nextGeneratableChapterId}
+                  chapterAlreadyCompleted={chapterAlreadyCompleted}
+                  formDisabled={!storyId || busy || workflowConflictLocked || chapterAlreadyCompleted}
+                  referenceSlot={
+                    <ChapterRunRail
+                      bibleSlot={
+                        <MacroPlanPanel
+                          macroData={macroData}
+                          storyId={storyId || null}
+                          onMacroDataUpdate={setMacroData}
+                          onBusy={setBusy}
+                          onError={setError}
+                          editLocked={hasCompletedChapter}
+                        />
+                      }
+                      dagSlot={
+                        setupAnchorNodes.length > 0 ? (
+                          <AnchorDagSection
+                            locale={locale}
+                            fsOverlay={anchorDagFsOverlay}
+                            detailOpen={anchorDagFullscreen && dagDetailPanelOpen}
+                            onDetailOpenChange={setDagDetailPanelOpen}
+                            onFullscreenChange={setAnchorDagFullscreen}
+                            graph={(dagFs) => {
+                              const railReadOnly = !dagFs.active;
+                              return (
+                                <AnchorNodesGraphView
+                                  nodes={setupAnchorNodes.map((n) => ({
+                                    id: String(n.id),
+                                    title: String(n.title ?? ""),
+                                    status: n.status,
+                                    node_kind: n.node_kind,
+                                    storyline_ids: [...(n.storyline_ids ?? [])],
+                                    depends_on: [...(n.depends_on ?? [])],
+                                  }))}
+                                  storylines={macroData?.storylines}
+                                  selectedId={setupSelectedAnchorNodeId}
+                                  onSelect={(nodeId) => setSetupSelectedAnchorNodeId(nodeId)}
+                                  height={dagFs.active ? dagGraphHeight : 220}
+                                  layoutEpoch={dagLayoutEpoch}
+                                  detailPanelOpen={dagFs.active ? dagDetailPanelOpen : false}
+                                  onToggleDetailPanel={() => setDagDetailPanelOpen((o) => !o)}
+                                  fullscreen={dagFs}
+                                  interactionMode={dagInteractionMode}
+                                  onInteractionModeChange={handleDagInteractionModeChange}
+                                  linkPick={dagLinkPick}
+                                  onResolveLinkPick={resolveDagLinkPick}
+                                  onCanvasCreateNode={({ x, y }) => createAnchorNodeAtGraphPosition(x, y)}
+                                  onGraphDeleteNode={requestDeleteSetupAnchorNodeFromGraph}
+                                  onGraphStartLinkParent={(childId) => setDagLinkPick({ mode: "parent", childId })}
+                                  onGraphStartLinkChild={(parentId) => setDagLinkPick({ mode: "child", parentId })}
+                                  onRemoveDependency={removeDependencyEdge}
+                                  pendingManualPosition={dagPendingManualPosition}
+                                  onConsumePendingManualPosition={() => setDagPendingManualPosition(null)}
+                                  validationHighlights={dagValidationHighlights}
+                                  readOnly={railReadOnly}
+                                />
+                              );
+                            }}
+                            detail={
+                              <SetupAnchorDagDetailPanel
+                                storyId={storyId.trim() ? storyId : null}
+                                setupSelectedAnchorNode={setupSelectedAnchorNode}
+                                selectedResolved={selectedResolved}
+                                topologyLocked={Boolean(macroData?.topology_locked)}
+                                dagFieldsEditable={dagFieldsEditable}
+                                busy={busy}
+                                selectedAnchorLockedParentIds={selectedAnchorLockedParentIds}
+                                onPatchAnchor={patchSetupAnchorNode}
+                              />
+                            }
+                          />
+                        ) : null
+                      }
+                      anchorNodeCount={setupAnchorNodes.length}
+                    disabled={!storyId}
+                    />
+                  }
+                  chapterOutline={chapterOutline}
+                  setChapterOutline={setChapterOutline}
+                  chapterHardRules={chapterHardRules}
+                  setChapterHardRules={setChapterHardRules}
+                  chapterHardRulesRef={chapterHardRulesRef}
+                  writingPreamble={writingPreamble}
+                  preambleHasNonLlmSummary={preambleHasNonLlmSummary}
+                  preamblePrevChapterId={writingPreamble?.plot_progress.previous_chapter.chapter_id ?? null}
+                  preamblePrevSourceNeedsRegenerate={
+                    writingPreamble
+                      ? plotSummarySourceNeedsRegenerate(writingPreamble.plot_progress.previous_chapter.plot_summary_source)
+                      : false
+                  }
+                  regenSummaryBusyChapter={regenSummaryBusyChapter}
+                  onRegeneratePreviousSummary={(cid) => void handleRegenerateChapterSummary(cid)}
+                  chapterAnchorCandidates={chapterAnchorCandidates.map((n) => ({
+                    id: String(n.id),
+                    title: String(n.title ?? ""),
+                    description: String(n.description ?? ""),
+                  }))}
+                  selectedAnchorIds={selectedAnchorIds}
+                  setSelectedAnchorIds={setSelectedAnchorIds}
+                  autoNextAnchorTitles={autoNextAnchorTitles}
+                  aiFreedomLevel={aiFreedomLevel}
+                  setAiFreedomLevel={setAiFreedomLevel}
+                  onRequestRunChapter={openRunConfirm}
+                />
+
+                <WorkflowProgressTrack
+                  workflow={workflow}
+                  compact
+                  starting={busy}
+                  headerActions={
+                    storyId && (workflow || hasChapterRun) ? (
+                      <>
                         <button
                           type="button"
-                          className="btn-secondary"
-                          disabled={regenSummaryBusyChapter !== null || busy}
-                          onClick={() => void handleRegenerateChapterSummary(writingPreamble.plot_progress.previous_chapter.chapter_id!)}
+                          disabled={!hasChapterRun || busy}
+                          className={`inline-flex items-center gap-1 rounded-md border border-outline-variant/30 px-2 py-0.5 font-label text-[10px] font-semibold uppercase tracking-wider ${
+                            !hasChapterRun || busy
+                              ? "cursor-not-allowed opacity-40"
+                              : "text-on-surface-variant hover:border-secondary/40 hover:text-secondary"
+                          }`}
+                          onClick={() => handleViewChange("review")}
+                          title={
+                            !hasChapterRun ? t("app.nav.needChapterRun") : t("app.write.goReviewHitl")
+                          }
                         >
-                          {regenSummaryBusyChapter === writingPreamble.plot_progress.previous_chapter.chapter_id
-                            ? t("app.write.regenProcessing")
-                            : t("app.write.regenSummary")}
+                          <span className="material-symbols-outlined text-sm" aria-hidden>
+                            fact_check
+                          </span>
+                          <span className="hidden md:inline">{t("app.write.goReviewHitl")}</span>
+                          <span className="md:hidden">{t("common.reviewFix")}</span>
                         </button>
-                      ) : null}
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
-              <div className="mt-3 rounded-lg border border-outline-variant/15 bg-surface-container-high/30 p-3">
-                <p className="mb-2 font-label text-[10px] font-bold uppercase tracking-wider text-secondary">{t("app.write.milestonesTitle")}</p>
-                <div className="rounded-lg border border-outline-variant/15 bg-surface-container-low px-3 py-2">
-                  <p className="text-xs text-on-surface-variant">{t("app.write.milestonesHint")}</p>
-                  <button
-                    type="button"
-                    className="mt-2 rounded-md border border-secondary/35 px-3 py-1.5 text-xs font-semibold text-secondary"
-                    onClick={() => setManualAnchorSelectionOpen((v) => !v)}
-                    disabled={!storyId || busy || workflowConflictLocked || chapterAlreadyCompleted}
-                  >
-                    {manualAnchorSelectionOpen ? t("app.write.manualHide") : t("app.write.manualShow")}
-                  </button>
-                </div>
-                {manualAnchorSelectionOpen ? (
-                  chapterAnchorCandidates.length === 0 ? (
-                    <p className="mt-2 text-xs text-on-surface-variant">{t("app.write.noMilestonesAvailable")}</p>
-                  ) : (
-                    <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-2">
-                      {chapterAnchorCandidates.map((n) => (
-                        <label key={n.id} className="rounded-md border border-outline-variant/15 bg-surface-container-low px-2 py-2 text-xs text-on-surface">
-                          <div className="mb-1 font-semibold">{n.title}</div>
-                          <div className="mb-2 line-clamp-2 text-on-surface-variant">{n.description}</div>
-                          <label className="inline-flex items-center gap-1">
-                            <input
-                              type="checkbox"
-                              checked={selectedAnchorIds.includes(n.id)}
-                              onChange={(e) =>
-                                setSelectedAnchorIds((prev) => {
-                                  const next = e.target.checked ? [...prev, n.id] : prev.filter((id) => id !== n.id);
-                                  return Array.from(new Set(next)).slice(0, 2);
-                                })
-                              }
-                              disabled={!storyId || busy || workflowConflictLocked || chapterAlreadyCompleted}
-                            />
-                            <span>{t("app.write.anchorPick")}</span>
-                          </label>
-                        </label>
-                      ))}
-                    </div>
-                  )
-                ) : null}
-                {manualAnchorSelectionOpen ? (
-                  <p className="mt-2 text-[11px] text-on-surface-variant">
-                    {autoNextAnchorTitles.length > 0
-                      ? t("app.write.anchorAutoHint", undefined, {
-                          titles: autoNextAnchorTitles.join(t("app.write.listSep")),
-                        })
-                      : t("app.write.anchorAutoThinking")}
-                  </p>
-                ) : null}
-              </div>
-              <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-                <div>
-                  <p className="mb-2 font-label text-[10px] font-bold uppercase tracking-wider text-secondary">
-                    {t("app.write.chapterDirection")}
-                  </p>
-                  <textarea
-                    value={chapterOutline}
-                    onChange={(e) => setChapterOutline(e.target.value)}
-                    maxLength={2000}
-                    rows={4}
-                    placeholder={t("app.write.outlinePlaceholder")}
-                    disabled={!storyId || busy || workflowConflictLocked || chapterAlreadyCompleted}
-                    className="w-full resize-y rounded-lg border border-outline-variant/20 bg-surface-container-highest px-3 py-2 font-body text-sm text-on-surface placeholder:text-on-surface-variant/50"
-                  />
-                  {chapterOutline.trim().length > 0 && chapterOutline.trim().length < OUTLINE_FULL_BINDING_MIN_CHARS ? (
-                    <p className="mt-2 font-body text-xs text-secondary">
-                      {t("app.write.outlineShortHint", undefined, { min: OUTLINE_FULL_BINDING_MIN_CHARS })}
-                    </p>
-                  ) : null}
-                </div>
-                <div>
-                  <p className="mb-2 font-label text-[10px] font-bold uppercase tracking-wider text-secondary">
-                    {t("app.write.hardRules")}
-                  </p>
-                  <textarea
-                    value={chapterHardRules}
-                    onChange={(e) => setChapterHardRules(e.target.value)}
-                    ref={chapterHardRulesRef}
-                    maxLength={8000}
-                    rows={4}
-                    placeholder={t("app.write.hardRulesPlaceholder")}
-                    disabled={!storyId || busy || workflowConflictLocked || chapterAlreadyCompleted}
-                    className="w-full resize-y rounded-lg border border-outline-variant/20 bg-surface-container-highest px-3 py-2 font-body text-sm text-on-surface placeholder:text-on-surface-variant/50"
-                  />
-                </div>
-              </div>
-            </section>
-
-            <WorkflowProgressTrack workflow={workflow} />
-            <section className="rounded-xl border border-outline-variant/15 bg-surface-container-low/70 p-2">
-              <div
-                className="inline-flex rounded-md bg-surface-container-lowest/40 p-1"
-                role="tablist"
-                aria-label={t("workflow.sidePanel.ariaWrite")}
-              >
-                <button
-                  type="button"
-                  id="write-tab-progress"
-                  role="tab"
-                  aria-controls="write-panel-progress"
-                  aria-selected={writePanelTab === "progress"}
-                  className={`rounded-md px-3 py-1.5 text-xs font-semibold ${
-                    writePanelTab === "progress" ? "bg-primary/20 text-primary" : "text-on-surface-variant"
-                  }`}
-                  onClick={() => setWritePanelTab("progress")}
-                  aria-pressed={writePanelTab === "progress"}
-                >
-                  {t("workflow.sidePanel.tabProgress")}
-                </button>
-                <button
-                  type="button"
-                  id="write-tab-logs"
-                  role="tab"
-                  aria-controls="write-panel-logs"
-                  aria-selected={writePanelTab === "logs"}
-                  className={`rounded-md px-3 py-1.5 text-xs font-semibold ${
-                    writePanelTab === "logs" ? "bg-secondary/20 text-secondary" : "text-on-surface-variant"
-                  }`}
-                  onClick={() => setWritePanelTab("logs")}
-                  aria-pressed={writePanelTab === "logs"}
-                >
-                  {t("workflow.sidePanel.tabLogs")}
-                </button>
-              </div>
-            </section>
-            {writePanelTab === "progress" ? (
-              <div id="write-panel-progress" role="tabpanel" aria-labelledby="write-tab-progress" className="grid grid-cols-1 gap-6">
-                <div className="min-w-0">
-                  <WorkflowMonitor workflow={workflow} />
-                  <HitlDevDropdown workflow={workflow} setWorkflow={setWorkflow} />
-                  <div className="mt-4">
-                    <HitlPanel
-                      workflow={workflow}
-                      graph={graph}
-                      storyId={storyId || null}
-                      busy={busy}
-                      workflowError={workflowHitlActive ? error : ""}
-                      {...hitlHandlers}
-                    />
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <div id="write-panel-logs" role="tabpanel" aria-labelledby="write-tab-logs" className="min-w-0">
-                <AgentOutputView workflow={workflow} />
-              </div>
+                        <button
+                          type="button"
+                          disabled={!hasChapterRun || busy}
+                          className={`inline-flex items-center gap-1 rounded-md border border-outline-variant/30 px-2 py-0.5 font-label text-[10px] font-semibold uppercase tracking-wider ${
+                            !hasChapterRun || busy
+                              ? "cursor-not-allowed opacity-40"
+                              : "text-on-surface-variant hover:border-secondary/40 hover:text-secondary"
+                          }`}
+                          onClick={() => handleViewChange("graph")}
+                          title={!hasChapterRun ? t("app.nav.needChapterRun") : t("app.write.goGraph")}
+                        >
+                          <span className="material-symbols-outlined text-sm" aria-hidden>
+                            hub
+                          </span>
+                          <span className="hidden md:inline">{t("app.write.goGraph")}</span>
+                          <span className="md:hidden">{t("common.graph")}</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          className="inline-flex items-center gap-1 rounded-md border border-outline-variant/30 px-2 py-0.5 font-label text-[10px] font-semibold uppercase tracking-wider text-on-surface-variant hover:border-secondary/40 hover:text-secondary disabled:cursor-not-allowed disabled:opacity-40"
+                          onClick={() => setWorkflowDetailsOpen(true)}
+                          title={t("workspace.details.title")}
+                        >
+                          <span className="material-symbols-outlined text-sm" aria-hidden>
+                            monitoring
+                          </span>
+                          <span className="hidden md:inline">{t("workspace.details.title")}</span>
+                          <span className="md:hidden">{t("workspace.details.title")}</span>
+                        </button>
+                      </>
+                    ) : null
+                  }
+                />
+              </>
             )}
           </div>
         </div>
       ) : null}
-      {view === "workflowMetrics" && storyId ? (
-        <div className="min-h-[calc(100vh-12rem)] px-4 py-8 md:px-10 lg:px-12">
-          <WorkflowMetricsDashboard storyId={storyId} chapters={chapters} />
+      {storyId ? (
+        <StoryWorkflowDetailsDrawer
+          open={workflowDetailsOpen}
+          onClose={() => setWorkflowDetailsOpen(false)}
+          storyId={storyId}
+          chapters={chapters}
+          workflow={workflow}
+        />
+      ) : null}
+      {storyId && (view === "setup" || view === "write" || view === "review" || view === "graph") ? (
+        <div className="pointer-events-none fixed bottom-6 left-6 z-[60] max-w-sm">
+          <div className="pointer-events-auto">
+            <HitlDevPanel
+              workflow={workflow}
+              setWorkflow={setWorkflow}
+              setGraph={setGraph}
+              onNavigateReview={() => navigateToViewPath("review")}
+              variant="compact"
+            />
+          </div>
         </div>
       ) : null}
-      {view === "export" ? (
-        <div className="min-h-[calc(100vh-12rem)] px-4 py-8 md:px-10">
-          <ExportCenter
-            storyId={storyId}
-            chapters={chapters}
-            busy={busy}
-            onExportProject={exportProjectBundle}
-            onExportChapter={async (chapterToExport) => {
-              if (!storyId) return;
-              setBusy(true);
-              setError("");
-              try {
-                await downloadChapterTxt(storyId, chapterToExport);
-                setHasExportedChapter(true);
-              } catch (err) {
-                reportApiError(err, "errors.downloadChapterFailed");
-              } finally {
-                setBusy(false);
-              }
-            }}
-            uxMetrics={{
-              navCount,
-              elapsedMinutes: flowStartedAt ? Math.max(1, Math.round((Date.now() - flowStartedAt) / 60000)) : null,
-              stageVisitCount,
-            }}
-          />
-        </div>
+      {storyId && (view === "setup" || view === "write" || view === "review" || view === "graph") ? (
+        <HitlFloatingDock
+          workflow={workflow}
+          workflowHitlActive={workflowHitlActive}
+          graph={graph}
+          storyId={storyId}
+          busy={busy}
+          workflowError={workflowHitlActive ? error : ""}
+          chapterReview={hitlChapterReviewForDock}
+          {...hitlDockHandlers}
+        />
       ) : null}
+      {runConfirmOpen && dagDialogMount
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-[65000] flex items-center justify-center bg-black/55 px-4 backdrop-blur-[2px]"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="run-confirm-title"
+              onClick={(e) => {
+                if (e.target === e.currentTarget) setRunConfirmOpen(false);
+              }}
+            >
+              <div
+                className="max-w-md rounded-2xl border border-outline-variant/30 bg-surface-container-high p-5 shadow-[0_24px_80px_rgba(0,0,0,0.55)]"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <h2
+                  id="run-confirm-title"
+                  className="font-headline text-xl font-bold tracking-tight text-on-surface"
+                >
+                  {t("chapterRun.runConfirm.title", undefined, { n: nextGeneratableChapterId })}
+                </h2>
+                <p className="mt-2 font-body text-sm leading-relaxed text-on-surface-variant">
+                  {t("chapterRun.runConfirm.body")}
+                </p>
+                {!hasAnyCompletedChapter ? (
+                  <p className="mt-3 rounded-xl border border-warning/30 bg-warning/10 px-3 py-2 font-body text-xs leading-relaxed text-on-surface">
+                    {t("chapterRun.runConfirm.compileLockWarn")}
+                  </p>
+                ) : null}
+                <label className="mt-4 flex items-start gap-3 rounded-xl border border-outline-variant/20 bg-surface-container px-3 py-3">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5 h-4 w-4 accent-primary"
+                    checked={requireChapterReview}
+                    onChange={(e) => setRequireChapterReview(e.target.checked)}
+                    aria-describedby="run-confirm-review-hint"
+                  />
+                  <span className="flex min-w-0 flex-col">
+                    <span className="font-label text-[11px] font-bold uppercase tracking-wider text-secondary">
+                      {t("chapterRun.runConfirm.reviewToggle")}
+                    </span>
+                    <span
+                      id="run-confirm-review-hint"
+                      className="mt-0.5 font-body text-xs leading-relaxed text-on-surface-variant"
+                    >
+                      {t("chapterRun.runConfirm.reviewHint")}
+                    </span>
+                  </span>
+                </label>
+                <div className="mt-5 flex flex-wrap justify-end gap-2">
+                  <button
+                    type="button"
+                    className="rounded-xl border border-outline-variant/35 px-4 py-2 text-xs font-semibold text-on-surface-variant hover:bg-white/5"
+                    onClick={() => setRunConfirmOpen(false)}
+                    disabled={busy}
+                  >
+                    {t("common.cancel")}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-primary-gradient h-10 min-w-[8rem] px-5 text-sm"
+                    onClick={() => {
+                      setRunConfirmOpen(false);
+                      void handleRunChapter();
+                    }}
+                    disabled={busy}
+                  >
+                    <span className="material-symbols-outlined text-base" aria-hidden>
+                      auto_awesome
+                    </span>
+                    {t("chapterRun.runConfirm.confirm")}
+                  </button>
+                </div>
+              </div>
+            </div>,
+            dagDialogMount,
+          )
+        : null}
       {dagModal === "delete" && dagDialogMount
         ? createPortal(
             <div
@@ -2740,43 +2864,6 @@ export default function App() {
             dagDialogMount,
           )
         : null}
-      <ConfirmModal
-        mount={typeof document !== "undefined" ? document.body : null}
-        open={toolbarImportModeOpen}
-        danger
-        title={t("app.confirm.importModeTitle")}
-        message={t("app.confirm.importModeBody")}
-        cancelLabel={t("common.cancel")}
-        secondaryLabel={t("app.confirm.importMerge")}
-        onSecondary={() => openToolbarImportConfirm("merge")}
-        confirmLabel={t("app.confirm.importReplace")}
-        onConfirm={() => openToolbarImportConfirm("replace")}
-        onCancel={cancelToolbarImportFlow}
-      />
-      <ConfirmModal
-        mount={typeof document !== "undefined" ? document.body : null}
-        open={toolbarImportConfirmOpen && toolbarImportPreview !== null}
-        title={t("app.confirm.importProjectTitle")}
-        message={
-          toolbarImportPreview
-            ? t("app.confirm.importProjectBody", undefined, {
-                modeLabel:
-                  toolbarImportPreview.mode === "replace"
-                    ? t("app.confirm.importReplace")
-                    : t("app.confirm.importMerge"),
-                storyLine: toolbarImportPreview.storyLine,
-                macroLine: toolbarImportPreview.macroLine,
-              })
-            : ""
-        }
-        confirmLabel={t("app.confirm.importProjectConfirm")}
-        cancelLabel={t("common.cancel")}
-        onConfirm={() => void handleToolbarImportConfirmed()}
-        onCancel={() => {
-          setToolbarImportConfirmOpen(false);
-          setToolbarImportModeOpen(true);
-        }}
-      />
       <ConfirmModal
         mount={typeof document !== "undefined" ? document.body : null}
         open={compileSaveModalOpen}

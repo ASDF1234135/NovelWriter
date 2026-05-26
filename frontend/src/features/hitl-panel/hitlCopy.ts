@@ -82,6 +82,8 @@ const REASON_TO_STEP_INDEX: Partial<Record<string, number>> = {
   [HITL_REASON.B_STORY]: 12,
   [HITL_REASON.ANCHOR_RESOLVE]: 12,
   [HITL_REASON.OUTPUT_LANGUAGE]: 10,
+  /** Post-reader human review — pipeline paused after reader; show writing-stage emphasis. */
+  [HITL_REASON.CHAPTER_DRAFT_REVIEW]: 7,
 };
 
 export function getStuckFlowStepIndex(reason: string, resumeFrom: string): number {
@@ -518,13 +520,7 @@ export function solutionsForReason(reason: string): { id: HitlSolutionId; title:
     return [];
   }
   if (reason === HITL_REASON.ANCHOR_RESOLVE) {
-    return [
-      {
-        id: "b_story",
-        title: pick("里程碑是否已達成", "里程碑是否已达成", "Decide Milestone Resolution"),
-        blurb: pick("決定里程碑是否視為已達成，或打回前段流程修改。", "决定里程碑是否视为已达成，或打回前段流程修改。", "Mark milestone as achieved or send flow back for revision."),
-      },
-    ];
+    return [];
   }
   if (reason === HITL_REASON.CONTEXT) {
     return [
@@ -597,9 +593,9 @@ export const HITL_REASON_MATRIX: HitlReasonMatrixRow[] = [
   {
     reason: HITL_REASON.ANCHOR_RESOLVE,
     title: getSituationCopy(HITL_REASON.ANCHOR_RESOLVE).title,
-    defaultSolution: "b_story",
-    solutionIds: ["b_story"],
-    optionIds: ["b_story_wait_judgement"],
+    defaultSolution: null,
+    solutionIds: [],
+    optionIds: [],
   },
   {
     reason: HITL_REASON.B_STORY,

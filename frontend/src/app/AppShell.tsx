@@ -1,8 +1,8 @@
 import type { ReactNode } from "react";
 import { useI18n } from "../i18n/useI18n";
 
-export type AppView = "library" | "setup" | "write" | "review" | "graph" | "export" | "workflowMetrics";
-export type TaskFlowStageId = "projectSetup" | "planStructure" | "writeChapter" | "reviewFix" | "export";
+export type AppView = "home" | "library" | "setup" | "write" | "review" | "graph";
+export type TaskFlowStageId = "projectSetup" | "planStructure" | "writeChapter" | "reviewFix";
 
 type NavItem = { id: AppView; label: string; icon: string };
 
@@ -17,6 +17,10 @@ type Props = {
   /** Short label for the story group heading (e.g. story title or id prefix). */
   storySectionLabel?: string;
   workflowMiniStatus: string;
+  /** Brand / wordmark: exit story to library or go home when no story. */
+  onBrandClick?: () => void;
+  /** Shown next to workflow status when inside a story workspace (e.g. workflow details). */
+  workspaceToolbarActions?: ReactNode;
 };
 
 function navButtonClass(active: boolean, enabled: boolean): string {
@@ -47,9 +51,11 @@ export function AppShell({
   showStorySection,
   storySectionLabel = "",
   workflowMiniStatus,
+  onBrandClick,
+  workspaceToolbarActions,
 }: Props) {
   const { locale, setLocale, t } = useI18n();
-  const gatedViews: AppView[] = ["write", "review", "graph", "export", "workflowMetrics"];
+  const gatedViews: AppView[] = ["write", "review", "graph"];
   const needsStory = (v: AppView) => gatedViews.includes(v);
   const libraryNav: NavItem = { id: "library", label: t("common.storyLibrary"), icon: "auto_stories" };
   const storyScopedNav: NavItem[] = [
@@ -57,8 +63,6 @@ export function AppShell({
     { id: "write", label: t("common.chapterRun"), icon: "play_circle" },
     { id: "review", label: t("common.reviewFix"), icon: "fact_check" },
     { id: "graph", label: t("common.graph"), icon: "hub" },
-    { id: "workflowMetrics", label: t("common.workflowMetrics"), icon: "analytics" },
-    { id: "export", label: t("common.export"), icon: "upload_file" },
   ];
 
   function tryNavigate(v: AppView) {
@@ -80,7 +84,18 @@ export function AppShell({
       </div>
 
       <header className="sticky top-0 z-50 flex h-16 w-full items-center justify-between border-b border-outline-variant/10 bg-[#161d2f] px-6 font-headline text-sm tracking-tight md:px-8">
-        <div className="text-xl font-bold uppercase tracking-widest text-primary">{t("app.brand.wordmark")}</div>
+        {onBrandClick ? (
+          <button
+            type="button"
+            onClick={onBrandClick}
+            className="text-left text-xl font-bold uppercase tracking-widest text-primary transition-opacity hover:opacity-90"
+            aria-label={t("app.brand.navAria")}
+          >
+            {t("app.brand.wordmark")}
+          </button>
+        ) : (
+          <div className="text-xl font-bold uppercase tracking-widest text-primary">{t("app.brand.wordmark")}</div>
+        )}
         <nav className="hidden items-center gap-8 md:flex">
           <button
             type="button"
@@ -121,7 +136,8 @@ export function AppShell({
         </div>
       </header>
       <div className="border-b border-outline-variant/10 bg-surface-container-low/70 px-4 py-3 md:px-8">
-        <div className="flex justify-end">
+        <div className="flex flex-wrap items-center justify-end gap-3">
+          {workspaceToolbarActions ? <div className="flex flex-wrap items-center gap-2">{workspaceToolbarActions}</div> : null}
           <div className="rounded-lg border border-outline-variant/20 bg-surface-container-highest/50 px-3 py-1.5 font-body text-xs text-on-surface-variant">
             {t("common.workflowStatus")}：<span className="font-semibold text-on-surface">{workflowMiniStatus}</span>
           </div>
@@ -131,7 +147,13 @@ export function AppShell({
       <div className="flex min-h-[calc(100vh-8.5rem)]">
         <aside className="sticky top-[7.5rem] hidden h-[calc(100vh-7.5rem)] w-64 shrink-0 flex-col gap-1 self-start border-r border-outline-variant/10 bg-[#161d2f] py-8 font-headline text-sm font-medium text-primary shadow-glowSm lg:flex">
           <div className="mb-8 px-6">
-            <div className="text-lg font-bold text-secondary">{t("app.brand.wordmark")}</div>
+            {onBrandClick ? (
+              <button type="button" onClick={onBrandClick} className="block text-left text-lg font-bold text-secondary hover:opacity-90">
+                {t("app.brand.wordmark")}
+              </button>
+            ) : (
+              <div className="text-lg font-bold text-secondary">{t("app.brand.wordmark")}</div>
+            )}
             <div className="text-[10px] uppercase tracking-[0.2em] text-on-surface/50">{t("app.brand.subtitle")}</div>
           </div>
 

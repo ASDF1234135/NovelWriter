@@ -38,6 +38,42 @@
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
   }
+  /** Unified panel shell for drawers, rails, and floating tools */
+  .nb-panel {
+    @apply glass-panel border border-outline-variant/20 text-on-surface;
+  }
+  .nb-panel-header {
+    @apply border-b border-outline-variant/15 px-5 py-4;
+  }
+  .nb-panel-body {
+    @apply px-5 py-4;
+  }
+  .landing-hero-enter {
+    animation: landing-hero-enter 720ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .landing-card-enter {
+    animation: landing-card-enter 640ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  @keyframes landing-hero-enter {
+    from {
+      opacity: 0;
+      transform: translateY(14px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  @keyframes landing-card-enter {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
   .material-symbols-outlined {
     font-family: "Material Symbols Outlined";
     font-weight: normal;
@@ -79,12 +115,49 @@
   .btn-secondary {
     @apply rounded-full border border-outline-variant/30 bg-surface-container-high px-4 py-2 font-label text-xs font-bold uppercase tracking-wider text-on-surface transition-colors hover:bg-surface-bright/40 disabled:opacity-50;
   }
+  .setup-phase-enter {
+    animation: setup-phase-enter 360ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  @keyframes setup-phase-enter {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  .setup-stepper-rule {
+    background-image: linear-gradient(
+      to right,
+      transparent 0%,
+      rgba(192, 193, 255, 0.35) 18%,
+      rgba(233, 195, 73, 0.4) 50%,
+      rgba(255, 183, 131, 0.35) 82%,
+      transparent 100%
+    );
+  }
   .chapter-review-editor {
     @apply min-h-[60vh] rounded-lg bg-surface-container-lowest/30 px-3 py-3 outline-none transition-shadow;
     caret-color: rgb(192 193 255 / 0.85);
   }
   .chapter-review-editor:focus-within {
     @apply ring-2 ring-primary/30;
+  }
+  .chapter-review-editor--manuscript {
+    @apply min-h-[52vh] rounded-xl border border-[rgba(90,70,45,0.12)] px-3 py-3 outline-none transition-shadow sm:min-h-[56vh];
+    background-color: rgba(255, 252, 244, 0.92);
+    caret-color: rgba(120, 85, 35, 0.85);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.65);
+  }
+  .chapter-review-editor--manuscript:focus-within {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.65),
+      0 0 0 2px rgba(180, 140, 60, 0.28);
+  }
+  .chapter-review-editor--manuscript p.is-editor-empty:first-child::before {
+    color: rgba(74, 58, 24, 0.45);
   }
   .chapter-review-editor p {
     @apply my-3;
@@ -101,5 +174,259 @@
     float: left;
     height: 0;
     pointer-events: none;
+  }
+
+  /*
+   * Writer's Atelier — review-view aesthetic.
+   * Dark graphite desk, warm amber lamplight, paper-white manuscript.
+   * Reuses tailwind's secondary (#e9c349 amber) and tertiary (#ffb783 warm coral)
+   * as the brass / candle palette.
+   */
+  .atelier-stage {
+    background-color: #0a0d18;
+    background-image:
+      radial-gradient(1200px 600px at 80% -10%, rgba(233, 195, 73, 0.07), transparent 60%),
+      radial-gradient(900px 500px at -10% 110%, rgba(255, 183, 131, 0.05), transparent 65%),
+      linear-gradient(180deg, #0a0d18 0%, #060912 100%);
+  }
+
+  .atelier-paper {
+    background-color: #f6efdc;
+    color: #2a221a;
+    background-image:
+      radial-gradient(120% 80% at 50% 0%, rgba(255, 255, 255, 0.5), transparent 60%),
+      linear-gradient(180deg, #f9f3df 0%, #ede2c2 100%);
+    box-shadow:
+      0 30px 80px -28px rgba(0, 0, 0, 0.7),
+      0 6px 18px -10px rgba(0, 0, 0, 0.45),
+      inset 0 0 80px rgba(170, 120, 60, 0.06),
+      inset 0 1px 0 rgba(255, 255, 255, 0.4);
+    position: relative;
+  }
+  .atelier-paper::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    opacity: 0.4;
+    mix-blend-mode: multiply;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.55  0 0 0 0 0.42  0 0 0 0 0.22  0 0 0 0.08 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+    background-size: 160px 160px;
+  }
+  .atelier-paper > * {
+    position: relative;
+    z-index: 1;
+  }
+
+  .atelier-ribbon {
+    background:
+      linear-gradient(
+        to right,
+        transparent 0%,
+        rgba(233, 195, 73, 0.16) 22%,
+        rgba(255, 183, 131, 0.18) 50%,
+        rgba(233, 195, 73, 0.14) 78%,
+        transparent 100%
+      ),
+      linear-gradient(180deg, rgba(10, 13, 24, 0.88) 0%, rgba(10, 13, 24, 0.72) 100%);
+    border-bottom: 1px solid rgba(233, 195, 73, 0.22);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+  }
+
+  .atelier-brass-glow {
+    box-shadow:
+      0 0 0 1px rgba(233, 195, 73, 0.28),
+      0 0 22px rgba(233, 195, 73, 0.22),
+      0 24px 60px -22px rgba(0, 0, 0, 0.75);
+  }
+
+  .atelier-candle-pulse {
+    animation: atelier-candle 3.4s ease-in-out infinite;
+  }
+  .atelier-candle-strong {
+    animation: atelier-candle-strong 1.6s ease-in-out infinite;
+  }
+  @keyframes atelier-candle {
+    0%,
+    100% {
+      box-shadow:
+        0 0 0 1px rgba(233, 195, 73, 0.32),
+        0 0 14px rgba(233, 195, 73, 0.28);
+      filter: brightness(1);
+    }
+    50% {
+      box-shadow:
+        0 0 0 1px rgba(233, 195, 73, 0.45),
+        0 0 22px rgba(255, 183, 131, 0.55);
+      filter: brightness(1.06);
+    }
+  }
+  @keyframes atelier-candle-strong {
+    0%,
+    100% {
+      box-shadow:
+        0 0 0 1px rgba(255, 183, 131, 0.55),
+        0 0 18px rgba(255, 183, 131, 0.55);
+      filter: brightness(1);
+    }
+    50% {
+      box-shadow:
+        0 0 0 2px rgba(255, 183, 131, 0.75),
+        0 0 32px rgba(255, 183, 131, 0.85);
+      filter: brightness(1.1);
+    }
+  }
+
+  /*
+   * Brass ruler segments for the top ribbon's stage timeline.
+   * Each segment is a thin 32px-tall track with a gradient fill and
+   * vertical tick marks every 12.5% to evoke an engraved ruler.
+   */
+  .atelier-ruler-track {
+    height: 6px;
+    border-radius: 9999px;
+    background:
+      repeating-linear-gradient(
+        to right,
+        rgba(233, 195, 73, 0.18) 0,
+        rgba(233, 195, 73, 0.18) 1px,
+        transparent 1px,
+        transparent 14px
+      ),
+      linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(0, 0, 0, 0.25));
+    border: 1px solid rgba(233, 195, 73, 0.22);
+    overflow: hidden;
+    position: relative;
+  }
+  .atelier-ruler-fill {
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: linear-gradient(
+      90deg,
+      rgba(192, 193, 255, 0.55) 0%,
+      rgba(233, 195, 73, 0.85) 55%,
+      rgba(255, 183, 131, 0.9) 100%
+    );
+    box-shadow: 0 0 12px rgba(233, 195, 73, 0.55);
+    transition: width 480ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  /*
+   * Desk-clip button — emulates a brass paper clip clamping the
+   * manuscript at its top edge. Used for the per-chapter Download.
+   */
+  .atelier-desk-clip {
+    @apply inline-flex items-center gap-2 px-3 py-1.5 font-label text-[11px] font-bold uppercase tracking-wider;
+    color: #4a3a18;
+    background: linear-gradient(180deg, #f6d77a 0%, #c89a36 50%, #8f6a1e 100%);
+    border: 1px solid rgba(74, 58, 24, 0.45);
+    border-radius: 9999px;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.65),
+      inset 0 -1px 0 rgba(0, 0, 0, 0.25),
+      0 4px 10px -4px rgba(0, 0, 0, 0.55);
+    transition: transform 160ms ease, filter 160ms ease;
+  }
+  .atelier-desk-clip:hover {
+    transform: translateY(-1px);
+    filter: brightness(1.06);
+  }
+  .atelier-desk-clip:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+    transform: none;
+    filter: grayscale(0.4);
+  }
+
+  /*
+   * Bookmark glyph for the slim chapter spine in review view.
+   */
+  .atelier-bookmark {
+    @apply relative flex flex-col items-center justify-center gap-1 px-2 py-3 font-label text-[10px] uppercase tracking-[0.18em];
+    color: rgba(233, 195, 73, 0.65);
+    border-left: 2px solid transparent;
+    transition: color 160ms ease, border-color 160ms ease, background-color 160ms ease;
+  }
+  .atelier-bookmark:hover {
+    color: rgba(255, 183, 131, 0.95);
+    background-color: rgba(233, 195, 73, 0.05);
+  }
+  .atelier-bookmark[data-active="true"] {
+    color: #ffe1a8;
+    border-left-color: #e9c349;
+    background-color: rgba(233, 195, 73, 0.08);
+  }
+  .atelier-bookmark[data-active="true"]::after {
+    content: "";
+    position: absolute;
+    left: -2px;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: linear-gradient(180deg, transparent, #ffb783 50%, transparent);
+    filter: drop-shadow(0 0 4px rgba(255, 183, 131, 0.6));
+  }
+
+  /* Reference folio: saved chapter text beside human-review draft (review shell). */
+  .atelier-review-reference {
+    border: 1px solid rgba(90, 70, 45, 0.16);
+    border-radius: 14px;
+    background: linear-gradient(165deg, rgba(255, 252, 244, 0.92) 0%, rgba(245, 236, 216, 0.75) 100%);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.55),
+      0 10px 28px -14px rgba(40, 28, 10, 0.22);
+  }
+  @media (min-width: 1024px) {
+    .atelier-review-reference--sticky {
+      position: sticky;
+      top: 0.75rem;
+      max-height: min(78vh, 760px);
+    }
+  }
+
+  /*
+   * Slide-up drawer for the agent logs at bottom of review view.
+   */
+  .atelier-drawer-enter {
+    animation: atelier-drawer 360ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  @keyframes atelier-drawer {
+    from {
+      transform: translateY(100%);
+      opacity: 0.6;
+    }
+    to {
+      transform: translateY(0);
+      opacity: 1;
+    }
+  }
+
+  /*
+   * Soft entrance for the floating HITL dock when HITL fires.
+   */
+  .atelier-dock-enter {
+    animation: atelier-dock 320ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  @keyframes atelier-dock {
+    from {
+      transform: translateY(16px) scale(0.96);
+      opacity: 0;
+    }
+    to {
+      transform: translateY(0) scale(1);
+      opacity: 1;
+    }
+  }
+
+  /** Indeterminate strip for workflow “still running” feedback on chapter run. */
+  @keyframes workflowLiveBar {
+    0% {
+      transform: translateX(-100%);
+    }
+    100% {
+      transform: translateX(380%);
+    }
   }
 }

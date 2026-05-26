@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { GraphSnapshot } from "../../types";
 import G6 from "@antv/g6";
 import { styleForNodeType } from "./nodeTypeStyles";
+import { useI18n } from "../../i18n/useI18n";
 import {
   buildDisplayNameMap,
   GraphDetailDrawer,
@@ -55,6 +56,7 @@ export function UniverseGraphAntv({
   onSetEgoCenter,
 }: Props) {
   void protagonistCharacterId;
+  const { t } = useI18n();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const graphRef = useRef<any>(null);
   const [selectedNodeModel, setSelectedNodeModel] = useState<Record<string, unknown> | null>(null);
@@ -329,7 +331,7 @@ export function UniverseGraphAntv({
           className="overflow-hidden"
         />
         {selectedNodeModel ? (
-          <GraphDetailDrawer open title="節點資料" onClose={() => setSelectedNodeModel(null)}>
+          <GraphDetailDrawer open title={t("graphDrawer.nodeTitle")} onClose={() => setSelectedNodeModel(null)}>
             <GraphNodeDetailPanel
               model={selectedNodeModel}
               graph={graph}
@@ -339,7 +341,7 @@ export function UniverseGraphAntv({
             />
           </GraphDetailDrawer>
         ) : selectedEdgeModel ? (
-          <GraphDetailDrawer open title="連線情報" onClose={() => setSelectedEdgeModel(null)}>
+          <GraphDetailDrawer open title={t("graphDrawer.edgeTitle")} onClose={() => setSelectedEdgeModel(null)}>
             <GraphEdgeDetailPanel
               model={selectedEdgeModel}
               graph={graph}

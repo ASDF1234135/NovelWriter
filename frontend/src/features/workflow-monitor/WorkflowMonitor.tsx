@@ -1,24 +1,12 @@
 import { useState } from "react";
 import type { WorkflowPayload } from "../../types";
-import { resumeNodeUserLabel as resumeLabelFromHitl } from "../hitl-panel/hitlCopy";
 import { useI18n } from "../../i18n/useI18n";
-import {
-  hitlReasonTitle,
-  workflowAgentStepLabel,
-  workflowInternalStatusLabel,
-  workflowRunStatusLabel,
-} from "../ui-copy/workflowDisplay";
+import { workflowAgentStepLabel, workflowRunStatusLabel } from "../ui-copy/workflowDisplay";
 
 type Props = {
   workflow: WorkflowPayload | null;
   variant?: "default" | "compact";
 };
-
-function resumeDisplay(resumeFrom: string): string {
-  const raw = String(resumeFrom ?? "").trim();
-  if (!raw) return "—";
-  return resumeLabelFromHitl(raw);
-}
 
 function asStringArray(v: unknown): string[] {
   if (!Array.isArray(v)) return [];
@@ -53,15 +41,10 @@ export function WorkflowMonitor({ workflow, variant = "default" }: Props) {
   const state = workflow.state;
   const agentRaw =
     workflow.run.current_agent ?? (typeof state.last_agent === "string" ? state.last_agent : null) ?? "";
-  const hitlReasonRaw = String(state.hitl_reason ?? workflow.run.hitl_reason ?? "").trim();
   const planWarnings = asStringArray(state.plan_warnings);
   const conflictNotes = asStringArray(state.human_outline_conflict_notes);
   const alignmentLog = String(state.alignment_log ?? "").trim();
   const directorBrief = String(state.director_state_brief ?? "").trim();
-  const failureType = String(state.failure_type ?? "");
-  const timeoutBucket = String(state.timeout_bucket ?? "");
-  const threadResetDone = state.thread_reset_done === true;
-  const commitExecuted = state.commit_executed === true;
 
   return (
     <section className={shell}>
@@ -83,56 +66,6 @@ export function WorkflowMonitor({ workflow, variant = "default" }: Props) {
           <div className="text-on-surface">{workflowRunStatusLabel(workflow.run.status)}</div>
         </div>
       </div>
-      {!compact ? (
-        <details className="mt-4 rounded-lg border border-outline-variant/15 bg-surface-container-highest/30 px-3 py-2">
-          <summary className="cursor-pointer font-label text-xs font-semibold text-primary">
-            {locale === "en" ? "Technical details" : locale === "zh-Hans" ? "技术详情" : "技術詳情"}
-          </summary>
-          <div className="mt-3 flex flex-wrap gap-3 border-t border-outline-variant/10 pt-3 font-label text-xs text-on-surface-variant">
-            <span className="min-w-0 break-all">
-              {locale === "en" ? "Run ID" : locale === "zh-Hans" ? "执行编号" : "執行編號"}：
-              <span className="font-mono text-on-surface">{workflow.run.run_id}</span>
-            </span>
-            <span>
-              {locale === "en" ? "Engine status" : locale === "zh-Hans" ? "引擎状态" : "引擎狀態"}：
-              {workflowInternalStatusLabel(String(state.workflow_status ?? "-"))}
-            </span>
-            <span>{locale === "en" ? "Viewpoint" : locale === "zh-Hans" ? "叙事视角" : "敘事視角"}：{String(state.pov_character_id ?? "-")}</span>
-            <span>{locale === "en" ? "Timeframe" : locale === "zh-Hans" ? "叙事时段" : "敘事時段"}：{String(state.active_epoch_id ?? "-")}</span>
-            <span>
-              {locale === "en" ? "Focus milestone" : locale === "zh-Hans" ? "进行中里程碑" : "進行中里程碑"}：
-              {String(state.target_anchor_id ?? "-")}
-            </span>
-            <span>{locale === "en" ? "AI freedom" : locale === "zh-Hans" ? "创作自由度" : "創作自由度"}：{String(state.ai_freedom_level ?? "—")}</span>
-            <span>{locale === "en" ? "Outline binding" : locale === "zh-Hans" ? "大纲约束强度" : "大綱約束強度"}：{String(state.outline_binding_mode ?? "—")}</span>
-            <span>{locale === "en" ? "Reader score" : locale === "zh-Hans" ? "阅读评分" : "閱讀評分"}：{String(state.last_reader_score ?? "-")}</span>
-            <span>
-              {locale === "en" ? "Pause reason" : locale === "zh-Hans" ? "暂停原因" : "暫停原因"}：
-              {hitlReasonRaw ? hitlReasonTitle(hitlReasonRaw) : "—"}
-            </span>
-            <span>
-              {locale === "en" ? "Resume from" : locale === "zh-Hans" ? "接续位置" : "接續位置"}：
-              {resumeDisplay(String(state.resume_from ?? ""))}
-            </span>
-            {String(state.workflow_status ?? "") === "FAILED" ? (
-              <>
-                <span>
-                  {t("workflow.monitor.failureType")}：{failureType || "ERROR"}
-                </span>
-                <span>
-                  {t("workflow.monitor.timeoutTier")}：{timeoutBucket || "—"}
-                </span>
-                <span>
-                  {t("workflow.monitor.dataCommit")}：{commitExecuted ? t("workflow.monitor.committedYes") : t("workflow.monitor.committedNo")}
-                </span>
-                <span>
-                  {t("workflow.monitor.threadReset")}：{threadResetDone ? t("workflow.monitor.resetDone") : t("workflow.monitor.resetPending")}
-                </span>
-              </>
-            ) : null}
-          </div>
-        </details>
-      ) : null}
       {!compact && directorBrief ? (
         <div className="mt-4 rounded-lg border border-outline-variant/15 bg-surface-container-highest/40 px-3 py-2">
           <p className="font-label text-[10px] uppercase tracking-wider text-outline">

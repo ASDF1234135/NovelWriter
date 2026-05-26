@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import type { GraphEdge, GraphNode, GraphSnapshot } from "../../types";
 import { styleForNodeType } from "./nodeTypeStyles";
+import { useI18n } from "../../i18n/useI18n";
 
 export const DRAWER_WIDTH_PX = 380;
 
@@ -14,20 +15,21 @@ type DrawerProps = {
 
 /** Right-side drawer as flex sibling so the graph stays visible beside it. */
 export function GraphDetailDrawer({ open, title, onClose, children }: DrawerProps) {
+  const { t } = useI18n();
   if (!open) return null;
   return (
     <aside
-      className="flex h-[600px] w-[380px] shrink-0 flex-col border-l border-outline-variant/20 bg-surface-container-lowest shadow-lg"
-      aria-label="圖譜資料卡"
+      className="nb-panel flex h-[600px] w-[380px] shrink-0 flex-col shadow-lg"
+      aria-label={t("graphDrawer.aria")}
     >
-      <div className="flex items-start justify-between gap-2 border-b border-outline-variant/15 px-3 py-2">
+      <div className="flex items-start justify-between gap-2 nb-panel-header px-3 py-2">
         <h4 className="font-headline text-xs font-bold uppercase tracking-wider text-primary">{title}</h4>
         <button
           type="button"
           className="rounded-lg border border-outline-variant/20 bg-surface-container-low px-2 py-1 text-[11px] font-label text-primary hover:bg-surface-container-high"
           onClick={onClose}
         >
-          關閉
+          {t("graphDrawer.close")}
         </button>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">{children}</div>
@@ -149,6 +151,7 @@ type NodePanelProps = {
 };
 
 export function GraphNodeDetailPanel({ model, graph, displayNames, onFocusNodeId, onSetEgoCenter }: NodePanelProps) {
+  const { t } = useI18n();
   const [draftOpen, setDraftOpen] = useState(false);
   const nodeId = String(model.node_id ?? model.id ?? "");
   const nodeType = String(model.node_type ?? "");
@@ -287,7 +290,7 @@ export function GraphNodeDetailPanel({ model, graph, displayNames, onFocusNodeId
           {description ? (
             <p className="text-sm leading-relaxed text-on-surface-variant">{description}</p>
           ) : (
-            <p className="text-xs text-on-surface-variant">（尚未填寫 description）</p>
+            <p className="text-xs text-on-surface-variant">{t("graphPanel.noDescription")}</p>
           )}
           {rulePenalty ? (
             <p className="mt-3 rounded-md border border-amber-500/35 bg-amber-950/30 px-3 py-2 text-sm text-amber-100">
@@ -299,7 +302,7 @@ export function GraphNodeDetailPanel({ model, graph, displayNames, onFocusNodeId
           <div className="mt-4 space-y-3 text-sm">
             {enforcedIn.length ? (
               <div>
-                <span className="font-medium text-on-surface">執行範圍 (ENFORCED_IN)</span>
+                <span className="font-medium text-on-surface">{t("graphPanel.ruleScope")}</span>
                 <ul className="mt-1 space-y-1">
                   {enforcedIn.map((r) => (
                     <li key={r.otherId}>
@@ -317,7 +320,7 @@ export function GraphNodeDetailPanel({ model, graph, displayNames, onFocusNodeId
             ) : null}
             {restricts.length ? (
               <div>
-                <span className="font-medium text-on-surface">限制標的 (RESTRICTS)</span>
+                <span className="font-medium text-on-surface">{t("graphPanel.ruleRestricts")}</span>
                 <ul className="mt-1 space-y-1">
                   {restricts.map((r) => (
                     <li key={r.otherId}>
@@ -335,7 +338,7 @@ export function GraphNodeDetailPanel({ model, graph, displayNames, onFocusNodeId
             ) : null}
             {exempt.length ? (
               <div>
-                <span className="font-medium text-on-surface">豁免角色 (EXEMPT_FROM)</span>
+                <span className="font-medium text-on-surface">{t("graphPanel.ruleExempt")}</span>
                 <ul className="mt-1 space-y-1">
                   {exempt.map((r) => (
                     <li key={r.otherId}>
@@ -457,7 +460,7 @@ export function GraphNodeDetailPanel({ model, graph, displayNames, onFocusNodeId
             </li>
           ) : null}
           {!locations.length && !items.length && !relations.length ? (
-            <li className="text-xs text-on-surface-variant">目前子圖中沒有可摘要的 LOCATED_IN / HAS_ITEM / HAS_RELATION。</li>
+            <li className="text-xs text-on-surface-variant">{t("graphPanel.relationsEmpty")}</li>
           ) : null}
         </ul>
       </section>
@@ -469,7 +472,7 @@ export function GraphNodeDetailPanel({ model, graph, displayNames, onFocusNodeId
             className="w-full rounded-lg border border-primary/30 bg-primary/10 py-2 text-sm font-medium text-primary hover:bg-primary/15"
             onClick={() => onSetEgoCenter(nodeId)}
           >
-            設為 Ego 中心
+            {t("graphPanel.setEgoCenter")}
           </button>
         ) : null}
         <button
@@ -477,13 +480,11 @@ export function GraphNodeDetailPanel({ model, graph, displayNames, onFocusNodeId
           className="w-full rounded-lg border border-outline-variant/20 bg-surface-container-low py-2 text-sm text-on-surface hover:bg-surface-container-high"
           onClick={() => setDraftOpen((v) => !v)}
         >
-          手動修正（state-injection 草稿）
+          {t("graphPanel.manualFix")}
         </button>
         {draftOpen ? (
           <div className="rounded-lg border border-outline-variant/15 bg-surface-container-low p-2">
-            <p className="mb-2 text-[11px] text-on-surface-variant">
-              複製下列 JSON，於主控台工作流執行中透過「狀態注入」貼上；請依實際欄位修改 <code className="font-mono">properties</code>。
-            </p>
+            <p className="mb-2 text-[11px] text-on-surface-variant">{t("graphPanel.manualFixHint")}</p>
             <pre className="mb-2 max-h-40 overflow-auto rounded bg-surface-container-high p-2 text-[10px] text-on-surface-variant">
               {JSON.stringify(mutationDraft, null, 2)}
             </pre>
@@ -492,14 +493,14 @@ export function GraphNodeDetailPanel({ model, graph, displayNames, onFocusNodeId
               className="w-full rounded border border-outline-variant/20 py-1.5 text-xs text-primary"
               onClick={copyMutation}
             >
-              複製到剪貼簿
+              {t("graphPanel.copyJson")}
             </button>
           </div>
         ) : null}
       </section>
 
       <details className="rounded-lg border border-outline-variant/10 bg-surface-container-low/50">
-        <summary className="cursor-pointer px-2 py-1.5 font-mono text-[10px] text-on-surface-variant">{`{ } 原始 JSON`}</summary>
+        <summary className="cursor-pointer px-2 py-1.5 font-label text-[10px] text-on-surface-variant">{t("graphPanel.rawJson")}</summary>
         <pre className="max-h-48 overflow-auto p-2 text-[10px] text-on-surface-variant">{JSON.stringify(model, null, 2)}</pre>
       </details>
     </div>
@@ -514,6 +515,7 @@ type EdgePanelProps = {
 };
 
 export function GraphEdgeDetailPanel({ model, graph, displayNames, onFocusNodeId }: EdgePanelProps) {
+  const { t } = useI18n();
   const sourceId = String(model.source ?? "");
   const targetId = String(model.target ?? "");
   const relation = String(model.relation_type ?? "");
@@ -587,7 +589,7 @@ export function GraphEdgeDetailPanel({ model, graph, displayNames, onFocusNodeId
         </div>
         {knownBy.length ? (
           <div>
-            <div className="text-[11px] font-medium text-on-surface-variant">知情者（known_by）</div>
+            <div className="text-[11px] font-medium text-on-surface-variant">{t("graphPanel.knownBy")}</div>
             <div className="mt-1 flex flex-wrap gap-1">
               {knownBy.map((kb) => (
                 <span key={kb} className="rounded-full bg-surface-container-high px-2 py-0.5 text-[10px]">
@@ -599,7 +601,7 @@ export function GraphEdgeDetailPanel({ model, graph, displayNames, onFocusNodeId
         ) : null}
         {holders.length ? (
           <div>
-            <div className="text-[11px] font-medium text-on-surface-variant">誤信者（holder）</div>
+            <div className="text-[11px] font-medium text-on-surface-variant">{t("graphPanel.holders")}</div>
             <div className="mt-1 flex flex-wrap gap-1">
               {holders.map((h) => (
                 <span key={h} className="rounded-full bg-surface-container-high px-2 py-0.5 text-[10px]">
@@ -666,7 +668,7 @@ export function GraphEdgeDetailPanel({ model, graph, displayNames, onFocusNodeId
       )}
 
       <details className="rounded-lg border border-outline-variant/10 bg-surface-container-low/50">
-        <summary className="cursor-pointer px-2 py-1.5 font-mono text-[10px] text-on-surface-variant">{`{ } 原始 JSON`}</summary>
+        <summary className="cursor-pointer px-2 py-1.5 font-label text-[10px] text-on-surface-variant">{t("graphPanel.rawJson")}</summary>
         <pre className="max-h-48 overflow-auto p-2 text-[10px] text-on-surface-variant">{JSON.stringify(model, null, 2)}</pre>
       </details>
     </div>

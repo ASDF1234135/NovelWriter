@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { filterGraphNodesByType, getRemapExpectedNodeType, mapHitlQuickActionLabel, type GraphNodeLite } from "./hitlNarrative";
+import {
+  buildAnchorMilestoneRows,
+  filterGraphNodesByType,
+  getRemapExpectedNodeType,
+  mapHitlQuickActionLabel,
+  type GraphNodeLite,
+} from "./hitlNarrative";
 
 const tZh: (key: string, fallback?: string, params?: Record<string, string | number>) => string = (key, fallback = "", params) => {
   if (key === "hitl.option.keep_current_logic") return "維持現有草稿（強制通過）";
@@ -29,6 +35,19 @@ describe("hitlNarrative", () => {
       { node_id: "b", node_type: "CHARACTER" },
     ];
     expect(filterGraphNodesByType(nodes, null)).toEqual(nodes);
+  });
+
+  it("buildAnchorMilestoneRows uses anchor_nodes title and description", () => {
+    const rows = buildAnchorMilestoneRows({
+      anchor_nodes: [{ id: "a1", title: "取得黑曜短刃", description: "應確實取得道具。" }],
+      anchor_resolution_hitl_candidate: {
+        unresolved_anchor_ids: ["a1"],
+        resolution_analysis: "系統無法自動判定。",
+      },
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.title).toBe("取得黑曜短刃");
+    expect(rows[0]?.description).toBe("應確實取得道具。");
   });
 
   it("filterGraphNodesByType matches node_type case-insensitively", () => {

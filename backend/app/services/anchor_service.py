@@ -184,6 +184,123 @@ def extract_notes_keypoints(raw: str, *, max_keypoints: int = 12) -> list[dict[s
     return [{"id": f"KP{i+1}", "text": t} for i, t in enumerate(key_texts)]
 
 
+# --- Setup-wizard structured hint extraction --------------------------------
+# The frontend Setup wizard composes its Stage 2/3 structured fields into
+# `macro_author_notes` under stable section markers (see frontend/.../setupPhases.ts).
+# These helpers parse them back out so we can feed structured hints to the
+# storyline weave prompt — without changing the backend schema.
+
+# Subplot hint line format. The optional `:N` after the tier letter is a 1-indexed
+# volume pin emitted by the Setup wizard for A_TIER and B_TIER rows (S spans the
+# whole book and never carries a volume). Both full-width 「｜」 and ASCII pipe are
+# accepted so legacy notes keep working.
+_SUBPLOT_HINT_LINE_RE = re.compile(
+    r"^\[([SAB])(?::(\d+))?\]\s*[｜|]\s*([^｜|]*)[｜|]\s*(.*)$"
+)
+_VOLUME_GOAL_LINE_RE = re.compile(
+    r"^(?:V|第\s*|Volume\s+)(\d+)(?:\s*卷)?\s*[｜|]\s*(.+)$",
+    re.IGNORECASE,
+)
+_SETUP_SECTION_MARKERS: tuple[str, ...] = (
+    "[[WORLD]]",
+    "[[CHARACTERS]]",
+    "[[STYLE]]",
+    "[[VOLUME_GOALS]]",
+    "[[SUBPLOTS]]",
+)
+
+
+def _slice_setup_section(notes: str, marker: str) -> str:
+    """Return text between `marker` and the next setup section marker (or EOF)."""
+    if not notes:
+        return ""
+    start = notes.find(marker)
+    if start == -1:
+        return ""
+    section_start = start + len(marker)
+    end = len(notes)
+    for other in _SETUP_SECTION_MARKERS:
+        if other == marker:
+            continue
+        idx = notes.find(other, section_start)
+        if idx != -1 and idx < end:
+            end = idx
+    return notes[section_start:end].strip()
+
+
+def extract_user_subplot_hints(notes: str) -> list[dict[str, Any]]:
+    """Parse the wizard's ``[[SUBPLOTS]]`` block into structured hints.
+
+    Each returned entry is shaped as ``{tier, title, goal}`` and may additionally
+    carry a ``volume: int`` (1-indexed) when the wizard pinned the A/B row to a
+    specific volume. S_TIER lines never carry a volume because S spans the whole
+    book. Legacy notes (``[A]｜title｜goal``) parse without the ``volume`` key so
+    older snapshots keep their wire shape.
+    """
+    section = _slice_setup_section(notes or "", "[[SUBPLOTS]]")
+    if not section:
+        return []
+    hints: list[dict[str, Any]] = []
+    for raw_line in section.splitlines():
+        match = _SUBPLOT_HINT_LINE_RE.match(raw_line.strip())
+        if not match:
+            continue
+        tier = match.group(1).upper()
+        if tier not in ("S", "A", "B"):
+            continue
+        title = match.group(3).strip()
+        goal = match.group(4).strip()
+        if not title and not goal:
+            continue
+        entry: dict[str, Any] = {"tier": tier, "title": title, "goal": goal}
+        volume_raw = match.group(2)
+        # S can't be pinned to a volume; ignore stray `:N` tags on S to be lenient.
+        if volume_raw and tier in ("A", "B"):
+            try:
+                vol = int(volume_raw)
+                if vol > 0:
+                    entry["volume"] = vol
+            except ValueError:
+                pass
+        hints.append(entry)
+    return hints
+
+
+def extract_user_volume_goals(notes: str) -> list[dict[str, Any]]:
+    """Parse the wizard's ``[[VOLUME_GOALS]]`` block into ``[{volume, goal}, ...]``."""
+    section = _slice_setup_section(notes or "", "[[VOLUME_GOALS]]")
+    if not section:
+        return []
+    goals: list[dict[str, Any]] = []
+    seen_volumes: set[int] = set()
+    for raw_line in section.splitlines():
+        match = _VOLUME_GOAL_LINE_RE.match(raw_line.strip())
+        if not match:
+            continue
+        try:
+            volume = int(match.group(1))
+        except ValueError:
+            continue
+        if volume <= 0 or volume in seen_volumes:
+            continue
+        goal = match.group(2).strip()
+        if not goal:
+            continue
+        seen_volumes.add(volume)
+        goals.append({"volume": volume, "goal": goal})
+    goals.sort(key=lambda entry: entry["volume"])
+    return goals
+
+
+def _count_subplot_hints_by_tier(hints: list[dict[str, str]]) -> dict[str, int]:
+    counts = {"S": 0, "A": 0, "B": 0}
+    for h in hints:
+        tier = str(h.get("tier", "")).upper()
+        if tier in counts:
+            counts[tier] += 1
+    return counts
+
+
 def _merge_cast_llm_with_seed(raw: list[MacroCastMember], seeds: list[StoryCastSeedEntry]) -> list[MacroCastMember]:
     """Preserve user seed order; fill from LLM matches; append unmatched LLM members after."""
     if not seeds:
@@ -287,13 +404,36 @@ class AnchorService:
         story_id: str,
         volumes: list[VolumePlan],
         cast: list[StoryCastMemberStored],
+        user_subplot_hints: list[dict[str, Any]] | None = None,
     ) -> tuple[list[Storyline], dict[str, Any]]:
+        """Build the deterministic fishbone storyline skeleton.
+
+        When the wizard pinned A/B subplot rows to specific volumes via
+        ``[[SUBPLOTS]]`` (``[A:N]`` / ``[B:N]``), we bump the per-volume A_TIER
+        count to at least the user-supplied hint count for that volume, and we
+        pre-assign B_TIER storylines to the requested volumes (with any
+        remaining auto-generated B lines round-robin'd across the remaining
+        volumes). Without user hints, the original random behaviour is kept.
+        """
         involved = [c.node_id for c in cast[:8]]
         rng = random.Random(f"fishbone:{story_id}:{len(volumes)}")
+
+        # Tally user [A]/[B] hint counts per 1-indexed volume so we can honour
+        # the wizard's requested spread without the LLM having to invent extra
+        # storyline rows post-hoc.
+        a_hint_counts_by_volume: dict[int, int] = {}
+        b_pinned_volume_indices: list[int] = []
+        for h in user_subplot_hints or []:
+            tier = str(h.get("tier", "")).upper()
+            vol = h.get("volume")
+            if not isinstance(vol, int) or vol <= 0 or vol > len(volumes):
+                continue
+            if tier == "A":
+                a_hint_counts_by_volume[vol] = a_hint_counts_by_volume.get(vol, 0) + 1
+            elif tier == "B":
+                b_pinned_volume_indices.append(vol)
+
         s_count = rng.randint(1, 2)
-        b_min = max(1, int(math.ceil(len(volumes) * 0.5)))
-        b_max = max(b_min, int(math.ceil(len(volumes) * 1.5)))
-        b_count = rng.randint(b_min, b_max)
         rows: list[Storyline] = [
             Storyline(
                 id=f"{story_id}_main",
@@ -315,7 +455,10 @@ class AnchorService:
             )
         a_lines_per_volume: dict[str, list[str]] = {}
         for i, v in enumerate(volumes, start=1):
-            count = rng.randint(1, 2)
+            # Honour user-supplied per-volume A hints first; fall back to the
+            # original random per-volume count of 1~2 when no user hints exist.
+            user_a = a_hint_counts_by_volume.get(i, 0)
+            count = max(rng.randint(1, 2), user_a)
             ids: list[str] = []
             for j in range(count):
                 sid = f"{story_id}_a_tier_v{i:02d}_{j+1:02d}"
@@ -330,17 +473,45 @@ class AnchorService:
                     )
                 )
             a_lines_per_volume[v.volume_id] = ids
+
+        # B_TIER: random formula count, then bump up so every pinned user [B]
+        # hint gets its own storyline row.
+        b_min = max(1, int(math.ceil(len(volumes) * 0.5)))
+        b_max = max(b_min, int(math.ceil(len(volumes) * 1.5)))
+        b_count = max(rng.randint(b_min, b_max), len(b_pinned_volume_indices))
+
+        # Decide which volume each B-tier storyline lives in. Pinned hints win
+        # the first slots in order; the rest round-robin across volumes so the
+        # default texture stays evenly distributed (matches old random mount).
+        b_volume_indices: list[int | None] = list(b_pinned_volume_indices)
+        rr_cursor = 0
+        while len(b_volume_indices) < b_count:
+            if volumes:
+                b_volume_indices.append((rr_cursor % len(volumes)) + 1)
+                rr_cursor += 1
+            else:
+                b_volume_indices.append(None)
+
+        b_storyline_volume_by_id: dict[str, str] = {}
         for i in range(b_count):
+            sid = f"{story_id}_b_tier_{i+1:02d}"
             rows.append(
                 Storyline(
-                    id=f"{story_id}_b_tier_{i+1:02d}",
+                    id=sid,
                     type=StorylineTier.B_TIER,
                     title=f"Micro beat line {i+1}",
                     overall_goal="Provide local texture and chapter-scale swing without derailing the spine.",
                     involved_entities=involved[:3],
                 )
             )
-        return rows, {"a_lines_per_volume": a_lines_per_volume}
+            vol_idx = b_volume_indices[i] if i < len(b_volume_indices) else None
+            if vol_idx and 1 <= vol_idx <= len(volumes):
+                b_storyline_volume_by_id[sid] = volumes[vol_idx - 1].volume_id
+
+        return rows, {
+            "a_lines_per_volume": a_lines_per_volume,
+            "b_storyline_volume_by_id": b_storyline_volume_by_id,
+        }
 
     def _build_fishbone_anchor_nodes(
         self,
@@ -350,6 +521,7 @@ class AnchorService:
         storylines: list[Storyline],
         volumes: list[VolumePlan],
         a_lines_per_volume: dict[str, list[str]],
+        b_storyline_volume_by_id: dict[str, str] | None = None,
     ) -> list[AnchorNode]:
         rng = random.Random(f"fishbone:nodes:{story_id}:{len(anchors)}")
         by_volume: dict[str, list[StateAnchor]] = {}
@@ -473,13 +645,40 @@ class AnchorService:
             prev_checkpoint_id = cp
 
         b_tails_by_volume: dict[str, list[str]] = {}
+        b_storyline_volume_by_id = b_storyline_volume_by_id or {}
         if b_ids:
             main_all = [a.anchor_id for a in sorted(anchors, key=lambda x: (x.priority, x.anchor_id))]
             rng.shuffle(main_all)
             used_mounts: set[str] = set()
             for idx, sid in enumerate(b_ids, start=1):
                 length = rng.randint(1, 2)
-                mount = next((m for m in main_all if m not in used_mounts), main_all[0] if main_all else "")
+                # If the wizard pinned this B-tier storyline to a specific
+                # volume, prefer a mount inside that volume so the resulting
+                # nodes obey the user's volume binding. Otherwise fall back to
+                # the original random round-robin selection.
+                preferred_vol = b_storyline_volume_by_id.get(sid)
+                if preferred_vol:
+                    mount = next(
+                        (
+                            a.anchor_id
+                            for a in sorted(anchors, key=lambda x: (x.priority, x.anchor_id))
+                            if a.volume_id == preferred_vol and a.anchor_id not in used_mounts
+                        ),
+                        None,
+                    )
+                    if mount is None:
+                        mount = next(
+                            (
+                                a.anchor_id
+                                for a in sorted(anchors, key=lambda x: (x.priority, x.anchor_id))
+                                if a.volume_id == preferred_vol
+                            ),
+                            None,
+                        )
+                    if mount is None:
+                        mount = next((m for m in main_all if m not in used_mounts), main_all[0] if main_all else "")
+                else:
+                    mount = next((m for m in main_all if m not in used_mounts), main_all[0] if main_all else "")
                 if mount:
                     used_mounts.add(mount)
                 prev = mount
@@ -543,10 +742,30 @@ class AnchorService:
         branch_count: int,
         target_tier: StorylineTier | None = None,
         target_volume_id: str | None = None,
+        user_subplot_hints: list[dict[str, str]] | None = None,
+        user_volume_goals: list[dict[str, Any]] | None = None,
     ) -> str:
         tier_mode = target_tier.value if target_tier else "ALL"
+        # Resolve user hints up front so we can both inject them into the prompt
+        # and lift our hard quotas to at least cover the user's requested counts.
+        # The wizard publishes them via `[[SUBPLOTS]] / [[VOLUME_GOALS]]` sections
+        # in macro_author_notes; if callers don't pass them through, fall back to
+        # parsing here so the prompt stays self-contained.
+        if user_subplot_hints is None:
+            user_subplot_hints = extract_user_subplot_hints(
+                getattr(story_input, "macro_author_notes", "") or ""
+            )
+        if user_volume_goals is None:
+            user_volume_goals = extract_user_volume_goals(
+                getattr(story_input, "macro_author_notes", "") or ""
+            )
+        user_tier_counts = _count_subplot_hints_by_tier(user_subplot_hints)
         b_tier_overgen_min = max(1, int(math.ceil(branch_count * 1.3)))
-        b_tier_overgen_max = max(b_tier_overgen_min, int(math.ceil(branch_count * 1.5)))
+        b_tier_overgen_max = max(
+            b_tier_overgen_min,
+            int(math.ceil(branch_count * 1.5)),
+            user_tier_counts["B"],  # user-provided B hints raise the ceiling, never lower it
+        )
         anchor_context: list[dict[str, Any]] = []
         for a in anchors:
             if isinstance(a, StateAnchor):
@@ -600,6 +819,27 @@ class AnchorService:
             "Provide at least one UNLOCKED root-capable node (service will set statuses by dependency).",
         ]
 
+        # Author hint adherence: when the wizard supplied structured subplot or
+        # volume-goal hints, the LLM should treat them as the seed material
+        # rather than inventing fresh themes from scratch. We don't drop hints
+        # to fit a tight quota — if the backend asks for more storylines than
+        # the user listed, the model invents extras; if fewer, the model still
+        # tries to honour the user's full set first.
+        if user_subplot_hints:
+            requirements.extend([
+                f"User has provided {len(user_subplot_hints)} subplot hint(s) in `user_subplot_hints` "
+                "(each tagged with tier S/A/B plus title and goal).",
+                "When user_subplot_hints contains entries whose tier matches the current tier_mode, "
+                "prefer reusing the provided titles/goals as the basis for new storylines.",
+                "When quota allows more storylines than user-provided hints, invent additional ones to fill the quota.",
+                "Never drop a user-provided hint just to satisfy a tighter quota; cover all hints whose tier matches first.",
+            ])
+        if user_volume_goals:
+            requirements.append(
+                "User has provided per-volume narrative goals in `user_volume_goals`; align mainline beats "
+                "and tier nodes within each volume so they progress those volume goals."
+            )
+
         if target_tier == StorylineTier.S_TIER:
             requirements.extend([
                 "Generate S_TIER (Series-spanning) storylines and anchor nodes.",
@@ -610,6 +850,10 @@ class AnchorService:
                 "Each CHECKPOINT and ENDING must strictly converge critical mainline + key side-thread outcomes.",
                 "For each volume CHECKPOINT node, depends_on must include: [that volume's last MAIN node id] + [the last node id of every S_TIER and A_TIER line in that volume]."
             ])
+            if user_tier_counts["S"] > 0:
+                requirements.append(
+                    "user_subplot_hints contains entries tagged [S]; reuse their titles/goals as the basis for the new S_TIER storylines."
+                )
 
         elif target_tier == StorylineTier.A_TIER and target_volume_id:
             requirements.extend([
@@ -621,6 +865,12 @@ class AnchorService:
                 "Each CHECKPOINT and ENDING must strictly converge critical mainline + key side-thread outcomes.",
                 "For each volume CHECKPOINT node, depends_on must include: [that volume's last MAIN node id] + [the last node id of every S_TIER and A_TIER line in that volume]."
             ])
+            if user_tier_counts["A"] > 0:
+                requirements.append(
+                    "user_subplot_hints contains entries tagged [A]; whenever an unused [A] hint remains, draw this new "
+                    "A_TIER storyline from it (title and overall_goal). Pick the first unused hint that has not yet been "
+                    "covered by the existing_anchor_context for any volume."
+                )
 
         elif target_tier == StorylineTier.B_TIER:
             requirements.extend([
@@ -629,6 +879,11 @@ class AnchorService:
                 "Do NOT turn a B_TIER beat into a multi-chapter arc. If any B_TIER has 3 or more nodes, the system will crash.",
                 "B_TIER nodes are micro-beats. Do NOT generate CHECKPOINT, MERGE, or ENDING nodes. Just attach your B_TIER 'NORMAL' nodes to existing forks or mainline nodes."
             ])
+            if user_tier_counts["B"] > 0:
+                requirements.append(
+                    "user_subplot_hints contains entries tagged [B]; cover every [B] hint first (one storyline per hint), "
+                    "then invent additional B_TIER lines to meet the overgen quota."
+                )
         return json.dumps(
             {
                 "task": "Generate side-thread storylines and weave them back into mainline DAG anchor nodes.",
@@ -644,6 +899,8 @@ class AnchorService:
                     {"node_id": c.node_id, "canonical_name": c.canonical_name, "role": c.role}
                     for c in cast
                 ],
+                "user_subplot_hints": list(user_subplot_hints or []),
+                "user_volume_goals": list(user_volume_goals or []),
                 "requirements": requirements,
                 "output_shape": {
                     "_planning": "String. STEP 1: State how many storylines you are generating. STEP 2: State exactly how many anchor nodes you will generate for each volume/storyline, and explicitly confirm it obeys the CRITICAL QUOTA.",
@@ -851,6 +1108,20 @@ class AnchorService:
         tier_outputs: dict[StorylineTier, tuple[list[Storyline], list[AnchorNode]]] = {}
         accumulated_nodes: list[Any] = list(anchors)
 
+        # Pull wizard-supplied hints once so the per-tier prompts share a stable view.
+        # `_build_weave_prompt` falls back to parsing on its own, but doing it here lets
+        # us derive per-volume A-line slot counts (max(formula, user count)).
+        raw_notes = getattr(story_input, "macro_author_notes", "") or ""
+        user_subplot_hints = extract_user_subplot_hints(raw_notes)
+        user_volume_goals = extract_user_volume_goals(raw_notes)
+        user_tier_counts = _count_subplot_hints_by_tier(user_subplot_hints)
+        # Per-volume A_TIER slot count: backend baseline is 1 per volume; lift to
+        # ceil(user_a / volumes) when the user requested more A lines than volumes.
+        a_slots_per_volume = max(
+            1,
+            math.ceil(user_tier_counts["A"] / max(1, branch_count)),
+        )
+
         def _drafts_to_models(structured: _LLMWeavePlanOutput) -> tuple[list[Storyline], list[AnchorNode]]:
             storylines: list[Storyline] = []
             for s in structured.storylines:
@@ -997,6 +1268,8 @@ class AnchorService:
                                 branch_count=branch_count,
                                 target_tier=tier,
                                 target_volume_id=volume.volume_id,
+                                user_subplot_hints=user_subplot_hints,
+                                user_volume_goals=user_volume_goals,
                             )
                             tier_prompt = base_prompt
                             if last_error:
@@ -1049,59 +1322,77 @@ class AnchorService:
                 a_storylines: list[Storyline] = []
                 a_nodes: list[AnchorNode] = []
                 for volume_idx, volume in enumerate(volumes, start=1):
-                    tier_done = False
-                    while not tier_done and retries_used < max_attempts:
-                        try:
-                            base_prompt = self._build_weave_prompt(
-                                story_id=story_id,
-                                story_input=story_input,
-                                volumes=volumes,
-                                anchors=accumulated_nodes,
-                                cast=cast,
-                                branch_count=branch_count,
-                                target_tier=tier,
-                                target_volume_id=volume.volume_id,
-                            )
-                            tier_prompt = base_prompt
-                            if last_error:
-                                tier_prompt = (
-                                    f"{base_prompt}\n\n"
-                                    "Previous weave output failed validation. Regenerate a fully valid result.\n"
-                                    f"Issue: {last_error}\n"
-                                    f"Dropped storylines: {last_dropped}"
+                    # Slot loop: lift per-volume A count to max(formula=1, user-driven slots).
+                    # Each slot still asks the LLM for a single NEW A_TIER storyline so the
+                    # existing single-storyline validator (_validate_single_tier_chunk) still
+                    # applies — we just call it multiple times, accumulating new lines.
+                    for slot_idx in range(a_slots_per_volume):
+                        tier_done = False
+                        while not tier_done and retries_used < max_attempts:
+                            try:
+                                base_prompt = self._build_weave_prompt(
+                                    story_id=story_id,
+                                    story_input=story_input,
+                                    volumes=volumes,
+                                    anchors=accumulated_nodes,
+                                    cast=cast,
+                                    branch_count=branch_count,
+                                    target_tier=tier,
+                                    target_volume_id=volume.volume_id,
+                                    user_subplot_hints=user_subplot_hints,
+                                    user_volume_goals=user_volume_goals,
                                 )
-                            structured, _ = llm_client.invoke_json(tier_prompt, _LLMWeavePlanOutput, profile)
-                            t_storylines, t_nodes = _drafts_to_models(structured)
-                            self._validate_single_tier_chunk(
-                                tier=tier,
-                                storylines=t_storylines,
-                                nodes=t_nodes,
-                                volumes=volumes,
-                                branch_count=branch_count,
-                                target_volume_id=volume.volume_id,
-                            )
-                            a_storylines.extend([s for s in t_storylines if s.type == StorylineTier.A_TIER])
-                            a_nodes.extend([n for n in t_nodes if n.volume_id == volume.volume_id])
-                            accumulated_nodes.extend([n for n in t_nodes if n.node_kind == "NORMAL"])
-                            tier_done = True
-                        except Exception as exc:
-                            retries_used += 1
-                            last_error = str(exc)
-                            attempt_errors.append(
-                                {
-                                    "attempt": retries_used,
-                                    "tier": tier.value,
-                                    "volume_id": volume.volume_id,
-                                    "failure_code": self._classify_weave_error(last_error),
-                                    "message": last_error[:600],
-                                    "dropped_storylines": list(last_dropped),
-                                }
-                            )
-                    if not tier_done:
-                        fb_storylines, fb_nodes = _fallback_a_volume_chunk(volume, volume_idx)
-                        a_storylines.extend(fb_storylines)
-                        a_nodes.extend(fb_nodes)
-                        accumulated_nodes.extend(fb_nodes)
+                                slot_suffix = ""
+                                if a_slots_per_volume > 1:
+                                    slot_suffix = (
+                                        f"\n\nA-line slot {slot_idx + 1} of {a_slots_per_volume} for "
+                                        f"target_volume_id={volume.volume_id}. Pick a DIFFERENT angle than any "
+                                        "A_TIER storyline already present in existing_anchor_context for this volume."
+                                    )
+                                tier_prompt = base_prompt + slot_suffix
+                                if last_error:
+                                    tier_prompt = (
+                                        f"{tier_prompt}\n\n"
+                                        "Previous weave output failed validation. Regenerate a fully valid result.\n"
+                                        f"Issue: {last_error}\n"
+                                        f"Dropped storylines: {last_dropped}"
+                                    )
+                                structured, _ = llm_client.invoke_json(tier_prompt, _LLMWeavePlanOutput, profile)
+                                t_storylines, t_nodes = _drafts_to_models(structured)
+                                self._validate_single_tier_chunk(
+                                    tier=tier,
+                                    storylines=t_storylines,
+                                    nodes=t_nodes,
+                                    volumes=volumes,
+                                    branch_count=branch_count,
+                                    target_volume_id=volume.volume_id,
+                                )
+                                a_storylines.extend([s for s in t_storylines if s.type == StorylineTier.A_TIER])
+                                a_nodes.extend([n for n in t_nodes if n.volume_id == volume.volume_id])
+                                accumulated_nodes.extend([n for n in t_nodes if n.node_kind == "NORMAL"])
+                                tier_done = True
+                            except Exception as exc:
+                                retries_used += 1
+                                last_error = str(exc)
+                                attempt_errors.append(
+                                    {
+                                        "attempt": retries_used,
+                                        "tier": tier.value,
+                                        "volume_id": volume.volume_id,
+                                        "slot_index": slot_idx,
+                                        "failure_code": self._classify_weave_error(last_error),
+                                        "message": last_error[:600],
+                                        "dropped_storylines": list(last_dropped),
+                                    }
+                                )
+                        if not tier_done:
+                            # Fallback only seeds one A line per volume — break the slot loop
+                            # so we don't double-fallback for the same volume.
+                            fb_storylines, fb_nodes = _fallback_a_volume_chunk(volume, volume_idx)
+                            a_storylines.extend(fb_storylines)
+                            a_nodes.extend(fb_nodes)
+                            accumulated_nodes.extend(fb_nodes)
+                            break
                 tier_outputs[tier] = (a_storylines, a_nodes)
                 completed_tiers.append(tier.value)
                 continue
@@ -1116,6 +1407,8 @@ class AnchorService:
                         cast=cast,
                         branch_count=branch_count,
                         target_tier=tier,
+                        user_subplot_hints=user_subplot_hints,
+                        user_volume_goals=user_volume_goals,
                     )
                     tier_prompt = base_prompt
                     if last_error:
@@ -1198,6 +1491,8 @@ class AnchorService:
                         cast=cast,
                         branch_count=branch_count,
                         target_tier=StorylineTier.B_TIER,
+                        user_subplot_hints=user_subplot_hints,
+                        user_volume_goals=user_volume_goals,
                     )
                     tier_prompt = (
                         f"{base_prompt}\n\n"
@@ -1656,6 +1951,123 @@ class AnchorService:
             return s
         return s[: max_len - 1] + "…"
 
+    @staticmethod
+    def _parse_a_tier_volume_index(storyline_id: str) -> int | None:
+        """Pull the 1-indexed volume out of an A_TIER storyline id (``..._a_tier_vNN_..``).
+
+        Returns ``None`` when the id wasn't produced by the fishbone builder
+        (e.g. user-edit storylines), in which case we don't try to match by
+        volume.
+        """
+        match = re.search(r"_a_tier_v(\d+)_", storyline_id or "")
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+
+    def _match_user_subplot_hints_to_storylines(
+        self,
+        *,
+        storylines: list[Storyline],
+        volumes: list[VolumePlan],
+        user_subplot_hints: list[dict[str, Any]] | None,
+        b_storyline_volume_by_id: dict[str, str] | None,
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+        """Pair each A/B (and S) storyline with the wizard's matching hint.
+
+        Returns ``(user_hint_by_storyline_id, storyline_volume_id_by_id)``:
+
+        - For S_TIER, hints are consumed in source order (S spans the book so
+          there is no volume to match on).
+        - For A_TIER, the id (``..._a_tier_vNN_..``) tells us which volume the
+          storyline belongs to. We first consume hints whose ``volume`` matches
+          that volume index in source order, then fall back to volume-less [A]
+          hints to fill any leftover slots.
+        - For B_TIER, we use ``b_storyline_volume_by_id`` (built upstream from
+          user [B] hints) to know the storyline's target volume, then match
+          hints by volume in source order, falling back to volume-less hints.
+
+        Storylines without a matched hint are simply omitted from the result —
+        their slot-fill row keeps the original "invent from scratch" behaviour.
+        """
+        volumes_by_index = {i + 1: v.volume_id for i, v in enumerate(volumes)}
+        hints = list(user_subplot_hints or [])
+        b_volume_by_storyline = dict(b_storyline_volume_by_id or {})
+
+        # Bucket hints by tier first, then by volume (None = volume-less hint).
+        # We preserve in-source order within each (tier, volume) bucket so the
+        # wizard's display order maps to the storyline numbering 01, 02, ...
+        buckets: dict[tuple[str, Any], list[dict[str, Any]]] = {}
+        for h in hints:
+            tier = str(h.get("tier", "")).upper()
+            if tier not in ("S", "A", "B"):
+                continue
+            vol = h.get("volume") if tier in ("A", "B") else None
+            buckets.setdefault((tier, vol if isinstance(vol, int) else None), []).append(h)
+
+        user_hint_by_storyline_id: dict[str, dict[str, Any]] = {}
+        storyline_volume_id_by_id: dict[str, str] = {}
+
+        def _consume(tier: str, volume_idx: int | None) -> dict[str, Any] | None:
+            """Pop the next unconsumed hint for (tier, volume) — fall back to volume-less."""
+            if volume_idx is not None:
+                primary = buckets.get((tier, volume_idx))
+                if primary:
+                    return primary.pop(0)
+            floating = buckets.get((tier, None))
+            if floating:
+                return floating.pop(0)
+            return None
+
+        # Group A_TIER storylines by their volume so we consume hints per-volume
+        # in id order, mirroring the deterministic storyline numbering.
+        a_by_volume: dict[int, list[Storyline]] = {}
+        s_storylines: list[Storyline] = []
+        b_storylines: list[Storyline] = []
+        for s in storylines:
+            stype = s.type
+            if stype == StorylineTier.S_TIER:
+                s_storylines.append(s)
+            elif stype == StorylineTier.A_TIER:
+                vol_idx = self._parse_a_tier_volume_index(s.id)
+                if vol_idx is None:
+                    continue
+                a_by_volume.setdefault(vol_idx, []).append(s)
+                vol_id = volumes_by_index.get(vol_idx)
+                if vol_id:
+                    storyline_volume_id_by_id[s.id] = vol_id
+            elif stype == StorylineTier.B_TIER:
+                b_storylines.append(s)
+                vol_id = b_volume_by_storyline.get(s.id)
+                if vol_id:
+                    storyline_volume_id_by_id[s.id] = vol_id
+
+        for s in s_storylines:
+            hint = _consume("S", None)
+            if hint:
+                user_hint_by_storyline_id[s.id] = hint
+
+        for vol_idx in sorted(a_by_volume.keys()):
+            for s in a_by_volume[vol_idx]:
+                hint = _consume("A", vol_idx)
+                if hint:
+                    user_hint_by_storyline_id[s.id] = hint
+
+        for s in b_storylines:
+            vol_id = storyline_volume_id_by_id.get(s.id)
+            vol_idx: int | None = None
+            if vol_id:
+                # Reverse-lookup volume index from volume_id so we can match
+                # hints by 1-indexed `volume` field.
+                vol_idx = next((i for i, vid in volumes_by_index.items() if vid == vol_id), None)
+            hint = _consume("B", vol_idx)
+            if hint:
+                user_hint_by_storyline_id[s.id] = hint
+
+        return user_hint_by_storyline_id, storyline_volume_id_by_id
+
     def _build_macro_narrative_context(
         self,
         *,
@@ -1663,7 +2075,12 @@ class AnchorService:
         bible: dict[str, Any],
         volumes: list[VolumePlan],
         cast_stored: list[StoryCastMemberStored],
+        audience: Literal["all", "mainline"] = "all",
     ) -> dict[str, Any]:
+        if audience == "mainline":
+            visible_storylines = [s for s in storylines if s.type == StorylineTier.MAIN]
+        else:
+            visible_storylines = list(storylines)
         return {
             "storylines": [
                 {
@@ -1673,7 +2090,7 @@ class AnchorService:
                     "overall_goal": s.overall_goal,
                     "involved_entities": list(s.involved_entities or []),
                 }
-                for s in storylines
+                for s in visible_storylines
             ],
             "bible_excerpt": self._truncate_text_for_prompt(
                 json.dumps(bible, ensure_ascii=False, default=str), 4500
@@ -1708,29 +2125,60 @@ class AnchorService:
         bible: dict[str, Any],
         volumes: list[VolumePlan],
         cast_stored: list[StoryCastMemberStored],
+        user_hint_by_storyline_id: dict[str, dict[str, Any]] | None = None,
+        storyline_volume_id_by_id: dict[str, str] | None = None,
     ) -> str:
+        user_hint_by_storyline_id = user_hint_by_storyline_id or {}
+        storyline_volume_id_by_id = storyline_volume_id_by_id or {}
         rows: list[dict[str, Any]] = []
+        has_any_user_hint = False
         for s in storylines:
-            rows.append(
-                {
-                    "storyline_id": s.id,
-                    "type": s.type.value if hasattr(s.type, "value") else str(s.type),
-                    "seed_title": s.title,
-                    "seed_overall_goal": s.overall_goal,
-                    "seed_involved_entities": list(s.involved_entities or []),
+            row: dict[str, Any] = {
+                "storyline_id": s.id,
+                "type": s.type.value if hasattr(s.type, "value") else str(s.type),
+                "seed_title": s.title,
+                "seed_overall_goal": s.overall_goal,
+                "seed_involved_entities": list(s.involved_entities or []),
+            }
+            vol_id = storyline_volume_id_by_id.get(s.id)
+            if vol_id:
+                # Surface the per-storyline volume binding so the model can
+                # ground A/B side arcs in that volume's setup.
+                row["volume_id"] = vol_id
+            hint = user_hint_by_storyline_id.get(s.id)
+            if hint:
+                has_any_user_hint = True
+                row["user_hint"] = {
+                    "title": str(hint.get("title") or ""),
+                    "goal": str(hint.get("goal") or ""),
                 }
-            )
+                vol_hint = hint.get("volume")
+                if isinstance(vol_hint, int):
+                    row["user_hint"]["volume"] = vol_hint
+            rows.append(row)
+
+        rules = [
+            "You can only fill title, overall_goal, and involved_entities for each storyline_id.",
+            "Do not add, remove, or rename storyline rows; keep storyline_id values exactly as given.",
+            "involved_entities MUST be a subset of allowed_cast_node_ids (use those exact strings).",
+            "S_TIER: book-spanning important side service to the main spine; A_TIER: volume-scoped support; B_TIER: short texture beats.",
+            "Write in the configured output_language. No plot spoilers of the final ending.",
+        ]
+        if has_any_user_hint:
+            # When the wizard pinned an A/B subplot to this volume we want the
+            # model to refine the user's seed rather than invent a fresh angle;
+            # storylines without a user_hint should still follow the original
+            # auto-generation path so we don't lose texture coverage.
+            rules.extend([
+                "Some rows include a `user_hint` object containing the wizard's title/goal seed for that A/B subplot (and the volume it targets). For those rows you MUST treat the hint as the source of truth: keep its intent, refine wording, and tighten alignment with bible/volume context; do NOT replace the user's premise with a different idea.",
+                "Rows without `user_hint` follow the original behaviour — invent the title/overall_goal from scratch, grounded in volume context and the storyline tier.",
+                "If a row has both `volume_id` and `user_hint.volume`, anchor the goal inside that volume's narrative beats.",
+            ])
         return json.dumps(
             {
                 "task": "Fill storyline content slots only; do not change storyline ids or tier types.",
                 "output_language": normalize_output_language(story_input.output_language),
-                "rules": [
-                    "You can only fill title, overall_goal, and involved_entities for each storyline_id.",
-                    "Do not add, remove, or rename storyline rows; keep storyline_id values exactly as given.",
-                    "involved_entities MUST be a subset of allowed_cast_node_ids (use those exact strings).",
-                    "S_TIER: book-spanning important side service to the main spine; A_TIER: volume-scoped support; B_TIER: short texture beats.",
-                    "Write in the configured output_language. No plot spoilers of the final ending.",
-                ],
+                "rules": rules,
                 "allowed_cast_node_ids": allowed_cast_node_ids,
                 "bible_excerpt": self._truncate_text_for_prompt(
                     json.dumps(bible, ensure_ascii=False, default=str), 4500
@@ -1778,12 +2226,20 @@ class AnchorService:
         cast_stored: list[StoryCastMemberStored],
         volumes: list[VolumePlan],
         bible: dict[str, Any],
+        user_subplot_hints: list[dict[str, Any]] | None = None,
+        b_storyline_volume_by_id: dict[str, str] | None = None,
     ) -> tuple[list[Storyline], dict[str, Any]]:
         if llm_client is None or isinstance(llm_client, MockLLMClient):
             return storylines, {"storyline_slot_fill_skipped": True, "storyline_slot_fill_retries": 0}
         allowed = {c.node_id for c in cast_stored}
         if not storylines or not allowed:
             return storylines, {"storyline_slot_fill_skipped": True, "storyline_slot_fill_retries": 0}
+        user_hint_by_storyline_id, storyline_volume_id_by_id = self._match_user_subplot_hints_to_storylines(
+            storylines=storylines,
+            volumes=volumes,
+            user_subplot_hints=user_subplot_hints,
+            b_storyline_volume_by_id=b_storyline_volume_by_id,
+        )
         profile = augment_profile_system_prompt(get_profile("macro_planner"), story_input.output_language)
         by_id = {s.id: s for s in storylines}
         pending_ids = set(by_id.keys())
@@ -1801,6 +2257,8 @@ class AnchorService:
                 bible=bible,
                 volumes=volumes,
                 cast_stored=cast_stored,
+                user_hint_by_storyline_id=user_hint_by_storyline_id,
+                storyline_volume_id_by_id=storyline_volume_id_by_id,
             )
             try:
                 structured, _ = llm_client.invoke_json(prompt, _LLMStorylineSlotOutput, profile)
@@ -1832,6 +2290,8 @@ class AnchorService:
             "storyline_slot_fill_retries": retries,
             "storyline_slot_policy_violations": violations,
             "storyline_slot_pending_ids": sorted(pending_ids),
+            "storyline_user_hint_matches": len(user_hint_by_storyline_id),
+            "storyline_user_hint_matched_ids": sorted(user_hint_by_storyline_id.keys()),
         }
 
     def _slot_fill_prompt(
@@ -1846,21 +2306,20 @@ class AnchorService:
         batch_hint: dict[str, Any] | None = None,
         main_batch_summaries: list[dict[str, Any]] | None = None,
         expect_batch_summary: bool = False,
+        extra_rules: list[str] | None = None,
     ) -> str:
         base_rules = [
             "You can only fill title and description.",
             "Do not invent or modify node_id, depends_on, node_kind, storyline_ids, volume_id.",
             "Return one item for each input node_id.",
             "Use narrative_context (storylines, bible_excerpt, volumes, cast) to keep anchors aligned with the macro plan and each storyline's overall_goal.",
-            "S_TIER is a book-spanning important side arc (identity mystery, long-term growth) and must serve the mainline.",
-            "A_TIER is a volume-scoped side arc (e.g., key item/ability acquisition) and must serve this volume mainline.",
-            "B_TIER is a short side beat for texture and character charm, never a decisive plotline.",
-            "No spoilers and no repetition: side-arc content must not duplicate mainline events.",
             "Each node description must strictly match the spatiotemporal context implied by its depends_on predecessors.",
             "No deterministic breakthrough ahead of mainline schedule.",
             "If any rule is violated, rewrite the offending item and keep topology unchanged.",
         ]
         rules = list(base_rules)
+        if extra_rules:
+            rules.extend(extra_rules)
         output_shape: dict[str, Any] = {
             "items": [{"node_id": "string", "title": "string", "description": "string"}]
         }
@@ -2044,11 +2503,35 @@ class AnchorService:
         ]
         side_nodes = [n for n in anchor_nodes if n.node_kind == "NORMAL" and n.id not in {m.id for m in main_nodes}]
         main_node_ids = {n.id for n in main_nodes}
-        narrative_block: dict[str, Any] | None = None
+        narrative_block_mainline: dict[str, Any] | None = None
+        narrative_block_side: dict[str, Any] | None = None
         if storylines is not None and bible is not None and volumes is not None and cast_stored is not None:
-            narrative_block = self._build_macro_narrative_context(
-                storylines=storylines, bible=bible, volumes=volumes, cast_stored=cast_stored
+            narrative_block_mainline = self._build_macro_narrative_context(
+                storylines=storylines,
+                bible=bible,
+                volumes=volumes,
+                cast_stored=cast_stored,
+                audience="mainline",
             )
+            narrative_block_side = self._build_macro_narrative_context(
+                storylines=storylines,
+                bible=bible,
+                volumes=volumes,
+                cast_stored=cast_stored,
+                audience="all",
+            )
+
+        mainline_extra_rules = [
+            "These nodes are MAIN spine anchors only; describe only mainline conflict beats.",
+            "narrative_context.storylines is filtered to MAIN-tier only. Treat side-arc / subplot threads as out of scope: never reference, hint at, or invent S_TIER / A_TIER / B_TIER material in title or description, even if such themes appear elsewhere (bible_excerpt, volume summaries, author notes).",
+            "Do not introduce side-character personal storylines, subplot premises, or wizard-supplied side-arc seeds in mainline anchors.",
+        ]
+        side_extra_rules = [
+            "S_TIER is a book-spanning important side arc (identity mystery, long-term growth) and must serve the mainline.",
+            "A_TIER is a volume-scoped side arc (e.g., key item/ability acquisition) and must serve this volume mainline.",
+            "B_TIER is a short side beat for texture and character charm, never a decisive plotline.",
+            "No spoilers and no repetition: side-arc content must not duplicate mainline events.",
+        ]
 
         vol_list = volumes or []
         main_batches = (
@@ -2097,10 +2580,11 @@ class AnchorService:
                     stage_label=f"stage3.1_mainline.batch{batch_index}",
                     node_rows=payload_rows,
                     context_summary="",
-                    narrative_context=narrative_block,
+                    narrative_context=narrative_block_mainline,
                     prior_main_batch_summaries=list(prior_summaries),
                     batch_hint={"batch_index": batch_index, "volume_id": vol_hint},
                     expect_batch_summary=True,
+                    extra_rules=mainline_extra_rules,
                 )
                 try:
                     structured_out, _ = llm_client.invoke_json(prompt, _LLMSlotFillOutput, profile)
@@ -2181,8 +2665,9 @@ class AnchorService:
                     stage_label=f"stage3.3_side_arcs.p{chunk_idx}",
                     node_rows=payload,
                     context_summary=side_context[:2000],
-                    narrative_context=narrative_block,
+                    narrative_context=narrative_block_side,
                     main_batch_summaries=list(prior_summaries),
+                    extra_rules=side_extra_rules,
                 )
                 try:
                     structured_side, _ = llm_client.invoke_json(side_prompt, _LLMSlotFillOutput, profile)
@@ -2846,7 +3331,15 @@ class AnchorService:
             )
         cast_stored = self._normalize_cast_output(story_id, output.cast, story_input)
         compile_warnings: list[str] = []
-        storylines, fishbone_meta = self._build_fishbone_storylines(story_id, volumes, cast_stored)
+        user_subplot_hints = extract_user_subplot_hints(
+            getattr(story_input, "macro_author_notes", "") or ""
+        )
+        storylines, fishbone_meta = self._build_fishbone_storylines(
+            story_id, volumes, cast_stored, user_subplot_hints=user_subplot_hints
+        )
+        b_storyline_volume_by_id = dict(
+            fishbone_meta.get("b_storyline_volume_by_id") or {}
+        )
         storylines, storyline_slot_meta = self._fill_storyline_slots(
             story_input=story_input,
             llm_client=llm_client,
@@ -2854,6 +3347,8 @@ class AnchorService:
             cast_stored=cast_stored,
             volumes=volumes,
             bible=bible_out,
+            user_subplot_hints=user_subplot_hints,
+            b_storyline_volume_by_id=b_storyline_volume_by_id,
         )
         anchor_nodes = self._build_fishbone_anchor_nodes(
             story_id=story_id,
@@ -2861,6 +3356,7 @@ class AnchorService:
             storylines=storylines,
             volumes=volumes,
             a_lines_per_volume=dict(fishbone_meta.get("a_lines_per_volume") or {}),
+            b_storyline_volume_by_id=b_storyline_volume_by_id,
         )
         self._validate_dag(anchor_nodes)
         self._ensure_tier_convergence(anchor_nodes, storylines)

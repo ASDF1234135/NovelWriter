@@ -8,6 +8,11 @@ import HardBreak from "@tiptap/extension-hard-break";
 export type ChapterReviewEditorProps = {
   initialDoc: string;
   busy?: boolean;
+  /**
+   * When true, editor chrome uses warm ink-on-cream tones for the atelier
+   * manuscript surface (review shell). Default matches the dark app shell.
+   */
+  manuscriptSurface?: boolean;
   /** Emits the plain-text manuscript (paragraphs separated by blank lines). */
   onChange: (plainText: string) => void;
 };
@@ -31,10 +36,19 @@ function toProseMirrorDoc(plain: string): {
   };
 }
 
-export default function ChapterReviewEditor({ initialDoc, busy, onChange }: ChapterReviewEditorProps) {
+export default function ChapterReviewEditor({
+  initialDoc,
+  busy,
+  manuscriptSurface = false,
+  onChange,
+}: ChapterReviewEditorProps) {
   // Build the initial doc once so React 18 StrictMode double-mount doesn't
   // produce two different starting documents (and surprise `setEdited(true)`).
   const doc = useMemo(() => toProseMirrorDoc(initialDoc), [initialDoc]);
+
+  const editorClass = manuscriptSurface
+    ? "chapter-review-editor chapter-review-editor--manuscript prose-manuscript font-body text-lg leading-[1.85] text-[#2a221a]/95 focus:outline-none"
+    : "chapter-review-editor prose-manuscript font-body text-lg leading-[1.8] text-on-surface/90 focus:outline-none";
 
   const editor = useEditor({
     extensions: [Document, Paragraph, Text, HardBreak],
@@ -42,7 +56,7 @@ export default function ChapterReviewEditor({ initialDoc, busy, onChange }: Chap
     editable: !busy,
     editorProps: {
       attributes: {
-        class: "chapter-review-editor prose-manuscript font-body text-lg leading-[1.8] text-on-surface/90 focus:outline-none",
+        class: editorClass,
         spellCheck: "false",
       },
     },
@@ -56,6 +70,18 @@ export default function ChapterReviewEditor({ initialDoc, busy, onChange }: Chap
     if (!editor) return;
     editor.setEditable(!busy);
   }, [editor, busy]);
+
+  useEffect(() => {
+    if (!editor) return;
+    editor.setOptions({
+      editorProps: {
+        attributes: {
+          class: editorClass,
+          spellCheck: "false",
+        },
+      },
+    });
+  }, [editor, editorClass]);
 
   // No dependency array updates from initialDoc by design: TipTap owns the
   // document after first mount; the parent should remount via `key=runId` if

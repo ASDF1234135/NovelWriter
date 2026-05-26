@@ -18,7 +18,9 @@ export function mapHitlQuickActionLabel(optionId: string, serverLabel: string | 
 
 export function mapHitlOptionHint(optionId: string, t: HitlTranslate): string {
   const key = `hitl.hint.${optionId}`;
-  return t(key, "");
+  const v = t(key, "");
+  if (v.trim() && v !== key) return v;
+  return "";
 }
 
 /** Single-line failure explanation for plan loop (message preferred over raw violation code). */
@@ -87,6 +89,15 @@ export function buildHitlPrimaryHeadline(
         t("hitl.bStoryResolve.nameFallback");
       return { headline: t("hitl.bStoryResolve.headline", "", { name }), extraLine: null };
     }
+    case HITL_REASON.ANCHOR_RESOLVE: {
+      const rows = buildAnchorMilestoneRows(state);
+      const name = rows[0]?.title?.trim() || t("hitl.anchorResolve.nameFallback");
+      const extra = rows[0]?.description?.trim() || String(hitlContext?.primary_issue ?? "").trim() || null;
+      return {
+        headline: t("hitl.anchorResolve.headline", "", { name }),
+        extraLine: extra && extra.length > 200 ? `${extra.slice(0, 200)}…` : extra,
+      };
+    }
     case HITL_REASON.CONTEXT: {
       const est = state.context_overflow_char_estimate;
       const n = est != null && Number.isFinite(Number(est)) ? String(est) : "—";
@@ -121,6 +132,62 @@ function estimateBStoryStagnantChapters(state: Record<string, unknown>): number 
   const recent = state.recent_b_story_types;
   if (Array.isArray(recent) && recent.length > 0) return Math.min(12, recent.length + 2);
   return 3;
+}
+
+export type AnchorMilestoneRow = { anchorId: string; title: string; description: string };
+
+/** Human-readable milestone rows for Anchor_Resolution_Failed (title + description, no raw JSON). */
+export function buildAnchorMilestoneRows(state: Record<string, unknown>): AnchorMilestoneRow[] {
+  const cand = asRecord(state.anchor_resolution_hitl_candidate ?? state.b_story_resolution_hitl_candidate);
+  if (!cand) return [];
+
+  const nodeById = new Map<string, Record<string, unknown>>();
+  for (const raw of Array.isArray(state.anchor_nodes) ? state.anchor_nodes : []) {
+    const n = asRecord(raw);
+    if (!n) continue;
+    const id = String(n.id ?? n.anchor_id ?? "").trim();
+    if (id) nodeById.set(id, n);
+  }
+
+  const unresolved = (Array.isArray(cand.unresolved_anchor_ids) ? cand.unresolved_anchor_ids : [])
+    .map((x) => String(x).trim())
+    .filter(Boolean);
+  const resolved = (Array.isArray(cand.resolved_anchor_ids) ? cand.resolved_anchor_ids : [])
+    .map((x) => String(x).trim())
+    .filter(Boolean);
+  const ids = unresolved.length > 0 ? unresolved : resolved;
+
+  const fallbackTitle = String(cand.anchor_title ?? cand.title ?? cand.name ?? "").trim();
+  const sharedAnalysis = String(cand.resolution_analysis ?? cand.decision_reason ?? "").trim();
+
+  if (ids.length === 0) {
+    if (!fallbackTitle && !sharedAnalysis) return [];
+    return [
+      {
+        anchorId: String(cand.anchor_id ?? "").trim(),
+        title: fallbackTitle || "—",
+        description: sharedAnalysis || "—",
+      },
+    ];
+  }
+
+  const evidence = Array.isArray(cand.evidence_summary) ? cand.evidence_summary : [];
+
+  return ids.map((aid) => {
+    const node = nodeById.get(aid);
+    const title = String(node?.title ?? fallbackTitle).trim() || aid;
+    let description = String(node?.description ?? "").trim();
+    if (!description) {
+      for (const row of evidence) {
+        const r = asRecord(row);
+        if (!r || String(r.anchor_id ?? "").trim() !== aid) continue;
+        description = String(r.reasoning ?? r.decision_reason ?? "").trim();
+        if (description) break;
+      }
+    }
+    if (!description) description = sharedAnalysis;
+    return { anchorId: aid, title, description: description || "—" };
+  });
 }
 
 function buildExtractionEntityLine(state: Record<string, unknown>, t: HitlTranslate): string | null {

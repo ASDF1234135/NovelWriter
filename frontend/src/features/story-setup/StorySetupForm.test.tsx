@@ -16,7 +16,13 @@ describe("StorySetupForm", () => {
     );
 
     expect(screen.queryByText("核心角色種子（選填）")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /Create Story|建立故事|创建故事/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Next phase|下一階段|下一阶段/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Next phase|下一階段|下一阶段/ }));
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /Create.*generate|建立並開始生成|创建并开始生成/i,
+      }),
+    );
 
     expect(onSubmit).toHaveBeenCalledWith(
       expect.objectContaining({

@@ -273,3 +273,62 @@ def test_api_patch_story_before_and_after_workflow_run(tmp_path) -> None:
         assert r_after_run.json()["premise"] == "after_run"
     finally:
         app.dependency_overrides.clear()
+
+
+def test_workflow_repository_latest_active_run(tmp_path) -> None:
+    service = build_service(str(tmp_path / "latest_active.sqlite3"))
+    sid = service.create_story(StoryInput(title="Act", premise="p", bible={}, target_total_words=2000))["story_id"]
+    wr = service.workflow_repository
+    assert wr.get_latest_active_run_for_story(sid) is None
+
+    base_state = {"story_id": sid, "chapter_id": 1, "workflow_status": "RUNNING", "requires_hitl": False}
+    run = wr.create_run(sid, 1, base_state)
+    row = wr.get_latest_active_run_for_story(sid)
+    assert row is not None
+    assert row["run_id"] == run.run_id
+    assert row["chapter_id"] == 1
+    assert row["status"] == "RUNNING"
+
+    wr.update_run(
+        run.run_id,
+        {**base_state, "workflow_status": "WAITING_HITL", "requires_hitl": True, "hitl_reason": "x"},
+    )
+    row2 = wr.get_latest_active_run_for_story(sid)
+    assert row2 is not None
+    assert row2["run_id"] == run.run_id
+    assert row2["status"] == "WAITING_HITL"
+
+    wr.update_run(run.run_id, {**base_state, "workflow_status": "COMPLETED", "requires_hitl": False})
+    assert wr.get_latest_active_run_for_story(sid) is None
+
+
+def test_api_workflows_latest_active(tmp_path) -> None:
+    from fastapi.testclient import TestClient
+
+    from app.dependencies import get_workflow_service
+    from app.main import app
+
+    service = build_service(str(tmp_path / "latest_active_api.sqlite3"))
+    sid = service.create_story(StoryInput(title="Api", premise="p", bible={}, target_total_words=2000))["story_id"]
+
+    app.dependency_overrides[get_workflow_service] = lambda: service
+    try:
+        client = TestClient(app)
+        r0 = client.get(f"/api/stories/{sid}/workflows/latest-active")
+        assert r0.status_code == 200
+        assert r0.json() is None
+
+        st = {"story_id": sid, "chapter_id": 2, "workflow_status": "RUNNING", "requires_hitl": False}
+        created = service.workflow_repository.create_run(sid, 2, st)
+        r1 = client.get(f"/api/stories/{sid}/workflows/latest-active")
+        assert r1.status_code == 200
+        body = r1.json()
+        assert body["run_id"] == created.run_id
+        assert body["story_id"] == sid
+        assert body["chapter_id"] == 2
+        assert body["status"] == "RUNNING"
+
+        r404 = client.get("/api/stories/missing_story/workflows/latest-active")
+        assert r404.status_code == 404
+    finally:
+        app.dependency_overrides.clear()

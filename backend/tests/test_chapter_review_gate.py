@@ -194,6 +194,62 @@ def test_rerun_keep_director_resets_draft_and_resumes_planner(tmp_path, monkeypa
     assert bool(after.get("require_chapter_review")) is True
 
 
+def test_rerun_keep_director_preserves_db_resolved_anchors(tmp_path, monkeypatch) -> None:
+    service = build_service(str(tmp_path / "review_rerun_db.sqlite3"))
+    story = _create_story(service, require_review=True)
+    sid = story["story_id"]
+    a3 = f"{sid}_anchor_03"
+    a8 = f"{sid}_anchor_08"
+    service.story_repository.update_story_macro_topology(
+        sid,
+        storylines=[],
+        anchor_nodes=[
+            {
+                "id": a3,
+                "storyline_ids": [],
+                "volume_id": "v1",
+                "node_kind": "NORMAL",
+                "title": "Beat A",
+                "description": "",
+                "depends_on": [],
+            },
+            {
+                "id": a8,
+                "storyline_ids": [],
+                "volume_id": "v1",
+                "node_kind": "NORMAL",
+                "title": "Beat B",
+                "description": "",
+                "depends_on": [a3],
+            },
+        ],
+    )
+    service.story_repository.update_story_runtime_json(
+        sid,
+        {
+            "resolved_anchors": [a3, a8],
+            "anchor_candidates": [f"{sid}_anchor_10"],
+            "anchor_properties": {},
+            "lore_mysteries_progression": [],
+        },
+    )
+
+    state = build_initial_state(sid, 8, [], "trace-rerun-db")
+    state["require_chapter_review"] = True
+    state["resolved_anchors"] = [a3, a8]
+    state["requires_hitl"] = True
+    state["hitl_reason"] = HitlReason.CHAPTER_DRAFT_REVIEW
+    state["workflow_status"] = "WAITING_HITL"
+    state["resume_from"] = "chunker"
+    run = service.workflow_repository.create_run(sid, 8, state)
+
+    monkeypatch.setattr(service, "_execute_workflow", lambda _rid, _s: None)
+    service.apply_hitl_decision(run.run_id, HitlDecisionRequest(option_id="RERUN_KEEP_DIRECTOR"))
+
+    after = service.workflow_repository.get_run_state(run.run_id)
+    assert after["resolved_anchors"] == [a3, a8]
+
+
 def test_abandon_chapter_marks_run_cancelled(tmp_path, monkeypatch) -> None:
     service = build_service(str(tmp_path / "review_abandon.sqlite3"))
     _, run_id = _setup_paused_review_state(service)

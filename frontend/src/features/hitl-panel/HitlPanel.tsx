@@ -1,5 +1,5 @@
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useFieldArray, useForm, useWatch } from "react-hook-form";
 import { z } from "zod";
 import type { GraphSnapshot, HitlContextPayload, WorkflowPayload } from "../../types";
@@ -18,17 +18,29 @@ import {
   solutionsForReason,
 } from "./hitlCopy";
 import {
+  buildAnchorMilestoneRows,
   buildHitlPrimaryHeadline,
   filterGraphNodesByType,
-  mapHitlOptionHint,
-  mapHitlQuickActionLabel,
   parseExtractionRemapHints,
   getRemapExpectedNodeType,
   type GraphNodeLite,
 } from "./hitlNarrative";
 import { HitlFlowStrip } from "./HitlFlowStrip";
+import { HitlPanelContentSection } from "./HitlPanelContentSection";
+import { HitlPanelQuickSection } from "./HitlPanelQuickSection";
+import { HitlPanelSection } from "./HitlPanelSection";
+import { getHitlPanelSectionFlags, resolveQuickActions } from "./hitlPanelLayout";
+import { ChapterReviewGate } from "../chapter-review/ChapterReviewGate";
 
 export { HITL_REASON } from "./hitlCopy";
+
+export type HitlChapterReviewPayload = {
+  draft: string;
+  readerScore: number | null;
+  onApprove: (content: string, edited: boolean) => Promise<void>;
+  onAbandon: () => Promise<void>;
+  onRerun: () => Promise<void>;
+};
 
 type Props = {
   workflow: WorkflowPayload | null;
@@ -40,6 +52,8 @@ type Props = {
   busy?: boolean;
   /** Shown inside the panel when HITL is active (e.g. server 422 / validation message). */
   workflowError?: string;
+  /** Chapter draft human review (WAITING_HITL + Chapter_Draft_Review). */
+  chapterReview?: HitlChapterReviewPayload | null;
   onDecision: (optionId: string) => Promise<void>;
   onOutlineEdit: (payload: { ground_truth_events: Array<Record<string, unknown>>; narrative_script?: string }) => Promise<void>;
   onStateInjection: (payload: {
@@ -71,7 +85,7 @@ type Props = {
     reason?: string;
   }) => Promise<void>;
   onAnchorResolution?: (payload: {
-    action: "force_resolve" | "rewrite" | "delay_anchor";
+    action: "force_resolve" | "rewrite" | "delay_anchor" | "continue_unresolved";
     resolved_anchor_ids?: string[];
     delayed_anchor_ids?: string[];
     reject_resume_from?: string;
@@ -146,6 +160,7 @@ export function HitlPanel({
   variant = "default",
   busy = false,
   workflowError = "",
+  chapterReview = null,
   onDecision,
   onOutlineEdit,
   onStateInjection,
@@ -199,12 +214,10 @@ export function HitlPanel({
   const hitlActive = isHitlActive(workflow);
   const controlsLocked = !hitlActive || busy;
   const hitlContext = (workflow?.run.hitl_context ?? null) as HitlContextPayload | null;
-  const rawOptions = (workflow?.state.pending_hitl_options as Array<{ id: string; label: string }> | undefined) ?? [];
-  const options = useMemo(
-    () => rawOptions.filter((o) => o.id !== "b_story_wait_judgement"),
-    [rawOptions],
-  );
   const reason = String(workflow?.run.hitl_reason ?? workflow?.state.hitl_reason ?? "");
+  const rawOptions = (workflow?.state.pending_hitl_options as Array<{ id: string; label: string }> | undefined) ?? [];
+  const quickActions = useMemo(() => resolveQuickActions(reason, rawOptions), [reason, rawOptions]);
+  const sectionFlags = useMemo(() => getHitlPanelSectionFlags(reason), [reason]);
   const resumeHint = String(workflow?.state.resume_from ?? "");
   const compact = variant === "compact";
   const primaryNarrative = useMemo(() => {
@@ -222,6 +235,10 @@ export function HitlPanel({
     () => parseExtractionRemapHints(workflow?.state?.hitl_extraction_remap_hints),
     [workflow?.state?.hitl_extraction_remap_hints],
   );
+  const anchorMilestones = useMemo(() => {
+    if (reason !== HITL_REASON.ANCHOR_RESOLVE || !workflow?.state) return [];
+    return buildAnchorMilestoneRows(workflow.state as Record<string, unknown>);
+  }, [reason, workflow?.state]);
 
   useEffect(() => {
     if (!hitlActive || reason !== HITL_REASON.EXTRACTION_GATE || !storyId?.trim()) return;
@@ -310,7 +327,10 @@ export function HitlPanel({
   if (reason === HITL_REASON.ANCHOR_RESOLVE || reason === HITL_REASON.B_STORY) {
       const cand = st.anchor_resolution_hitl_candidate ?? st.b_story_resolution_hitl_candidate;
       if (cand && typeof cand === "object") {
-        setValue("bAnalysis", JSON.stringify(cand, null, 2));
+        const nextAnalysis = JSON.stringify(cand, null, 2);
+        if (getValues("bAnalysis") !== nextAnalysis) {
+          setValue("bAnalysis", nextAnalysis);
+        }
         const c = cand as Record<string, unknown>;
         const suggestedB = Array.isArray(c.resolved_anchor_ids) ? c.resolved_anchor_ids : [];
         const evidenceRows = Array.isArray(c.evidence_summary) ? c.evidence_summary : [];
@@ -348,7 +368,7 @@ export function HitlPanel({
         setValue("alignmentRulesInput", nextRules);
       }
     }
-  }, [hitlActive, reason, workflow?.run.run_id, workflow?.run.hitl_context, workflow?.state, remapArray, outlineArray, getValues, setValue]);
+  }, [hitlActive, reason, workflow?.run.run_id, workflow?.run.hitl_context, workflow?.state]);
   const shell = compact
     ? "glass-panel rounded-xl border border-outline-variant/15 p-4 shadow-glow"
     : "rounded-xl border border-outline-variant/10 bg-surface-container-low p-6 shadow-glow";
@@ -369,6 +389,38 @@ export function HitlPanel({
   };
 
   const decisionMode = String(workflow?.run.hitl_decision_mode ?? "");
+
+  const executeQuickAction = useCallback(
+    (optionId: string) => {
+      const bResolved = getValues("bResolved");
+      const bAnalysis = getValues("bAnalysis");
+      if (optionId === "anchor_force_resolve") {
+        void onAnchorResolution({
+          action: "force_resolve",
+          resolved_anchor_ids: bResolved,
+          reason: bAnalysis,
+        });
+        return;
+      }
+      if (optionId === "anchor_continue_unresolved") {
+        void onAnchorResolution({
+          action: "continue_unresolved",
+          reason: bAnalysis.slice(0, 800),
+        });
+        return;
+      }
+      if (optionId === "anchor_rewrite") {
+        void onAnchorResolution({
+          action: "rewrite",
+          reject_resume_from: "planner",
+          reason: bAnalysis.slice(0, 800),
+        });
+        return;
+      }
+      void onDecision(optionId);
+    },
+    [getValues, onAnchorResolution, onDecision],
+  );
 
   return (
     <section className={shell} aria-labelledby="hitl-panel-heading">
@@ -402,7 +454,19 @@ export function HitlPanel({
       </p>
       {hitlActive ? <HitlFlowStrip reason={reason} resumeFrom={resumeHint} compact={compact} /> : null}
 
-      {hitlActive && reason === HITL_REASON.CHAPTER_DRAFT_REVIEW ? (
+      {hitlActive && reason === HITL_REASON.CHAPTER_DRAFT_REVIEW && chapterReview ? (
+        <div className="mt-4">
+          <ChapterReviewGate
+            surface="app"
+            draft={chapterReview.draft}
+            readerScore={chapterReview.readerScore}
+            busy={busy}
+            onApprove={chapterReview.onApprove}
+            onAbandon={chapterReview.onAbandon}
+            onRerun={chapterReview.onRerun}
+          />
+        </div>
+      ) : hitlActive && reason === HITL_REASON.CHAPTER_DRAFT_REVIEW ? (
         <div className="rounded-lg border border-tertiary/40 bg-tertiary/10 px-3 py-3 font-body text-sm text-on-surface">
           {t("hitl.chapterReview.panelStub")}
         </div>
@@ -413,147 +477,102 @@ export function HitlPanel({
           {workflowError.trim() ? (
             <div className="mb-3 rounded-lg border border-error/40 bg-error/10 px-3 py-2 font-body text-sm text-error">{workflowError.trim()}</div>
           ) : null}
-          <div className="mb-4 rounded-lg border border-tertiary/20 bg-tertiary/5 px-3 py-3">
-            <h3 className="font-headline text-sm font-bold text-on-surface">{primaryNarrative.headline}</h3>
+
+          <HitlPanelSection sectionId="hitl-section-reason" title={t("hitl.section.reason")} variant="reason">
+            <h4 className="font-headline text-sm font-bold leading-snug text-on-surface">{primaryNarrative.headline}</h4>
             {primaryNarrative.extraLine ? (
               <p className="mt-2 font-body text-sm leading-relaxed text-on-surface">{primaryNarrative.extraLine}</p>
-            ) : null}
-            {hitlContext?.primary_issue && reason !== HITL_REASON.ALIGNMENT_RULES_REQUIRED ? (
-              <p className="mt-2 rounded-md bg-surface-container-highest/60 px-2 py-2 font-body text-xs text-on-surface">{hitlContext.primary_issue}</p>
-            ) : null}
-            {reason === HITL_REASON.B_STORY && String(hitlContext?.problematic_draft_snippet ?? "").trim() ? (
-              <div className="mt-3 rounded-md border border-outline-variant/20 bg-surface-container-low/70 px-2 py-2">
-                <p className="font-label text-[10px] uppercase tracking-wider text-on-surface-variant">{t("hitl.draft.title")}</p>
-                <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap font-body text-xs text-on-surface">
-                  {String(hitlContext?.problematic_draft_snippet ?? "").trim()}
-                </pre>
-              </div>
-            ) : null}
-            {hitlContext?.context_metadata?.payload_type === "output_language" &&
-            hitlContext.context_metadata.expected_output_language ? (
-              <p className="mt-2 font-label text-xs text-on-surface-variant">
-                {t("hitl.outputLanguage.projectLang")}
-                <span className="text-on-surface">{String(hitlContext.context_metadata.expected_output_language)}</span>
-              </p>
-            ) : null}
-            {hitlContext?.context_metadata?.language_detection_summary ? (
-              <p className="mt-1 font-body text-xs text-on-surface-variant">{hitlContext.context_metadata.language_detection_summary}</p>
             ) : null}
             {reason !== HITL_REASON.ANCHOR_RESOLVE ? (
               <p className="mt-2 font-label text-xs text-on-surface-variant">
                 {t("hitl.resumeNear", "", { step: resumeNodeUserLabel(resumeHint) })}
               </p>
             ) : null}
-          </div>
+          </HitlPanelSection>
 
-          {feedbackLines.length > 0 ? (
-            <div className="mb-4 rounded-lg bg-surface-container-highest/50 px-3 py-2">
-              <p className="font-label text-[10px] uppercase tracking-wider text-on-surface-variant">{t("hitl.systemFeedback")}</p>
-              <ul className="mt-1 list-inside list-disc font-body text-sm text-on-surface">
-                {feedbackLines.map((line, i) => (
-                  <li key={i}>{line}</li>
-                ))}
-              </ul>
-            </div>
+          {sectionFlags.content ? (
+            <HitlPanelContentSection
+              reason={reason}
+              hitlContext={hitlContext}
+              feedbackLines={feedbackLines}
+              anchorMilestones={anchorMilestones}
+              t={t}
+            />
           ) : null}
 
-          {reason === HITL_REASON.ALIGNMENT_RULES_REQUIRED ? (
-            <div className="mb-4 rounded-lg border border-warning/40 bg-warning/10 px-3 py-3" aria-live="polite">
-              <p className="mb-2 font-body text-xs text-on-surface">
-                {t("hitl.alignment.explain")}
-              </p>
-              <textarea
-                className={inputClass}
-                rows={taRows(8)}
-                disabled={controlsLocked}
-                placeholder={t("hitl.alignment.placeholder")}
-                {...register("alignmentRulesInput")}
-              />
-              {!watch("alignmentRulesInput").trim() ? (
-                <p className="mt-1 font-body text-xs text-error">{t("hitl.alignment.required")}</p>
-              ) : null}
-              <button
-                type="button"
-                className={btnClass}
-                disabled={controlsLocked || !watch("alignmentRulesInput").trim()}
-                onClick={() => {
-                  if (!watch("alignmentRulesInput").trim()) return;
-                  onStateInjection({
-                    mutations: [],
-                    chapter_hard_rules: watch("alignmentRulesInput"),
-                    resume_from: "logic_alignment",
-                    reason: "alignment_rules_patch",
-                    this_chapter_pacing_limit: "",
-                    future_anchor_title: "",
-                    future_anchor_description: "",
-                    chapters_to_delay: null,
-                  });
-                }}
-              >
-                {t("hitl.alignment.submit")}
-              </button>
-            </div>
+          {sectionFlags.quick ? (
+            <HitlPanelQuickSection
+              actions={quickActions}
+              controlsLocked={controlsLocked}
+              t={t}
+              onRequestPreview={setPreview}
+              onExecuteQuickAction={executeQuickAction}
+            />
           ) : null}
 
-          {options.length > 0 ? (
-            <div className="mb-4">
-              <p className="mb-2 font-label text-[10px] uppercase tracking-wider text-on-surface-variant">{t("hitl.quickActions")}</p>
-              <div className="flex flex-col gap-2">
-                {options.map((option) => (
-                  <div key={option.id} className="rounded-lg border border-outline-variant/15 bg-surface-container-highest/30 p-2">
-                    <button
-                      type="button"
-                      disabled={controlsLocked}
-                      onClick={() => {
-                        if (option.id === "force_approve_plan") {
-                          setPreview({
-                            title: t("hitl.preview.forceApproveTitle"),
-                            bullets: [t("hitl.preview.forceApproveBullet1"), t("hitl.preview.forceApproveBullet2")],
-                            confirmLabel: t("hitl.preview.forceApproveConfirm"),
-                            onConfirm: () => void onDecision(option.id),
-                          });
-                          return;
-                        }
-                        void onDecision(option.id);
-                      }}
-                      className="w-full rounded-md bg-primary/15 px-3 py-2 text-left font-label text-sm font-medium text-primary transition-colors hover:bg-primary/25 disabled:opacity-40"
-                    >
-                      {mapHitlQuickActionLabel(option.id, option.label, t)}
-                    </button>
-                    {mapHitlOptionHint(option.id, t).trim() ? (
-                      <p className="mt-1.5 px-1 font-body text-xs text-on-surface-variant">{mapHitlOptionHint(option.id, t)}</p>
-                    ) : null}
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : null}
-
-          {solutionList.length > 0 ? (
-            <div className="mb-3">
-              <p className="mb-2 font-label text-[10px] uppercase tracking-wider text-on-surface-variant">{t("hitl.chooseSolution")}</p>
-              <div className={`flex flex-wrap gap-2 ${compact ? "" : "gap-3"}`}>
-                {solutionList.map((sol) => (
-                  <button
-                    key={sol.id}
-                    type="button"
+          {sectionFlags.manual ? (
+            <HitlPanelSection sectionId="hitl-section-manual" title={t("hitl.section.manual")}>
+              {reason === HITL_REASON.ALIGNMENT_RULES_REQUIRED ? (
+                <div className="rounded-lg border border-warning/35 bg-warning/10 px-2 py-3" aria-live="polite">
+                  <p className="mb-2 font-body text-xs text-on-surface">{t("hitl.alignment.explain")}</p>
+                  <textarea
+                    className={inputClass}
+                    rows={taRows(8)}
                     disabled={controlsLocked}
-                    onClick={() => setSelectedSolution(sol.id)}
-                    className={`max-w-full rounded-xl border px-3 py-2 text-left transition-colors ${
-                      selectedSolution === sol.id
-                        ? "border-tertiary bg-tertiary/15 ring-1 ring-tertiary/30"
-                        : "border-outline-variant/20 bg-surface-container-highest/40 hover:border-outline-variant/40"
-                    } disabled:opacity-40`}
+                    placeholder={t("hitl.alignment.placeholder")}
+                    {...register("alignmentRulesInput")}
+                  />
+                  {!watch("alignmentRulesInput").trim() ? (
+                    <p className="mt-1 font-body text-xs text-error">{t("hitl.alignment.required")}</p>
+                  ) : null}
+                  <button
+                    type="button"
+                    className={btnClass}
+                    disabled={controlsLocked || !watch("alignmentRulesInput").trim()}
+                    onClick={() => {
+                      if (!watch("alignmentRulesInput").trim()) return;
+                      onStateInjection({
+                        mutations: [],
+                        chapter_hard_rules: watch("alignmentRulesInput"),
+                        resume_from: "logic_alignment",
+                        reason: "alignment_rules_patch",
+                        this_chapter_pacing_limit: "",
+                        future_anchor_title: "",
+                        future_anchor_description: "",
+                        chapters_to_delay: null,
+                      });
+                    }}
                   >
-                    <span className="block font-label text-sm font-semibold text-on-surface">{sol.title}</span>
-                    <span className="mt-0.5 block font-body text-xs text-on-surface-variant">{sol.blurb}</span>
+                    {t("hitl.alignment.submit")}
                   </button>
-                ))}
-              </div>
-            </div>
-          ) : null}
+                </div>
+              ) : null}
 
-          <div className="rounded-xl border border-outline-variant/15 bg-surface-container-highest/40 p-4">
+              {solutionList.length > 0 ? (
+                <div className={reason === HITL_REASON.ALIGNMENT_RULES_REQUIRED ? "mt-4" : ""}>
+                  <p className="mb-2 font-label text-[10px] uppercase tracking-wider text-on-surface-variant">{t("hitl.chooseSolution")}</p>
+                  <div className={`flex flex-wrap gap-2 ${compact ? "" : "gap-3"}`}>
+                    {solutionList.map((sol) => (
+                      <button
+                        key={sol.id}
+                        type="button"
+                        disabled={controlsLocked}
+                        onClick={() => setSelectedSolution(sol.id)}
+                        className={`max-w-full rounded-xl border px-3 py-2 text-left transition-colors ${
+                          selectedSolution === sol.id
+                            ? "border-tertiary bg-tertiary/15 ring-1 ring-tertiary/30"
+                            : "border-outline-variant/20 bg-surface-container-highest/40 hover:border-outline-variant/40"
+                        } disabled:opacity-40`}
+                      >
+                        <span className="block font-label text-sm font-semibold text-on-surface">{sol.title}</span>
+                        <span className="mt-0.5 block font-body text-xs text-on-surface-variant">{sol.blurb}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              <div className={solutionList.length > 0 || reason === HITL_REASON.ALIGNMENT_RULES_REQUIRED ? "mt-4" : ""}>
             {selectedSolution === "outline" && isPlanFamilyReason(reason) ? (
               <>
                 <h3 className="mb-2 font-headline text-xs font-bold text-on-surface">{t("hitl.outline.title")}</h3>
@@ -772,60 +791,6 @@ export function HitlPanel({
               </>
             ) : null}
 
-            {selectedSolution === "b_story" && reason === HITL_REASON.ANCHOR_RESOLVE ? (
-              <>
-                <h3 className="mb-2 font-headline text-xs font-bold text-on-surface">{t("hitl.anchorResolve.title")}</h3>
-                <p className="mb-2 font-body text-xs text-on-surface-variant">{t("hitl.anchorResolve.hint")}</p>
-
-                {String(hitlContext?.problematic_draft_snippet ?? "").trim() ? (
-                  <div className="mb-3 rounded-md border border-outline-variant/20 bg-surface-container-low/70 px-2 py-2">
-                    <p className="font-label text-[10px] uppercase tracking-wider text-on-surface-variant">{t("hitl.draft.title")}</p>
-                    <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap font-body text-xs text-on-surface">
-                      {String(hitlContext?.problematic_draft_snippet ?? "").trim()}
-                    </pre>
-                  </div>
-                ) : null}
-
-                <div className="rounded-lg border border-outline-variant/15 bg-surface-container-highest/30 px-3 py-2">
-                  <p className="font-label text-[10px] uppercase tracking-wider text-on-surface-variant">{t("hitl.anchorResolve.details")}</p>
-                  <pre className="mt-1 max-h-56 overflow-auto whitespace-pre-wrap font-mono text-[11px] text-on-surface">
-                    {watch("bAnalysis").trim() || "—"}
-                  </pre>
-                </div>
-
-                <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
-                  <button
-                    type="button"
-                    className="rounded-xl border border-tertiary/40 bg-tertiary/15 px-4 py-4 text-left font-label text-sm font-semibold text-tertiary transition-colors hover:bg-tertiary/25 disabled:opacity-40"
-                    disabled={controlsLocked}
-                    onClick={() =>
-                      onAnchorResolution({
-                        action: "force_resolve",
-                        resolved_anchor_ids: watch("bResolved"),
-                        reason: watch("bAnalysis"),
-                      })
-                    }
-                  >
-                    {t("hitl.anchorResolve.confirm")}
-                  </button>
-                  <button
-                    type="button"
-                    className="rounded-xl border border-outline-variant/30 bg-surface-container-highest/50 px-4 py-4 text-left font-label text-sm font-semibold text-on-surface transition-colors hover:border-outline-variant/50 disabled:opacity-40"
-                    disabled={controlsLocked}
-                    onClick={() =>
-                      onAnchorResolution({
-                        action: "rewrite",
-                        reject_resume_from: "planner",
-                        reason: watch("bAnalysis").slice(0, 800),
-                      })
-                    }
-                  >
-                    {t("hitl.anchorResolve.reject")}
-                  </button>
-                </div>
-              </>
-            ) : null}
-
             {selectedSolution === "prune" && reason === HITL_REASON.CONTEXT ? (
               <>
                 <h3 className="mb-2 font-headline text-xs font-bold text-on-surface">{t("hitl.prune.title")}</h3>
@@ -883,13 +848,15 @@ export function HitlPanel({
               </>
             ) : null}
 
-            {hitlActive && solutionList.length === 0 ? (
-              <p className="font-body text-sm text-on-surface-variant">{t("hitl.noDedicatedForm")}</p>
-            ) : null}
-            {hitlActive && solutionList.length > 0 && selectedSolution == null ? (
-              <p className="font-body text-sm text-on-surface-variant">{t("hitl.chooseSolutionAbove")}</p>
-            ) : null}
-          </div>
+                {hitlActive && solutionList.length === 0 && reason !== HITL_REASON.ALIGNMENT_RULES_REQUIRED ? (
+                  <p className="font-body text-sm text-on-surface-variant">{t("hitl.noDedicatedForm")}</p>
+                ) : null}
+                {hitlActive && solutionList.length > 0 && selectedSolution == null ? (
+                  <p className="font-body text-sm text-on-surface-variant">{t("hitl.chooseSolutionAbove")}</p>
+                ) : null}
+              </div>
+            </HitlPanelSection>
+          ) : null}
 
           <details
             className="mt-4 rounded-xl border border-outline-variant/15 bg-surface-container-highest/20 p-3"

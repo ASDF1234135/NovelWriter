@@ -23,7 +23,7 @@ from app.domain.schema import (
 )
 from app.core.config import get_settings
 from app.domain.state import AgentWorkflowState, apply_length_bounds_to_state
-from app.domain.story_runtime import parse_story_runtime
+from app.domain.story_runtime import merge_runtime_resolved_anchors_for_commit, parse_story_runtime
 from app.repositories.sqlite.workflow_repository import WorkflowRepository
 from app.services.workflow.context import WorkflowContext
 from app.services.workflow.nodes.author import run_author
@@ -652,7 +652,7 @@ def build_chapter_graph(context: WorkflowContext):
                 "workflow_status": WorkflowStatus.WAITING_HITL.value,
                 "pending_hitl_options": [
                     {"id": "keep_current_logic", "label": "維持現有草稿（強制通過）"},
-                    {"id": "relax_word_count", "label": "放寬字數要求"},
+                    {"id": "relax_word_count", "label": "退回重寫並放寬字數限制"},
                 ],
                 "resume_from": "author",
             }
@@ -1079,8 +1079,33 @@ def build_chapter_graph(context: WorkflowContext):
             pending_ext = state.get("pending_chapter_extraction") or {}
             story = context.story_repository.get_story(state["story_id"]) or {}
             rt = dict(parse_story_runtime(story.get("story_runtime_json")))
-            rt["resolved_anchors"] = list(state.get("resolved_anchors") or [])
-            rt["anchor_candidates"] = list(state.get("anchor_candidates") or [])
+            skeleton = list(story.get("anchor_nodes_json") or [])
+            node_ids = {
+                str(n.get("id") or "").strip()
+                for n in skeleton
+                if isinstance(n, dict) and str(n.get("id") or "").strip()
+            }
+            merged_resolved, blocked_regression = merge_runtime_resolved_anchors_for_commit(
+                rt.get("resolved_anchors"),
+                list(state.get("resolved_anchors") or []),
+                node_ids=node_ids,
+            )
+            if blocked_regression:
+                logger.warning(
+                    "commit_to_databases blocked empty resolved_anchors regression",
+                    extra={
+                        "story_id": state["story_id"],
+                        "chapter_id": state["chapter_id"],
+                        "persisted_count": len(rt.get("resolved_anchors") or []),
+                    },
+                )
+            rt["resolved_anchors"] = merged_resolved
+            state_candidates = list(state.get("anchor_candidates") or [])
+            prev_candidates = list(rt.get("anchor_candidates") or [])
+            if prev_candidates and not state_candidates:
+                rt["anchor_candidates"] = prev_candidates
+            else:
+                rt["anchor_candidates"] = state_candidates or prev_candidates
             lore = list(state.get("lore_mysteries_progression") or [])
             narrative = str(state.get("narrative_script") or "")
             mentions_memory = ("記憶" in narrative) or ("memory" in narrative.lower())

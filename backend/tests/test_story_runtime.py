@@ -4,6 +4,7 @@ from app.domain.story_runtime import (
     anchor_nodes_to_skeleton_rows,
     extract_runtime_from_bible,
     hydrate_anchor_nodes,
+    merge_runtime_resolved_anchors_for_commit,
     strip_runtime_keys_from_bible,
 )
 from app.repositories.sqlite.database import SQLiteDatabase
@@ -81,3 +82,23 @@ def test_skeleton_strip_preserves_hitl_deferred_in_runtime() -> None:
         anchor_properties={"a1": {"hitl_deferred": True}},
     )
     assert hydrated[0].get("properties", {}).get("hitl_deferred") is True
+
+
+def test_merge_runtime_resolved_anchors_blocks_empty_regression() -> None:
+    merged, blocked = merge_runtime_resolved_anchors_for_commit(
+        ["a1", "a2"],
+        [],
+        node_ids={"a1", "a2", "a3"},
+    )
+    assert blocked is True
+    assert merged == ["a1", "a2"]
+
+
+def test_merge_runtime_resolved_anchors_unions_new() -> None:
+    merged, blocked = merge_runtime_resolved_anchors_for_commit(
+        ["a1"],
+        ["a2"],
+        node_ids={"a1", "a2"},
+    )
+    assert blocked is False
+    assert merged == ["a1", "a2"]

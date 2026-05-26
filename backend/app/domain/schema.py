@@ -1354,7 +1354,7 @@ class HitlBStoryJudgementRequest(BaseModel):
 
 
 class HitlAnchorResolutionRequest(BaseModel):
-    action: Literal["force_resolve", "rewrite", "delay_anchor"]
+    action: Literal["force_resolve", "rewrite", "delay_anchor", "continue_unresolved"]
     resolved_anchor_ids: list[str] = Field(default_factory=list)
     delayed_anchor_ids: list[str] = Field(default_factory=list)
     reject_resume_from: str = "planner"

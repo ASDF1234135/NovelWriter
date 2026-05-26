@@ -110,63 +110,66 @@ export async function putMacroPlan(storyId: string, body: MacroPlanPutBody): Pro
 const MACRO_POLL_MS = 800;
 const MACRO_TIMEOUT_MS = 30 * 60 * 1000;
 
+/** Exported for tests; same poll interval as macro wait loop. */
+export const MACRO_COMPILE_POLL_MS = MACRO_POLL_MS;
+
 export type MacroCompileProgress = {
   status: string;
   percent: number;
   message: string;
 };
 
-/** POST returns 202; polls macro-snapshot until terminal status, then returns compile-shaped data. */
-export async function macroCompile(
+function macroCompileMessageForStatus(status: string): string {
+  if (status === "RUNNING") return "Compiling macro structure...";
+  if (status === "SUCCEEDED") return "Macro compile completed.";
+  if (status === "FAILED") return "Macro compile failed.";
+  return "Macro compile queued...";
+}
+
+function macroCompilePercentForStatus(status: string): number {
+  if (status === "RUNNING") return 60;
+  if (status === "SUCCEEDED") return 100;
+  if (status === "FAILED") return 100;
+  return 15;
+}
+
+function macroDataFromSnapshot(snap: MacroSnapshotResponse): MacroCompileData {
+  return {
+    story_id: snap.story_id,
+    bible: snap.bible,
+    macro_author_notes: snap.macro_author_notes,
+    cast_seed: snap.cast_seed,
+    volumes: snap.volumes,
+    cast: snap.cast,
+    protagonist_character_id: snap.protagonist_character_id,
+    storylines: snap.storylines,
+    anchor_nodes: snap.anchor_nodes,
+    macro_topology_mode: snap.macro_topology_mode,
+    topology_locked: snap.topology_locked,
+    has_completed_chapter: snap.has_completed_chapter,
+    macro_edit_locked: snap.macro_edit_locked,
+  };
+}
+
+/**
+ * Poll macro-snapshot until SUCCEEDED/FAILED or timeout (no POST).
+ * Use after page reload when macro_compile_status is RUNNING, or after HTTP 409 on macro-compile.
+ */
+export async function waitForMacroCompileCompletion(
   storyId: string,
   onProgress?: (progress: MacroCompileProgress) => void,
 ): Promise<MacroCompileData> {
-  const messageForStatus = (status: string): string => {
-    if (status === "RUNNING") return "Compiling macro structure...";
-    if (status === "SUCCEEDED") return "Macro compile completed.";
-    if (status === "FAILED") return "Macro compile failed.";
-    return "Macro compile queued...";
-  };
-  const percentForStatus = (status: string): number => {
-    if (status === "RUNNING") return 60;
-    if (status === "SUCCEEDED") return 100;
-    if (status === "FAILED") return 100;
-    return 15;
-  };
-
-  const response = await fetch(`${API_BASE}/stories/${storyId}/macro-compile`, {
-    method: "POST",
-  });
-  const ack = await parseJson<{ accepted: boolean; story_id: string }>(response);
-  if (!ack.accepted) {
-    throw new Error("Macro compile was not accepted");
-  }
-  onProgress?.({ status: "ACCEPTED", percent: 10, message: "Macro compile accepted." });
   const deadline = Date.now() + MACRO_TIMEOUT_MS;
   while (Date.now() < deadline) {
     const snap = await fetchMacroSnapshot(storyId);
     const st = snap.macro_compile_status ?? "IDLE";
     onProgress?.({
       status: st,
-      percent: percentForStatus(st),
-      message: messageForStatus(st),
+      percent: macroCompilePercentForStatus(st),
+      message: macroCompileMessageForStatus(st),
     });
     if (st === "SUCCEEDED") {
-      return {
-        story_id: snap.story_id,
-        bible: snap.bible,
-        macro_author_notes: snap.macro_author_notes,
-        cast_seed: snap.cast_seed,
-        volumes: snap.volumes,
-        cast: snap.cast,
-        protagonist_character_id: snap.protagonist_character_id,
-        storylines: snap.storylines,
-        anchor_nodes: snap.anchor_nodes,
-        macro_topology_mode: snap.macro_topology_mode,
-        topology_locked: snap.topology_locked,
-        has_completed_chapter: snap.has_completed_chapter,
-        macro_edit_locked: snap.macro_edit_locked,
-      };
+      return macroDataFromSnapshot(snap);
     }
     if (st === "FAILED") {
       throw new Error(snap.macro_compile_error?.trim() || "Macro compile failed");
@@ -174,6 +177,30 @@ export async function macroCompile(
     await new Promise((r) => setTimeout(r, MACRO_POLL_MS));
   }
   throw new Error("Macro compile timed out waiting for completion");
+}
+
+/** POST returns 202; polls macro-snapshot until terminal status, then returns compile-shaped data. */
+export async function macroCompile(
+  storyId: string,
+  onProgress?: (progress: MacroCompileProgress) => void,
+): Promise<MacroCompileData> {
+  const response = await fetch(`${API_BASE}/stories/${storyId}/macro-compile`, {
+    method: "POST",
+  });
+  if (response.status === 409) {
+    onProgress?.({
+      status: "RUNNING",
+      percent: 20,
+      message: "Macro compile already in progress; resuming watch…",
+    });
+    return waitForMacroCompileCompletion(storyId, onProgress);
+  }
+  const ack = await parseJson<{ accepted: boolean; story_id: string }>(response);
+  if (!ack.accepted) {
+    throw new Error("Macro compile was not accepted");
+  }
+  onProgress?.({ status: "ACCEPTED", percent: 10, message: "Macro compile accepted." });
+  return waitForMacroCompileCompletion(storyId, onProgress);
 }
 
 export async function runChapter(
@@ -251,6 +278,19 @@ export async function fetchChapterWorkflowMetrics(
   const q = params.toString();
   const url = `${API_BASE}/stories/${encodeURIComponent(storyId)}/chapters/${chapterId}/workflow-metrics${q ? `?${q}` : ""}`;
   const response = await fetch(url);
+  return parseJson(response);
+}
+
+/** Newest RUNNING or WAITING_HITL workflow for a story, or null (GET is cheap: one indexed row). */
+export type LatestActiveWorkflowPayload = {
+  run_id: string;
+  story_id: string;
+  chapter_id: number;
+  status: string;
+};
+
+export async function fetchLatestActiveWorkflow(storyId: string): Promise<LatestActiveWorkflowPayload | null> {
+  const response = await fetch(`${API_BASE}/stories/${encodeURIComponent(storyId)}/workflows/latest-active`);
   return parseJson(response);
 }
 
@@ -426,10 +466,20 @@ export async function fetchGraph(storyId: string): Promise<GraphSnapshot> {
   return parseJson(response);
 }
 
+/** Total wall time to keep retrying SSE before surfacing disconnect to the UI. */
+const SSE_RECONNECT_MAX_MS = 5 * 60 * 1000;
+const SSE_INITIAL_BACKOFF_MS = 1000;
+const SSE_MAX_BACKOFF_MS = 30_000;
+
+function sseReconnectJitterMs(): number {
+  return Math.floor(Math.random() * 250);
+}
+
 /**
  * Subscribe to per-step workflow logs while a run executes in the background.
  * Each SSE message triggers onProgress (caller should fetchWorkflow).
  * Terminal: event "end" with payload { status }.
+ * Transient disconnects reconnect with exponential backoff for up to SSE_RECONNECT_MAX_MS.
  */
 export function subscribeWorkflowEvents(
   runId: string,
@@ -439,42 +489,120 @@ export function subscribeWorkflowEvents(
     onError?: (err: Error) => void;
   },
 ): () => void {
-  const url = `${API_BASE}/workflows/${runId}/events`;
-  const es = new EventSource(url);
   let finished = false;
+  let currentEs: EventSource | null = null;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  const startedAt = Date.now();
+  let backoffMs = SSE_INITIAL_BACKOFF_MS;
+
+  const clearTimer = () => {
+    if (reconnectTimer !== null) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+  };
+
+  const closeEs = () => {
+    if (currentEs) {
+      currentEs.close();
+      currentEs = null;
+    }
+  };
 
   const finish = () => {
-    if (!finished) {
-      finished = true;
-      es.close();
-    }
+    if (finished) return;
+    finished = true;
+    clearTimer();
+    closeEs();
   };
 
-  es.onmessage = () => {
+  const failPermanently = () => {
     if (finished) return;
-    void Promise.resolve(handlers.onProgress()).catch((e) =>
-      handlers.onError?.(e instanceof Error ? e : new Error(String(e))),
-    );
-  };
-
-  es.addEventListener("end", (ev) => {
-    if (finished) return;
-    let status = "UNKNOWN";
-    try {
-      const p = JSON.parse((ev as MessageEvent).data) as { status?: string };
-      if (typeof p.status === "string") status = p.status;
-    } catch {
-      /* ignore */
-    }
-    void Promise.resolve(handlers.onEnd(status)).finally(finish);
-  });
-
-  es.onerror = () => {
-    if (finished || es.readyState === EventSource.CLOSED) return;
     handlers.onError?.(new Error(NB_ERR_SSE_DISCONNECTED));
     finish();
   };
 
+  const scheduleReconnect = () => {
+    if (finished) return;
+    const elapsed = Date.now() - startedAt;
+    if (elapsed >= SSE_RECONNECT_MAX_MS) {
+      failPermanently();
+      return;
+    }
+    const delay = Math.min(backoffMs + sseReconnectJitterMs(), Math.max(0, SSE_RECONNECT_MAX_MS - elapsed));
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      void gateThenConnect();
+    }, delay);
+    backoffMs = Math.min(backoffMs * 2, SSE_MAX_BACKOFF_MS);
+  };
+
+  const gateThenConnect = async () => {
+    if (finished) return;
+    try {
+      const wf = await fetchWorkflow(runId);
+      const status = String(wf.state.workflow_status ?? "");
+      const terminal = status === "COMPLETED" || status === "FAILED" || status === "CANCELLED";
+      const waitingHitl = wf.run.requires_hitl === true || status === "WAITING_HITL";
+      if (terminal) {
+        void Promise.resolve(handlers.onEnd(status)).finally(finish);
+        return;
+      }
+      if (waitingHitl) {
+        closeEs();
+        handlers.onError?.(new Error(NB_ERR_SSE_DISCONNECTED));
+        finish();
+        return;
+      }
+    } catch {
+      scheduleReconnect();
+      return;
+    }
+    openEventSource();
+  };
+
+  const openEventSource = () => {
+    if (finished) return;
+    closeEs();
+    const url = `${API_BASE}/workflows/${runId}/events`;
+    const es = new EventSource(url);
+    currentEs = es;
+
+    es.onopen = () => {
+      backoffMs = SSE_INITIAL_BACKOFF_MS;
+    };
+
+    es.onmessage = () => {
+      if (finished) return;
+      void Promise.resolve(handlers.onProgress()).catch((e) =>
+        handlers.onError?.(e instanceof Error ? e : new Error(String(e))),
+      );
+    };
+
+    es.addEventListener("end", (ev) => {
+      if (finished) return;
+      let status = "UNKNOWN";
+      try {
+        const p = JSON.parse((ev as MessageEvent).data) as { status?: string };
+        if (typeof p.status === "string") status = p.status;
+      } catch {
+        /* ignore */
+      }
+      void Promise.resolve(handlers.onEnd(status)).finally(finish);
+    });
+
+    es.onerror = () => {
+      if (finished) return;
+      closeEs();
+      if (Date.now() - startedAt >= SSE_RECONNECT_MAX_MS) {
+        failPermanently();
+        return;
+      }
+      scheduleReconnect();
+    };
+  };
+
+  openEventSource();
   return finish;
 }
 

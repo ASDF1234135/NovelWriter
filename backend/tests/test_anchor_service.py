@@ -1140,8 +1140,182 @@ def test_storyline_slot_fill_runs_before_anchor_slot_fill() -> None:
     )
 
 
+class RecordingFakeStructuredLLMClientWithNotesLinks(FakeStructuredLLMClientWithNotesLinks):
+    """Records prompts like `RecordingFakeStructuredLLMClient` but echoes back
+    cast/anchor `notes_links`, which the macro pipeline enforces when
+    `macro_author_notes` carries any extracted keypoints (e.g. our `[[SUBPLOTS]]`
+    test inputs)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.json_prompts: list[dict] = []
+
+    def invoke_json(self, prompt: str, response_model, profile: AgentPromptProfile):
+        data = _load_json_prompt_first(prompt)
+        self.json_prompts.append(data)
+        return super().invoke_json(prompt, response_model, profile)
+
+
+def test_storyline_slot_fill_threads_user_hints_to_matching_rows() -> None:
+    """When `[[SUBPLOTS]]` pins A/B rows to a volume, the slot-fill prompt must
+    attach the user's title/goal to the storyline targeting that volume and
+    flip in the refine-vs-fresh rule. Storylines without a hint must NOT carry
+    `user_hint`, so they keep the original auto-generation path."""
+    rec = RecordingFakeStructuredLLMClientWithNotesLinks()
+    service = AnchorService()
+    notes = (
+        "[[SUBPLOTS]]\n"
+        "[S]｜羈絆守護者｜揭露童年友人真實身份\n"
+        "[A:2]｜王城密謀｜宰相秘密的部署\n"
+        "[B:1]｜市井傳聞｜流言扩散\n"
+    )
+    service.compile_macro_plan(
+        "story_storyline_hint",
+        StoryInput(
+            title="王都疑雲",
+            premise="副線綁卷測試。",
+            target_total_words=45000,
+            macro_author_notes=notes,
+        ),
+        rec,
+    )
+
+    storyline_prompts = [
+        p
+        for p in rec.json_prompts
+        if "storyline content slots" in str(p.get("task", ""))
+    ]
+    assert storyline_prompts, "no storyline slot-fill prompt captured"
+    payload = storyline_prompts[0]
+
+    storyline_rows = payload.get("storylines") or []
+    by_id = {row["storyline_id"]: row for row in storyline_rows}
+
+    # S_TIER consumes the [S] hint in source order.
+    s_row = next(
+        (row for sid, row in by_id.items() if sid.endswith("_s_tier_01")),
+        None,
+    )
+    assert s_row and s_row.get("user_hint", {}).get("title") == "羈絆守護者"
+
+    # A_TIER for volume 2 picks up the [A:2] hint.
+    a_v02 = next(
+        (row for sid, row in by_id.items() if "_a_tier_v02_01" in sid),
+        None,
+    )
+    assert a_v02 and a_v02.get("user_hint", {}).get("title") == "王城密謀"
+    assert a_v02.get("user_hint", {}).get("volume") == 2
+    assert a_v02.get("volume_id"), "A_TIER row must surface its volume_id"
+
+    # A_TIER for volume 1 (no [A:1] hint) must NOT carry a user_hint —
+    # storylines without a hint keep the original auto-generation path.
+    a_v01 = next(
+        (row for sid, row in by_id.items() if "_a_tier_v01_01" in sid),
+        None,
+    )
+    assert a_v01 is not None
+    assert "user_hint" not in a_v01
+
+    # B_TIER pinned to volume 1 surfaces the [B:1] hint AND a volume_id binding.
+    b_hint_row = next(
+        (
+            row
+            for row in storyline_rows
+            if row.get("type") == "B_TIER" and row.get("user_hint", {}).get("title") == "市井傳聞"
+        ),
+        None,
+    )
+    assert b_hint_row is not None
+    assert b_hint_row.get("user_hint", {}).get("volume") == 1
+    assert b_hint_row.get("volume_id"), "pinned B_TIER row must carry a volume_id"
+
+    # Refine-vs-fresh rule is present because at least one row has user_hint.
+    joined_rules = "\n".join(str(x) for x in (payload.get("rules") or []))
+    assert "user_hint" in joined_rules
+    assert "Rows without `user_hint`" in joined_rules
+
+
+def test_storyline_slot_fill_skips_refine_rule_when_no_user_hints() -> None:
+    rec = RecordingFakeStructuredLLMClient()
+    service = AnchorService()
+    service.compile_macro_plan(
+        "story_no_hints",
+        StoryInput(
+            title="No Hints",
+            premise="legacy 沒有支線輸入。",
+            target_total_words=30000,
+        ),
+        rec,
+    )
+    storyline_prompts = [
+        p for p in rec.json_prompts if "storyline content slots" in str(p.get("task", ""))
+    ]
+    assert storyline_prompts
+    payload = storyline_prompts[0]
+    for row in payload.get("storylines") or []:
+        assert "user_hint" not in row
+    joined_rules = "\n".join(str(x) for x in (payload.get("rules") or []))
+    assert "Rows without `user_hint`" not in joined_rules
+
+
+def test_fishbone_bumps_a_tier_count_for_user_pinned_volume() -> None:
+    """User pinning 3 [A:2] hints must force volume 2 to host >=3 A_TIER lines."""
+    service = AnchorService()
+    notes = (
+        "[[SUBPLOTS]]\n"
+        "[A:2]｜密謀一｜部署A\n"
+        "[A:2]｜密謀二｜部署B\n"
+        "[A:2]｜密謀三｜部署C\n"
+    )
+    _, _, _, _, bible = service.compile_macro_plan(
+        "story_a_bump",
+        StoryInput(
+            title="A bump",
+            premise="user demands many A lines in one volume.",
+            target_total_words=45000,
+            macro_author_notes=notes,
+        ),
+        FakeStructuredLLMClientWithNotesLinks(),
+    )
+    storylines = bible.get("storylines") or []
+    a_vol2 = [
+        s
+        for s in storylines
+        if s.get("type") == "A_TIER" and "_a_tier_v02_" in str(s.get("id", ""))
+    ]
+    assert len(a_vol2) >= 3
+
+
+def test_fishbone_pins_b_tier_storyline_to_user_requested_volume() -> None:
+    """`[B:3]` must produce at least one B_TIER storyline whose anchor nodes live in volume 3."""
+    service = AnchorService()
+    notes = "[[SUBPLOTS]]\n[B:3]｜市井傳聞｜流言扩散\n"
+    _, _, _, _, bible = service.compile_macro_plan(
+        "story_b_pin",
+        StoryInput(
+            title="B pin",
+            premise="user pins a B_TIER subplot to volume 3.",
+            target_total_words=45000,
+            macro_author_notes=notes,
+        ),
+        FakeStructuredLLMClientWithNotesLinks(),
+    )
+    anchor_nodes = bible.get("anchor_nodes") or []
+    # Volume layout in FakeStructuredLLMClient is "story_<id>_vol1/2/3".
+    target_volume_id = "story_b_pin_vol3"
+    pinned_b_nodes = [
+        n
+        for n in anchor_nodes
+        if any("_b_tier_" in sid for sid in (n.get("storyline_ids") or []))
+        and n.get("volume_id") == target_volume_id
+    ]
+    assert pinned_b_nodes, f"expected at least one B_TIER node mounted in {target_volume_id}"
+
+
 def test_stage3_slot_fill_prompt_contains_fishbone_hard_rules() -> None:
     service = AnchorService()
+    # Side-arc rules now live in `extra_rules`; the base_rules keep
+    # topology/spatiotemporal/no-breakthrough invariants for every branch.
     prompt = service._slot_fill_prompt(
         story_input=StoryInput(
             title="Rule Prompt",
@@ -1151,6 +1325,12 @@ def test_stage3_slot_fill_prompt_contains_fishbone_hard_rules() -> None:
         stage_label="stage3.3_side_arcs",
         node_rows=[{"node_id": "n1", "title": "", "description": ""}],
         context_summary="ctx",
+        extra_rules=[
+            "S_TIER is a book-spanning important side arc (identity mystery, long-term growth) and must serve the mainline.",
+            "A_TIER is a volume-scoped side arc (e.g., key item/ability acquisition) and must serve this volume mainline.",
+            "B_TIER is a short side beat for texture and character charm, never a decisive plotline.",
+            "No spoilers and no repetition: side-arc content must not duplicate mainline events.",
+        ],
     )
     assert "No spoilers and no repetition" in prompt
     assert "must strictly match the spatiotemporal context" in prompt
@@ -1242,3 +1422,90 @@ def test_side_attachment_spine_window_three_or_fallback_one() -> None:
         main_spine_sequence=spine,
     )
     assert ctx_lo["spine_windows"][0]["window_node_ids"] == ["m0"]
+
+
+def test_mainline_slot_fill_prompt_isolates_storylines_from_side_arcs() -> None:
+    """Mainline anchor slot-fill batches must:
+
+    * see only `type == MAIN` rows inside `narrative_context.storylines`
+    * include the mainline-only rule forbidding side-arc material
+    * not surface any user-supplied side-arc title (e.g. `[A:2]｜王城密謀｜…`)
+
+    Side batches (`stage3.3_side_arcs.*`) must keep the full storyline view
+    and carry the side-tier descriptor rules.
+    """
+    rec = RecordingFakeStructuredLLMClientWithNotesLinks()
+    service = AnchorService()
+    notes = (
+        "[[SUBPLOTS]]\n"
+        "[S]｜羈絆守護者｜揭露童年友人真實身份\n"
+        "[A:2]｜王城密謀｜宰相秘密的部署\n"
+        "[B:1]｜市井傳聞｜流言扩散\n"
+    )
+    service.compile_macro_plan(
+        "story_mainline_isolation",
+        StoryInput(
+            title="王都疑雲",
+            premise="主線必須對副線內容保密。",
+            target_total_words=45000,
+            macro_author_notes=notes,
+        ),
+        rec,
+    )
+
+    mainline_prompts = [
+        p
+        for p in rec.json_prompts
+        if str(p.get("stage", "")).startswith("stage3.1_mainline.batch")
+    ]
+    assert mainline_prompts, "no mainline anchor slot-fill prompts captured"
+
+    for payload in mainline_prompts:
+        storylines = (payload.get("narrative_context") or {}).get("storylines") or []
+        assert storylines, "mainline prompt narrative_context must include MAIN storyline"
+        for row in storylines:
+            assert row.get("type") == "MAIN", (
+                f"mainline narrative_context leaked non-MAIN storyline: {row}"
+            )
+
+        rules = [str(r) for r in (payload.get("rules") or [])]
+        joined = "\n".join(rules)
+        assert "MAIN spine anchors only" in joined
+        assert "filtered to MAIN-tier only" in joined
+        assert "out of scope" in joined or "out-of-scope" in joined
+        # Side-tier descriptor rules must NOT appear in mainline prompts.
+        assert "A_TIER is a volume-scoped side arc" not in joined
+        assert "B_TIER is a short side beat" not in joined
+        assert "S_TIER is a book-spanning important side arc" not in joined
+        assert "side-arc content must not duplicate mainline events" not in joined
+
+        # The wizard's side-arc title must not leak into the mainline prompt at all.
+        raw = json.dumps(payload, ensure_ascii=False)
+        assert "王城密謀" not in raw, (
+            "mainline anchor slot-fill prompt leaked user-supplied side-arc title"
+        )
+        assert "羈絆守護者" not in raw
+        assert "市井傳聞" not in raw
+
+    side_prompts = [
+        p
+        for p in rec.json_prompts
+        if str(p.get("stage", "")).startswith("stage3.3_side_arcs")
+    ]
+    assert side_prompts, "no side-arc anchor slot-fill prompts captured"
+
+    for payload in side_prompts:
+        storylines = (payload.get("narrative_context") or {}).get("storylines") or []
+        types_present = {row.get("type") for row in storylines}
+        # Side batches must keep the full storyline view (MAIN + side tiers).
+        assert "MAIN" in types_present
+        assert types_present & {"S_TIER", "A_TIER", "B_TIER"}, (
+            "side prompt narrative_context missing side-tier storylines"
+        )
+
+        joined = "\n".join(str(r) for r in (payload.get("rules") or []))
+        assert "A_TIER is a volume-scoped side arc" in joined
+        assert "B_TIER is a short side beat" in joined
+        assert "side-arc content must not duplicate mainline events" in joined
+        # Side branch must not be told it's "MAIN spine anchors only".
+        assert "MAIN spine anchors only" not in joined

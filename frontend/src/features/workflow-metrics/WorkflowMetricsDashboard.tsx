@@ -1,11 +1,15 @@
 import { useEffect, useState } from "react";
 import { fetchChapterWorkflowMetrics, fetchStoryWorkflowMetrics } from "../../api";
-import type { ChapterSummary, WorkflowMetricsResponse } from "../../types";
+import type { ChapterSummary, WorkflowMetricsResponse, WorkflowPayload } from "../../types";
 import { useI18n } from "../../i18n/useI18n";
+import { WorkflowRunDetails } from "../workflow-monitor/WorkflowRunDetails";
 
 type Props = {
   storyId: string;
   chapters: ChapterSummary[];
+  workflow: WorkflowPayload | null;
+  /** Hide page-level hero (e.g. inside a drawer that already has a title). */
+  embedded?: boolean;
 };
 
 function fmtPct(v: number | null | undefined): string {
@@ -24,7 +28,7 @@ function shortRunId(id: string): string {
   return `${id.slice(0, 10)}…`;
 }
 
-export function WorkflowMetricsDashboard({ storyId, chapters }: Props) {
+export function WorkflowMetricsDashboard({ storyId, chapters, workflow, embedded = false }: Props) {
   const { locale, t } = useI18n();
   const [scope, setScope] = useState<"story" | "chapter">("story");
   const [chapterId, setChapterId] = useState<number>(() => chapters[0]?.chapter_id ?? 1);
@@ -74,13 +78,19 @@ export function WorkflowMetricsDashboard({ storyId, chapters }: Props) {
   );
 
   return (
-    <div className="mx-auto max-w-7xl">
+    <div className={`mx-auto max-w-7xl ${embedded ? "px-4 py-2" : ""}`}>
+      {!embedded ? (
+        <div className="mb-8">
+          <span className="mb-2 block font-label text-xs font-semibold uppercase tracking-[0.3em] text-secondary">
+            {t("common.workflowMetrics")}
+          </span>
+          <h1 className="mb-2 font-headline text-3xl font-black tracking-tight text-on-surface">{t("metrics.page.title")}</h1>
+          <p className="max-w-3xl font-body text-sm leading-relaxed text-on-surface-variant">{t("metrics.page.subtitle")}</p>
+        </div>
+      ) : null}
+
       <div className="mb-8">
-        <span className="mb-2 block font-label text-xs font-semibold uppercase tracking-[0.3em] text-secondary">
-          {t("common.workflowMetrics")}
-        </span>
-        <h1 className="mb-2 font-headline text-3xl font-black tracking-tight text-on-surface">{t("metrics.page.title")}</h1>
-        <p className="max-w-3xl font-body text-sm leading-relaxed text-on-surface-variant">{t("metrics.page.subtitle")}</p>
+        <WorkflowRunDetails workflow={workflow} />
       </div>
 
       <div className="mb-6 flex flex-wrap items-end gap-4">

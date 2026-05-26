@@ -46,6 +46,8 @@ export type AnchorNodesGraphViewProps = {
   onConsumePendingManualPosition?: () => void;
   /** Red stroke on these nodes / dependency edges (e.g. validation errors). */
   validationHighlights?: null | { nodeIds: string[]; edges: Array<{ parentId: string; childId: string }> };
+  /** Compact preview mode: hide edit/detail toolbar buttons and suppress all context menus & link picking. */
+  readOnly?: boolean;
 };
 
 function nodeColor(status: string): { fill: string; stroke: string } {
@@ -163,6 +165,7 @@ export function AnchorNodesGraphView({
   pendingManualPosition = null,
   onConsumePendingManualPosition,
   validationHighlights = null,
+  readOnly = false,
 }: AnchorNodesGraphViewProps) {
   const { locale } = useI18n();
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -189,6 +192,7 @@ export function AnchorNodesGraphView({
     onSelect,
     detailPanelOpen,
     onToggleDetailPanel,
+    readOnly,
   });
 
   useEffect(() => {
@@ -204,6 +208,7 @@ export function AnchorNodesGraphView({
       onSelect,
       detailPanelOpen,
       onToggleDetailPanel,
+      readOnly,
     };
   }, [
     interactionMode,
@@ -217,6 +222,7 @@ export function AnchorNodesGraphView({
     onSelect,
     detailPanelOpen,
     onToggleDetailPanel,
+    readOnly,
   ]);
 
   const [linkRubber, setLinkRubber] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
@@ -683,6 +689,7 @@ export function AnchorNodesGraphView({
 
     g.on("canvas:contextmenu", (evt: any) => {
       evt?.preventDefault?.();
+      if (apiRef.current.readOnly) return;
       if (apiRef.current.interactionMode !== "edit") return;
       const sx = Number(evt.clientX ?? 0);
       const sy = Number(evt.clientY ?? 0);
@@ -691,6 +698,7 @@ export function AnchorNodesGraphView({
 
     g.on("node:contextmenu", (evt: any) => {
       evt?.preventDefault?.();
+      if (apiRef.current.readOnly) return;
       if (apiRef.current.interactionMode !== "edit") return;
       const id = String(evt?.item?.getModel?.()?.id ?? "");
       if (!id) return;
@@ -701,6 +709,7 @@ export function AnchorNodesGraphView({
 
     g.on("edge:contextmenu", (evt: any) => {
       evt?.preventDefault?.();
+      if (apiRef.current.readOnly) return;
       if (apiRef.current.interactionMode !== "edit") return;
       const model = evt?.item?.getModel?.() as { source?: string; target?: string } | undefined;
       const parentId = String(model?.source ?? "");
@@ -886,7 +895,7 @@ export function AnchorNodesGraphView({
       className="relative overflow-hidden rounded-2xl border border-outline-variant/20 bg-gradient-to-b from-[#040a16] to-[#070f22] shadow-[inset_0_1px_0_0_rgba(255,255,255,0.04)]"
       style={{ minHeight: height + 48 }}
       onContextMenu={(e) => {
-        if (interactionMode === "edit") e.preventDefault();
+        if (!readOnly && interactionMode === "edit") e.preventDefault();
       }}
     >
       <div className="flex flex-wrap items-center gap-2 border-b border-white/5 px-3 py-2.5">
@@ -946,7 +955,7 @@ export function AnchorNodesGraphView({
               restart_alt
             </span>
           </button>
-          {onInteractionModeChange ? (
+          {!readOnly && onInteractionModeChange ? (
             <>
               <span className="h-7 w-px shrink-0 bg-white/12" aria-hidden />
               <button
@@ -967,7 +976,7 @@ export function AnchorNodesGraphView({
               </button>
             </>
           ) : null}
-          {onToggleDetailPanel ? (
+          {!readOnly && onToggleDetailPanel ? (
             <>
               <span className="h-7 w-px shrink-0 bg-white/12" aria-hidden />
               <button
