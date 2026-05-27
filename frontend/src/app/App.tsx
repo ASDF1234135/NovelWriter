@@ -636,7 +636,7 @@ export default function App() {
   const workflowConflictLocked = useMemo(() => {
     if (!workflow) return false;
     const st = String(workflow.state.workflow_status ?? "");
-    if (st === "COMPLETED" || st === "FAILED") return false;
+    if (st === "COMPLETED" || st === "FAILED" || st === "CANCELLED") return false;
     if (workflow.run.requires_hitl === true || st === "WAITING_HITL") return false;
     return true;
   }, [workflow]);
@@ -1002,10 +1002,7 @@ export default function App() {
             await finalizeWorkflowRunUi(active.run_id);
             skipDefaultNavigate = st === "COMPLETED" || st === "CANCELLED";
           } else if (waitingHitl) {
-            const reason = String(wf.state.hitl_reason ?? wf.run.hitl_reason ?? "");
-            if (reason === "Chapter_Draft_Review") {
-              postLoadView = "review";
-            }
+            /* HITL actions live in HitlFloatingDock on any view — do not force navigation. */
           } else {
             attachWorkflowEventStream(active.run_id);
             postLoadView = "write";
@@ -1239,10 +1236,6 @@ export default function App() {
               return;
             }
             if (waitingHitl) {
-              const reason = String(wf.state.hitl_reason ?? wf.run.hitl_reason ?? "");
-              if (reason === "Chapter_Draft_Review") {
-                navigateToViewPath("review");
-              }
               setBusy(false);
               return;
             }
@@ -1270,11 +1263,6 @@ export default function App() {
     } else if (waiting) {
       workflowEventsUnsubRef.current?.();
       workflowEventsUnsubRef.current = null;
-      // Chapter-review HITL is rendered inside HitlPanel (ChapterReviewGate).
-      const reason = String(wf.state.hitl_reason ?? wf.run.hitl_reason ?? "");
-      if (reason === "Chapter_Draft_Review") {
-        navigateToViewPath("review");
-      }
       setBusy(false);
     } else {
       attachWorkflowEventStream(wf.run.run_id);
@@ -1745,7 +1733,7 @@ export default function App() {
   const { onAnchorDelay: _omitHitlAnchorDelay, ...hitlDockHandlers } = hitlHandlers;
   void _omitHitlAnchorDelay;
   const hitlChapterReviewForDock: HitlChapterReviewPayload | null =
-    view === "review" && chapterReviewActive && workflow
+    chapterReviewActive && workflow
       ? {
           draft: String(workflow.state?.current_draft ?? workflow.state?.best_draft_content ?? ""),
           readerScore:
@@ -1797,6 +1785,7 @@ export default function App() {
     if (status === "WAITING_HITL") return t("workflow.mini.waitingHitl");
     if (status === "COMPLETED") return t("workflow.mini.completed");
     if (status === "FAILED") return t("workflow.mini.failed");
+    if (status === "CANCELLED") return t("workflow.mini.cancelled");
     return t("workflow.mini.running");
   }, [workflow, t]);
   const failureNotice = useMemo(() => {

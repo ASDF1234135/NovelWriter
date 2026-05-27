@@ -486,6 +486,7 @@ const zhHant: Messages = {
   "workflow.mini.waitingHitl": "等待人工決策",
   "workflow.mini.completed": "章節流程已完成",
   "workflow.mini.failed": "章節流程失敗",
+  "workflow.mini.cancelled": "章節流程已取消",
   "workflow.mini.running": "章節流程執行中",
 
   "app.setup.summaryNotCompiled": "尚未完成世界觀編譯。",
@@ -1253,6 +1254,7 @@ const zhHans: Messages = {
   "workflow.mini.waitingHitl": "等待人工决策",
   "workflow.mini.completed": "章节流程已完成",
   "workflow.mini.failed": "章节流程失败",
+  "workflow.mini.cancelled": "章节流程已取消",
   "workflow.mini.running": "章节流程执行中",
 
   "app.setup.summaryNotCompiled": "尚未完成世界观编译。",
@@ -2167,6 +2169,7 @@ const en: Messages = {
   "workflow.mini.waitingHitl": "Waiting for human decision",
   "workflow.mini.completed": "Chapter workflow completed",
   "workflow.mini.failed": "Chapter workflow failed",
+  "workflow.mini.cancelled": "Chapter workflow cancelled",
   "workflow.mini.running": "Chapter workflow running",
 
   "app.setup.summaryNotCompiled": "World compile not completed yet.",

@@ -190,14 +190,11 @@ const HITL_SITUATION_COPY: Record<string, { title: string; why: string }> = {
     ),
   },
   [HITL_REASON.CHAPTER_DRAFT_REVIEW]: {
-    // The actual UI lives in the reading area (ChapterReviewGate); HitlPanel
-    // only renders a short redirect stub. Keep a friendly copy in case the
-    // situation card is ever shown alongside the stub.
     title: pick("章節草稿待您審核", "章节草稿待你审核", "Chapter Draft Awaiting Review"),
     why: pick(
-      "Reader 已通過本章草稿；此次工作流設定為需要人工審核。請至閱讀區直接審閱或編輯後通過。",
-      "Reader 已通过本章草稿；此次工作流设定为需要人工审核。请到阅读区直接审阅或编辑后通过。",
-      "Reader has approved the draft, but this run requires a human checkpoint. Please review or edit the draft in the reading area, then approve.",
+      "Reader 已通過本章草稿；此次工作流設定為需要人工審核。請在右下角 HITL 浮動面板審閱、編輯或放棄。",
+      "Reader 已通过本章草稿；此次工作流设定为需要人工审核。请在右下角 HITL 浮动面板审阅、编辑或放弃。",
+      "Reader has approved the draft, but this run requires a human checkpoint. Use the HITL floating panel (bottom-right) to review, edit, or abandon.",
     ),
   },
 };

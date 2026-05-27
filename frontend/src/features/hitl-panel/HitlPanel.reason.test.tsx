@@ -1,14 +1,41 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { ReactElement } from "react";
+import type { ReactElement, ReactNode } from "react";
+import { createMemoryRouter, RouterProvider } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n/I18nProvider";
 import { HitlPanel } from "./HitlPanel";
 
 const noopAsync = vi.fn().mockResolvedValue(undefined);
 
+vi.mock("../chapter-review/ChapterReviewEditor", () => ({
+  default: ({
+    initialDoc,
+    busy,
+    onChange,
+  }: {
+    initialDoc: string;
+    busy?: boolean;
+    onChange: (text: string) => void;
+  }) => (
+    <textarea
+      data-testid="mock-editor"
+      defaultValue={initialDoc}
+      disabled={busy}
+      onChange={(e) => onChange(e.target.value)}
+    />
+  ),
+}));
+
 function renderPanel(node: ReactElement) {
   return render(<I18nProvider>{node}</I18nProvider>);
+}
+
+function renderPanelWithRouter(node: ReactNode) {
+  const router = createMemoryRouter([{ path: "*", element: <I18nProvider>{node}</I18nProvider> }], {
+    initialEntries: ["/write"],
+  });
+  return render(<RouterProvider router={router} />);
 }
 
 function sectionRoot(sectionId: string): HTMLElement {
@@ -149,7 +176,7 @@ describe("HitlPanel reason rendering", () => {
     expect(manual.getByRole("button", { name: /^微調章節方向/ })).toBeInTheDocument();
   });
 
-  it("chapter draft review: panel renders the redirect stub instead of solution panels", () => {
+  it("chapter draft review without chapterReview: shows redirect stub", () => {
     const onDecision = vi.fn().mockResolvedValue(undefined);
     const onDraftEdit = vi.fn().mockResolvedValue(undefined);
     renderPanel(
@@ -200,6 +227,59 @@ describe("HitlPanel reason rendering", () => {
 
     expect(onDecision).not.toHaveBeenCalled();
     expect(onDraftEdit).not.toHaveBeenCalled();
+  });
+
+  it("chapter draft review with chapterReview: embeds ChapterReviewGate in the panel", () => {
+    renderPanelWithRouter(
+      <HitlPanel
+        workflow={{
+          run: {
+            run_id: "run-cr",
+            story_id: "story-1",
+            chapter_id: 1,
+            status: "WAITING_HITL",
+            requires_hitl: true,
+            hitl_reason: "Chapter_Draft_Review",
+            hitl_decision_mode: "MANUAL_EDIT",
+            hitl_context: {
+              primary_issue: "Awaiting human review of the chapter draft.",
+              supervisor_feedbacks: [],
+              conflict_notes: [],
+              problematic_draft_snippet: "draft snippet…",
+              context_metadata: { payload_type: "chapter_review", reader_score: 88 },
+            },
+          },
+          state: {
+            pending_hitl_options: [
+              { id: "APPROVE_DRAFT", label: "通過（可修改）" },
+              { id: "RERUN_KEEP_DIRECTOR", label: "保留劇情節點重跑" },
+              { id: "ABANDON_CHAPTER", label: "放棄此次生成" },
+            ],
+            resume_from: "chunker",
+            current_draft: "draft body…",
+            workflow_status: "WAITING_HITL",
+          },
+          steps: [],
+        }}
+        chapterReview={{
+          draft: "draft body…",
+          readerScore: 88,
+          onApprove: noopAsync,
+          onAbandon: noopAsync,
+          onRerun: noopAsync,
+        }}
+        onDecision={noopAsync}
+        onOutlineEdit={noopAsync}
+        onStateInjection={noopAsync}
+        onDraftEdit={noopAsync}
+      />,
+    );
+
+    expect(screen.getByText("人類章節審核")).toBeInTheDocument();
+    expect(screen.getByTestId("chapter-review-abandon")).toBeInTheDocument();
+    expect(screen.queryByText("此次審核請至閱讀區進行（不在此面板操作）。")).not.toBeInTheDocument();
+    expect(document.getElementById("hitl-section-quick")).toBeNull();
+    expect(document.getElementById("hitl-section-manual")).toBeNull();
   });
 
   it("output language mismatch: shows situation and dashboard options", async () => {
