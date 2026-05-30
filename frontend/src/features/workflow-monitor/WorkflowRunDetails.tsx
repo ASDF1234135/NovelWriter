@@ -66,7 +66,7 @@ export function WorkflowRunDetails({ workflow }: Props) {
       value: String(state.outline_binding_mode ?? "—"),
     },
     {
-      label: locale === "en" ? "Reader score" : locale === "zh-Hans" ? "阅读评分" : "閱讀評分",
+      label: locale === "en" ? "Reference score" : locale === "zh-Hans" ? "阅读评分" : "閱讀評分",
       value: String(state.last_reader_score ?? "-"),
     },
     {

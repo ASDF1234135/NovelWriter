@@ -73,6 +73,7 @@
 ### `graph_rag`（組上下文，不寫文）
 
 - 整合 bible / graph / vector / 章節連續性上下文
+- 對本章 `selected_anchor_ids`（不含 `next_anchor_ids`）做 GraphRAG 錨點前置評估，結果併入 `graph_context`；若上一章 `anchor_resolve` 已判定未達成，沿用快取不重跑 evaluate
 - 若上下文長度超預算，觸發 HITL（`CONTEXT_LENGTH_EXCEEDED`）
 
 ### `planner`（生成可執行劇情計畫）

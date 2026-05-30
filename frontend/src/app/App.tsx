@@ -421,7 +421,7 @@ export default function App() {
   const [chapterHardRules, setChapterHardRules] = useState("");
   const [aiFreedomLevel, setAiFreedomLevel] = useState<AiFreedomLevel>("balanced");
   /** Per-run chapter review choice; reset when the run-confirm modal opens. */
-  const [runConfirmReviewChoice, setRunConfirmReviewChoice] = useState<boolean | null>(null);
+  const [runConfirmReviewChoice, setRunConfirmReviewChoice] = useState<boolean>(false);
   const [selectedAnchorIds, setSelectedAnchorIds] = useState<string[]>([]);
   const [writingPreamble, setWritingPreamble] = useState<WritingPreambleResponse | null>(null);
   /** Toggles the full Bible editor drawer on the chapter-run page; rail keeps a read-only summary by default. */
@@ -1275,7 +1275,7 @@ export default function App() {
    */
   function openRunConfirm() {
     if (!storyId) return;
-    setRunConfirmReviewChoice(null);
+    setRunConfirmReviewChoice(false);
     setRunConfirmOpen(true);
   }
 
@@ -2621,28 +2621,16 @@ export default function App() {
                   <p id="run-confirm-review-hint" className="mt-1 font-body text-xs leading-relaxed text-on-surface-variant">
                     {t("chapterRun.runConfirm.reviewHint")}
                   </p>
-                  <div className="mt-3 flex flex-col gap-2">
-                    <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-outline-variant/15 bg-surface-container-high/60 px-3 py-2.5 has-[:checked]:border-primary/40 has-[:checked]:bg-primary/8">
-                      <input
-                        type="radio"
-                        name="run-confirm-review"
-                        className="mt-0.5 h-4 w-4 accent-primary"
-                        checked={runConfirmReviewChoice === true}
-                        onChange={() => setRunConfirmReviewChoice(true)}
-                      />
-                      <span className="font-body text-sm text-on-surface">{t("chapterRun.runConfirm.reviewYes")}</span>
-                    </label>
-                    <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-outline-variant/15 bg-surface-container-high/60 px-3 py-2.5 has-[:checked]:border-primary/40 has-[:checked]:bg-primary/8">
-                      <input
-                        type="radio"
-                        name="run-confirm-review"
-                        className="mt-0.5 h-4 w-4 accent-primary"
-                        checked={runConfirmReviewChoice === false}
-                        onChange={() => setRunConfirmReviewChoice(false)}
-                      />
-                      <span className="font-body text-sm text-on-surface">{t("chapterRun.runConfirm.reviewNo")}</span>
-                    </label>
-                  </div>
+                  <label className="mt-3 flex cursor-pointer items-start gap-3 rounded-lg border border-outline-variant/15 bg-surface-container-high/60 px-3 py-2.5 has-[:checked]:border-primary/40 has-[:checked]:bg-primary/8">
+                    <input
+                      type="checkbox"
+                      name="run-confirm-review"
+                      className="mt-0.5 h-4 w-4 accent-primary"
+                      checked={runConfirmReviewChoice}
+                      onChange={(e) => setRunConfirmReviewChoice(e.target.checked)}
+                    />
+                    <span className="font-body text-sm text-on-surface">{t("chapterRun.runConfirm.reviewYes")}</span>
+                  </label>
                 </fieldset>
                 <div className="mt-5 flex flex-wrap justify-end gap-2">
                   <button
@@ -2657,12 +2645,11 @@ export default function App() {
                     type="button"
                     className="btn-primary-gradient h-10 min-w-[8rem] px-5 text-sm"
                     onClick={() => {
-                      if (runConfirmReviewChoice === null) return;
                       const reviewAfterDraft = runConfirmReviewChoice;
                       setRunConfirmOpen(false);
                       void handleRunChapter(reviewAfterDraft);
                     }}
-                    disabled={busy || runConfirmReviewChoice === null}
+                    disabled={busy}
                   >
                     <span className="material-symbols-outlined text-base" aria-hidden>
                       auto_awesome

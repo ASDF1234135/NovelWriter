@@ -148,7 +148,7 @@ function hitlContextForReason(reason: HitlReasonValue, state: Record<string, unk
 
   if (reason === HITL_REASON.CHAPTER_DRAFT_REVIEW) {
     return {
-      primary_issue: "章節草稿已通過 reader 審核，請人類確認是否歸檔（草稿後續仍會由 copyeditor 潤飾）。",
+      primary_issue: "章節草稿已完成審核，請人類確認是否歸檔（後續會由編輯再潤飾）。",
       supervisor_feedbacks: [],
       conflict_notes: [],
       problematic_draft_snippet: draft.slice(0, 800),

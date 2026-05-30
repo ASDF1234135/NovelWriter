@@ -79,7 +79,7 @@ const ROUTE_DECISION_LABELS: Record<string, string> = {
   hitl: pick("等待協助", "等待协助", "Await help"),
   planner: pick("回到劇情規劃", "回到剧情规划", "Back to planning"),
   author: pick("回到撰寫", "回到撰写", "Back to writing"),
-  reader: pick("閱讀檢查", "阅读检查", "Reader check"),
+  reader: pick("閱讀檢查", "阅读检查", "Review check"),
   extraction_gate: pick("章末設定整理", "章末设定整理", "Chapter settings wrap-up"),
   copyeditor: pick("文稿潤飾", "文稿润饰", "Line editing"),
   output_language_gate: pick("語言一致檢查", "语言一致检查", "Language check"),

@@ -9,6 +9,7 @@ from app.domain.schema import AnchorResolutionOutput, GraphRAGEvaluateOutput
 from app.domain.story_runtime import recompute_anchor_unlocks
 from app.services.graph_rag_service import GraphRAGService
 from app.services.llm import MockLLMClient
+from app.services.workflow.anchor_graph_eval import evaluate_anchor_graph_rag
 from app.services.workflow.context import WorkflowContext
 from app.services.workflow.output_language import augment_profile_system_prompt
 from app.services.workflow.profiles import get_profile
@@ -163,26 +164,13 @@ def run_anchor_resolve(state: dict, context: WorkflowContext) -> dict:
         try:
             def _evaluate_anchor(aid: str) -> tuple[str, GraphRAGEvaluateOutput]:
                 node = node_by_id.get(aid) or {}
-                title = str(node.get("title") or "").strip()
-                desc = str(node.get("description") or "").strip()
-                kind = str(node.get("node_kind") or "").strip()
-                deps = [str(x).strip() for x in (node.get("depends_on") or []) if str(x).strip()]
-                condition_desc = (
-                    "You are judging anchor completion.\n"
-                    f"Anchor id: {aid}\n"
-                    f"Anchor kind: {kind}\n"
-                    f"Anchor title: {title}\n"
-                    f"Anchor description: {desc}\n"
-                    f"Dependencies (must already be resolved): {deps}\n\n"
-                    "Question: Is this anchor already achieved/resolved given the current story state?\n"
-                    "Return resolved=true ONLY if the evidence pack contains objective facts proving completion.\n"
-                )
-                verdict = graph_rag.evaluate_condition(
-                    condition_desc,
+                verdict = evaluate_anchor_graph_rag(
+                    graph_rag,
+                    aid,
+                    node,
                     story_id=story_id,
                     active_epoch_id=active_epoch_id,
                     pov_character_id=pov_character_id,
-                    response_model=GraphRAGEvaluateOutput,
                 )
                 return aid, verdict
 

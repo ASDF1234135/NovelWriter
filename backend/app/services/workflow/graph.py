@@ -36,6 +36,10 @@ from app.services.workflow.nodes.copyeditor import run_copyeditor
 from app.services.workflow.policy_gates import run_semantic_gate
 from app.services.workflow.output_language import chapter_heading_line
 from app.services.workflow.output_language_gate import run_output_language_gate
+from app.services.workflow.anchor_graph_eval import (
+    build_cache_from_anchor_resolution,
+    merge_cache_into_runtime,
+)
 from app.services.workflow.nodes.graph_rag import run_graph_rag
 from app.services.workflow.nodes.logic_alignment import run_logic_alignment
 from app.services.workflow.nodes.plan_supervisor import run_plan_supervisor
@@ -1125,6 +1129,15 @@ def build_chapter_graph(context: WorkflowContext):
                     item["pending_stages"] = pending_stages
                     break
             rt["lore_mysteries_progression"] = lore
+            new_cache = build_cache_from_anchor_resolution(
+                int(state["chapter_id"]),
+                state.get("anchor_resolution") if isinstance(state.get("anchor_resolution"), dict) else None,
+            )
+            merge_cache_into_runtime(
+                rt,
+                new_cache,
+                clear_anchor_ids=set(merged_resolved),
+            )
             context.story_repository.update_story_runtime_json(state["story_id"], rt)
             context.story_repository.update_story_macro_topology(
                 state["story_id"],

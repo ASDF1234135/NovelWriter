@@ -152,6 +152,9 @@ export function ChapterReviewGate({
         <p className={onPaper ? "mt-2 font-body text-sm leading-relaxed text-[#5c4a32]/90" : "mt-1 text-on-surface-variant"}>
           {t("chapterReview.abandonHint")}
         </p>
+        <p className={onPaper ? "mt-1.5 font-body text-xs leading-relaxed text-[#5c4a32]/85" : "mt-1 text-xs text-on-surface-variant"}>
+          {t("chapterReview.aiReminder")}
+        </p>
       </div>
 
       <div

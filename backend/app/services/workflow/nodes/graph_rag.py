@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from app.domain.schema import GraphQueryRequest, NodeType, StoryCastMemberStored
 from app.services.graph_rag_service import GraphRAGService
-from app.services.llm import LLMProviderError
+from app.services.llm import LLMProviderError, MockLLMClient
+from app.services.workflow.anchor_graph_eval import run_anchor_preflight
 from app.services.workflow.continuity import (
     build_continuity_packet,
     format_local_enforced_rules_block,
@@ -227,6 +228,22 @@ def run_graph_rag(state: dict, context: WorkflowContext) -> dict:
                 },
                 max_chars=gc_max,
             )
+        anchor_preflight_evaluations: list[dict] = []
+        node_by_id = {
+            str(n.get("id") or ""): n
+            for n in (state.get("anchor_nodes") or [])
+            if isinstance(n, dict) and str(n.get("id") or "").strip()
+        }
+        if not isinstance(context.llm_client, MockLLMClient):
+            preflight_md, anchor_preflight_evaluations = run_anchor_preflight(
+                graph_rag=graph_rag_svc,
+                state=state,
+                node_by_id=node_by_id,
+                resolved_pov_character_id=resolved_pov_character_id,
+            )
+            if preflight_md:
+                combined = f"{preflight_md}\n\n---\n\n{graph_context}"
+                graph_context = combined if len(combined) <= gc_max else combined[: max(gc_max - 1, 0)] + "…"
         vector_context = truncate_json_payload(
             {
                 "hits": [hit.model_dump() for hit in vector_hits],
@@ -255,6 +272,7 @@ def run_graph_rag(state: dict, context: WorkflowContext) -> dict:
             "context_hitl_required": False,
             "cast_slim_view": slim_cards,
             "cast_full_view": full_cards,
+            "anchor_preflight_evaluations": anchor_preflight_evaluations,
             **continuity,
         }
         if total <= _CONTEXT_CHAR_BUDGET:

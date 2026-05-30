@@ -267,14 +267,17 @@
     100% {
       box-shadow:
         0 0 0 1px rgba(255, 183, 131, 0.55),
-        0 0 18px rgba(255, 183, 131, 0.55);
-      filter: brightness(1);
+        0 0 18px rgba(255, 183, 131, 0.55),
+        0 14px 50px -26px rgba(0, 0, 0, 0.75);
+      filter: brightness(1.02) saturate(1.06);
     }
     50% {
       box-shadow:
         0 0 0 2px rgba(255, 183, 131, 0.75),
-        0 0 32px rgba(255, 183, 131, 0.85);
-      filter: brightness(1.1);
+        0 0 46px rgba(255, 183, 131, 0.9),
+        0 0 20px rgba(233, 195, 73, 0.38),
+        0 18px 64px -24px rgba(0, 0, 0, 0.82);
+      filter: brightness(1.12) saturate(1.12);
     }
   }
 

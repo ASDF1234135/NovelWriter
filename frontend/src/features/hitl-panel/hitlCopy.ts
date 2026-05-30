@@ -40,7 +40,7 @@ export const FLOW_STEPS = [
   { id: "logic_alignment", userLabel: pick("規則對齊", "规则对齐", "Rules alignment") },
   { id: "author", userLabel: pick("撰寫內文", "撰写正文", "Writing draft") },
   { id: "draft_supervisor", userLabel: pick("內文審核", "正文审核", "Draft review") },
-  { id: "reader", userLabel: pick("閱讀檢查", "阅读检查", "Reader check") },
+  { id: "reader", userLabel: pick("閱讀檢查", "阅读检查", "Review check") },
   { id: "extraction_gate", userLabel: pick("章末設定整理", "章末设定整理", "Chapter settings wrap-up") },
   { id: "copyeditor", userLabel: pick("文稿潤飾", "文稿润饰", "Line editing") },
   { id: "output_language_gate", userLabel: pick("語言一致檢查", "语言一致检查", "Language check") },
@@ -192,9 +192,9 @@ const HITL_SITUATION_COPY: Record<string, { title: string; why: string }> = {
   [HITL_REASON.CHAPTER_DRAFT_REVIEW]: {
     title: pick("章節草稿待您審核", "章节草稿待你审核", "Chapter Draft Awaiting Review"),
     why: pick(
-      "Reader 已通過本章草稿；此次工作流設定為需要人工審核。請在右下角 HITL 浮動面板審閱、編輯或放棄。",
-      "Reader 已通过本章草稿；此次工作流设定为需要人工审核。请在右下角 HITL 浮动面板审阅、编辑或放弃。",
-      "Reader has approved the draft, but this run requires a human checkpoint. Use the HITL floating panel (bottom-right) to review, edit, or abandon.",
+      "草稿已完成審核；此次工作流設定為需要人工審核。請在右下角的「人工審核」浮動面板審閱、編輯或放棄。",
+      "草稿已完成审核；此次工作流设定为需要人工审核。请在右下角的「人工审核」浮动面板审阅、编辑或放弃。",
+      "The draft has passed its check, but this run requires a human checkpoint. Use the human decision panel (bottom-right) to review, edit, or abandon.",
     ),
   },
 };
@@ -393,7 +393,7 @@ export function formatBStoryCandidateForDisplay(raw: string): { bullets: string[
 }
 
 export const DRAFT_RESUME_OPTIONS: { value: string; label: string }[] = [
-  { value: "reader", label: pick("從閱讀檢查再跑", "从阅读检查再跑", "Resume from Reader Check") },
+  { value: "reader", label: pick("從閱讀檢查再跑", "从阅读检查再跑", "Resume from review check") },
   { value: "draft_supervisor", label: pick("從內文審核再跑", "从正文审核再跑", "Resume from Draft Review") },
   { value: "author", label: pick("從撰寫再跑", "从撰写再跑", "Resume from Writing") },
 ];

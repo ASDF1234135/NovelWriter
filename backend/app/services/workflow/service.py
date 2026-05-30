@@ -121,6 +121,8 @@ def _refresh_anchor_runtime_state(story_repository: StoryRepository, state: dict
         nodes=nodes,
         resolved_anchors=state["resolved_anchors"],
     )
+    auc = rt.get("anchor_unresolved_eval_cache")
+    state["anchor_unresolved_eval_cache"] = dict(auc) if isinstance(auc, dict) else {}
     canonicalize_workflow_state_contract(state)
 
 
@@ -1318,6 +1320,8 @@ class WorkflowService:
         initial_state["anchor_nodes"] = list(story.get("anchor_nodes_json") or [])
         initial_state["resolved_anchors"] = list(rt.get("resolved_anchors") or [])
         initial_state["anchor_candidates"] = list(rt.get("anchor_candidates") or [])
+        auc = rt.get("anchor_unresolved_eval_cache")
+        initial_state["anchor_unresolved_eval_cache"] = dict(auc) if isinstance(auc, dict) else {}
         # Canonical runtime source is anchor_nodes. Normalize legacy fields for consistency.
         node_ids = {str(n.get("id") or "").strip() for n in initial_state["anchor_nodes"] if str(n.get("id") or "").strip()}
         initial_node_by_id = {

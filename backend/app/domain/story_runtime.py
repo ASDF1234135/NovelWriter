@@ -15,6 +15,7 @@ DEFAULT_STORY_RUNTIME: dict[str, Any] = {
     "anchor_candidates": [],
     "lore_mysteries_progression": [],
     "anchor_properties": {},
+    "anchor_unresolved_eval_cache": {},
 }
 
 
@@ -53,6 +54,8 @@ def parse_story_runtime(raw: Any) -> dict[str, Any]:
             base["lore_mysteries_progression"] = []
         ap = base.get("anchor_properties")
         base["anchor_properties"] = dict(ap) if isinstance(ap, dict) else {}
+        auc = base.get("anchor_unresolved_eval_cache")
+        base["anchor_unresolved_eval_cache"] = dict(auc) if isinstance(auc, dict) else {}
         return base
     return deepcopy(DEFAULT_STORY_RUNTIME)
 

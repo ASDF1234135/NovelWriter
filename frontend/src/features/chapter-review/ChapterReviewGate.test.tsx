@@ -61,7 +61,7 @@ describe("ChapterReviewGate", () => {
 
     expect(await screen.findByText(/此版本為草稿/)).toBeInTheDocument();
     expect(screen.getByText(/建議放棄並回到設定畫面/)).toBeInTheDocument();
-    expect(screen.getByText("讀者評分：87")).toBeInTheDocument();
+    expect(screen.getByText("參考分數：87")).toBeInTheDocument();
     // Suspense fallback yields its own pre while the lazy chunk resolves; once
     // resolved, the mocked editor is rendered.
     expect(await screen.findByTestId("mock-editor")).toBeInTheDocument();
@@ -153,7 +153,7 @@ describe("ChapterReviewGate", () => {
     await user.click(await screen.findByTestId("chapter-review-rerun"));
 
     // Confirm modal text comes from chapterReview.rerunConfirm.
-    expect(await screen.findByText(/將清空目前草稿並從 planner 重新生成/)).toBeInTheDocument();
+    expect(await screen.findByText(/將清空目前草稿並重新生成/)).toBeInTheDocument();
     expect(onRerun).not.toHaveBeenCalled();
 
     // Click the modal's confirm action ("保留劇情節點重跑").

@@ -383,7 +383,11 @@ export function HitlFloatingDock(props: Props) {
         <span
           className="material-symbols-outlined text-base"
           aria-hidden
-          style={{ filter: "drop-shadow(0 0 6px rgba(255,183,131,0.65))" }}
+          style={
+            workflowHitlActive
+              ? { filter: "drop-shadow(0 0 12px rgba(255,183,131,0.92)) drop-shadow(0 0 22px rgba(233,195,73,0.35))" }
+              : { filter: "drop-shadow(0 0 6px rgba(233,195,73,0.28))" }
+          }
         >
           local_fire_department
         </span>

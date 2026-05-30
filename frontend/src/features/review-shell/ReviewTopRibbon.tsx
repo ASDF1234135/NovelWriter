@@ -91,7 +91,7 @@ export function ReviewTopRibbon({
             aria-hidden
             style={
               beaconState === "awaiting"
-                ? { filter: "drop-shadow(0 0 6px rgba(255,183,131,0.7))" }
+                ? { filter: "drop-shadow(0 0 12px rgba(255,183,131,0.9)) drop-shadow(0 0 22px rgba(233,195,73,0.35))" }
                 : undefined
             }
           >
