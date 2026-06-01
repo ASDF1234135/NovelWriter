@@ -494,6 +494,13 @@ export function HitlPanel({
             <HitlPanelContentSection
               reason={reason}
               hitlContext={hitlContext}
+              chapterDraft={
+                workflow?.state.current_draft != null
+                  ? String(workflow.state.current_draft)
+                  : workflow?.state.best_draft_content != null
+                    ? String(workflow.state.best_draft_content)
+                    : null
+              }
               feedbackLines={feedbackLines}
               anchorMilestones={anchorMilestones}
               t={t}

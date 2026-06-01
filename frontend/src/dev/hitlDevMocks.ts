@@ -108,7 +108,7 @@ function hitlContextForReason(reason: HitlReasonValue, state: Record<string, unk
       primary_issue: String(state.alignment_log ?? "").trim().slice(-400) || "邏輯對齊需要補充規則或調整大綱。",
       supervisor_feedbacks: ["計畫審核：節奏過快 → 放慢鋪陳"],
       conflict_notes: (state.human_outline_conflict_notes as string[]) ?? [],
-      problematic_draft_snippet: draft.slice(0, 800),
+      problematic_draft_snippet: draft,
       context_metadata: { payload_type: "alignment" },
     };
   }
@@ -118,7 +118,7 @@ function hitlContextForReason(reason: HitlReasonValue, state: Record<string, unk
       primary_issue: "抽取閘門未通過（連續 4 次失敗）；請綁定未知實體或放寬強制節點。",
       supervisor_feedbacks: [],
       conflict_notes: [],
-      problematic_draft_snippet: draft.slice(0, 800),
+      problematic_draft_snippet: draft,
       context_metadata: {
         payload_type: "extraction_remap",
         unknown_entities: (state.hitl_extraction_remap_hints as Array<Record<string, unknown>>) ?? [],
@@ -131,7 +131,7 @@ function hitlContextForReason(reason: HitlReasonValue, state: Record<string, unk
       primary_issue: "內文審核多次未過；請依退件理由修改正文或調整抽取提示後重試。",
       supervisor_feedbacks: ["字數不足 → 擴寫", "偏離大綱節拍 → 對齊 event_02"],
       conflict_notes: [],
-      problematic_draft_snippet: draft.slice(0, 800),
+      problematic_draft_snippet: draft,
       context_metadata: { payload_type: "draft_loop" },
     };
   }
@@ -151,7 +151,7 @@ function hitlContextForReason(reason: HitlReasonValue, state: Record<string, unk
       primary_issue: "章節草稿已完成審核，請人類確認是否歸檔（後續會由編輯再潤飾）。",
       supervisor_feedbacks: [],
       conflict_notes: [],
-      problematic_draft_snippet: draft.slice(0, 800),
+      problematic_draft_snippet: draft,
       context_metadata: { payload_type: "chapter_review", reader_score: 88 },
     };
   }
@@ -163,7 +163,7 @@ function hitlContextForReason(reason: HitlReasonValue, state: Record<string, unk
         "Chapter text may not match the configured story language (繁體中文).",
       supervisor_feedbacks: [],
       conflict_notes: [],
-      problematic_draft_snippet: draft.slice(0, 800),
+      problematic_draft_snippet: draft,
       context_metadata: {
         payload_type: "output_language",
         expected_output_language: "zh-Hant",
@@ -177,7 +177,7 @@ function hitlContextForReason(reason: HitlReasonValue, state: Record<string, unk
       primary_issue: "Resolver is uncertain about milestone achievement.",
       supervisor_feedbacks: [],
       conflict_notes: [],
-      problematic_draft_snippet: draft.slice(0, 800),
+      problematic_draft_snippet: draft,
       context_metadata: { payload_type: "generic" },
     };
   }
@@ -196,7 +196,7 @@ function hitlContextForReason(reason: HitlReasonValue, state: Record<string, unk
     primary_issue: `流程暫停：${reason}`,
     supervisor_feedbacks: ["大綱與錨點衝突 → 調整事件或放寬條件"],
     conflict_notes: [],
-    problematic_draft_snippet: draft.slice(0, 800),
+    problematic_draft_snippet: draft,
     context_metadata: { payload_type: "generic" },
   };
 }

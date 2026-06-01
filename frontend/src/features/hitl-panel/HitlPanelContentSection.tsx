@@ -8,13 +8,23 @@ type HitlTranslate = (key: string, fallback?: string, params?: Record<string, st
 type Props = {
   reason: string;
   hitlContext: HitlContextPayload | null;
+  /** Full chapter draft from workflow state (preferred over hitlContext snippet). */
+  chapterDraft?: string | null;
   feedbackLines: string[];
   anchorMilestones?: AnchorMilestoneRow[];
   t: HitlTranslate;
 };
 
-export function HitlPanelContentSection({ reason, hitlContext, feedbackLines, anchorMilestones = [], t }: Props) {
-  const draftSnippet = String(hitlContext?.problematic_draft_snippet ?? "").trim();
+export function HitlPanelContentSection({
+  reason,
+  hitlContext,
+  chapterDraft = null,
+  feedbackLines,
+  anchorMilestones = [],
+  t,
+}: Props) {
+  const draftFromWorkflow = String(chapterDraft ?? "").trim();
+  const draftSnippet = draftFromWorkflow || String(hitlContext?.problematic_draft_snippet ?? "").trim();
   const hasLanguageMeta =
     hitlContext?.context_metadata?.payload_type === "output_language" &&
     Boolean(hitlContext.context_metadata.expected_output_language);
@@ -72,7 +82,7 @@ export function HitlPanelContentSection({ reason, hitlContext, feedbackLines, an
       {showDraft ? (
         <div className="mt-3 rounded-md border border-outline-variant/20 bg-surface-container-low/70 px-2 py-2">
           <p className="font-label text-[10px] uppercase tracking-wider text-on-surface-variant">{t("hitl.draft.title")}</p>
-          <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap font-body text-xs leading-relaxed text-on-surface">
+          <pre className="mt-1 whitespace-pre-wrap font-body text-xs leading-relaxed text-on-surface">
             {draftSnippet}
           </pre>
         </div>

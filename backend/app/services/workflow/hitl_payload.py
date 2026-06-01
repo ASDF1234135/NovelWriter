@@ -9,11 +9,9 @@ from app.services.workflow.output_language import OUTPUT_LANGUAGE_LABEL, normali
 from app.services.workflow.output_language_gate import output_language_letter_summary
 
 
-def _snippet(text: str | None, max_chars: int = 2400) -> str:
-    raw = (text or "").strip()
-    if len(raw) <= max_chars:
-        return raw
-    return raw[: max_chars - 1].rstrip() + "…"
+def _draft_text(text: str | None) -> str:
+    """Full chapter draft for HITL display (no truncation)."""
+    return (text or "").strip()
 
 
 def _feedback_lines(items: list[Any], limit: int = 12) -> list[str]:
@@ -68,7 +66,7 @@ def build_hitl_context_payload(state: dict[str, Any]) -> HitlContextPayload | No
             primary_issue=issue,
             supervisor_feedbacks=sup[:20],
             conflict_notes=conflicts[:30],
-            problematic_draft_snippet=_snippet(draft),
+            problematic_draft_snippet=_draft_text(draft),
             context_metadata=HitlContextMetadata(payload_type="alignment"),
         )
 
@@ -81,7 +79,7 @@ def build_hitl_context_payload(state: dict[str, Any]) -> HitlContextPayload | No
             primary_issue=issue,
             supervisor_feedbacks=[],
             conflict_notes=[],
-            problematic_draft_snippet=_snippet(draft),
+            problematic_draft_snippet=_draft_text(draft),
             context_metadata=HitlContextMetadata(
                 payload_type="extraction_remap",
                 unknown_entities=rows[:50],
@@ -96,7 +94,7 @@ def build_hitl_context_payload(state: dict[str, Any]) -> HitlContextPayload | No
             primary_issue=issue,
             supervisor_feedbacks=sup[:24],
             conflict_notes=[],
-            problematic_draft_snippet=_snippet(draft),
+            problematic_draft_snippet=_draft_text(draft),
             context_metadata=HitlContextMetadata(payload_type="draft_loop"),
         )
 
@@ -127,7 +125,7 @@ def build_hitl_context_payload(state: dict[str, Any]) -> HitlContextPayload | No
             primary_issue=issue,
             supervisor_feedbacks=[],
             conflict_notes=[],
-            problematic_draft_snippet=_snippet(draft),
+            problematic_draft_snippet=_draft_text(draft),
             context_metadata=HitlContextMetadata(
                 payload_type="chapter_review",
                 reader_score=reader_score,
@@ -145,7 +143,7 @@ def build_hitl_context_payload(state: dict[str, Any]) -> HitlContextPayload | No
             primary_issue=issue,
             supervisor_feedbacks=[],
             conflict_notes=[],
-            problematic_draft_snippet=_snippet(draft),
+            problematic_draft_snippet=_draft_text(draft),
             context_metadata=HitlContextMetadata(
                 payload_type="output_language",
                 expected_output_language=norm,
@@ -159,6 +157,6 @@ def build_hitl_context_payload(state: dict[str, Any]) -> HitlContextPayload | No
         primary_issue=f"流程暫停：{reason or 'HITL'}",
         supervisor_feedbacks=sup[:16],
         conflict_notes=[],
-        problematic_draft_snippet=_snippet(draft) if draft else "",
+        problematic_draft_snippet=_draft_text(draft) if draft else "",
         context_metadata=HitlContextMetadata(payload_type="generic"),
     )

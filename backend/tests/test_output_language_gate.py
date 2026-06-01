@@ -85,3 +85,17 @@ def test_build_hitl_context_payload_output_language() -> None:
     assert "detail" in p.primary_issue.lower() or "Heuristic" in p.primary_issue
     assert p.context_metadata.language_detection_summary
     assert "CJK" in (p.context_metadata.language_detection_summary or "")
+
+
+def test_build_hitl_context_payload_includes_full_draft_without_truncation() -> None:
+    draft = "章" * 5000
+    state = {
+        "requires_hitl": True,
+        "workflow_status": WorkflowStatus.WAITING_HITL.value,
+        "hitl_reason": HitlReason.DRAFT_LOOP_EXCEEDED,
+        "current_draft": draft,
+    }
+    p = build_hitl_context_payload(state)
+    assert p is not None
+    assert p.problematic_draft_snippet == draft
+    assert not p.problematic_draft_snippet.endswith("…")
