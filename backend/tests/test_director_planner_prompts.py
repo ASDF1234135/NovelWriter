@@ -40,7 +40,8 @@ def test_director_prompt_includes_story_premise_volume_summary_and_anchor_descri
     assert "current_anchor_description: 主角離開原本安穩場域，正式捲入主線。" in prompt
     assert "visible_unachieved_anchors" in prompt
     assert "anchor_01" in prompt
-    assert "bible_context: 世界規則：皇室血脈涉及禁忌契約。" in prompt
+    assert "bible_context:" in prompt
+    assert "世界規則：皇室血脈涉及禁忌契約。" in prompt
     assert "Choose selected_anchor_ids with 1-2 anchor ids for this chapter." in prompt
     assert "Choose next_anchor_ids with 1-2 reachable unresolved ids for the next chapter." in prompt
 
@@ -190,7 +191,7 @@ def test_planner_prompt_includes_story_premise_volume_summary_and_anchor_descrip
     assert "do not paste them verbatim to the author" in prompt
     assert "lore_mysteries_progression" in prompt
     assert "ending_vibe_cooldown_constraint" in prompt
-    assert "general_world_lore (craft / world; hard)" in prompt
+    assert "World/craft rules are in bible_context" in prompt
     assert "New important-entity quota: 0 by default" in prompt
     assert "At most 2 nodes" in prompt
 

@@ -57,6 +57,16 @@ _DRAFT_VIOLATION_FEEDBACK: list[tuple[ViolationType, str, tuple[str, ...]]] = [
         "(System) Mandatory entities are not identifiable in prose or cannot align to planned nodes; add extractable surface forms and hints.",
         ("mandatory", "surface", "substring"),
     ),
+    (
+        ViolationType.INCONSISTENCY,
+        "(System) Beats appear rushed: add on-page transitions (reaction, body state, dialogue) before outcomes; avoid plot-summary chaining.",
+        ("plot rush", "teleport", "transition", "summary chaining"),
+    ),
+    (
+        ViolationType.INCONSISTENCY,
+        "(System) Character psychology or speech does not match active_character_profiles without on-page motivation.",
+        ("personality", "speech_style", "out of character", "motivation"),
+    ),
 ]
 
 
@@ -336,7 +346,14 @@ def _build_draft_supervisor_prompt(payload) -> str:
         "an unfalsifiable end-of-chapter position can also be an issue.\n"
         "If the draft is overloaded with stiff jargon, gamified proper nouns, or 'quotes + label naming' that could be natural sensory prose, "
         "treat it as INCONSISTENCY and demand rewrite.\n"
-        "Do NOT nitpick minor staging details or sensory descriptions. If the draft captures the essence and narrative purpose of a 'must_include_beat', treat it as satisfied even if the exact physical action (e.g., looking through a window vs. standing on a landing) differs slightly. Do NOT output rule reminders for rules that were NOT violated.\n"
+        "Do NOT nitpick minor staging details or sensory descriptions. If the draft captures the essence and narrative purpose of a 'must_include_beat', treat it as satisfied even if the exact physical action (e.g., looking through a window vs. standing on a landing) differs slightly—but the beat still needs a visible transition, not a single summary sentence. Do NOT output rule reminders for rules that were NOT violated.\n"
+        "## Character and pacing audit (mirror Author)\n"
+        "R1 Opening: after high-impact prior chapter, opening needs observable emotional/body residue unless continuity notes say recovered.\n"
+        "R2 Logistics: major moves/fights/persuasion must show who/where/how/obstacles; reject logistics teleport vs graph_context/bible_context/locations.\n"
+        "R3 Psychology: major decisions need at least one beat of perception→emotion/body→action; reject personality snap vs active_character_profiles without earned pressure.\n"
+        "R4 Plot-rush: reject stacked 'then/next/finally' result sentences between beats without reactions; reject time skips that skip required on-page beats; reject narrative_script paraphrase as prose.\n"
+        "R5 Ending: ending_state_shift must come from on-page process, not a closing declaration only.\n"
+        "feedback_to_agent must name the missing transition type (body/emotion/dialogue/obstacle), not vague 'push plot harder.'\n"
         "When chapter_end_location_hint, ending_boundary_rule, or forbidden_next_scene_actions are defined, "
         "treat them as hard boundaries; writing past the boundary into entry, meetings, hard scene changes, new bases, or premature reveals is INCONSISTENCY.\n"
         "Return a single JSON object.\n\n"

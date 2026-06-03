@@ -215,6 +215,7 @@ class SafeAuthorPayload(BaseModel):
     length_adjustment: LengthAdjustment = LengthAdjustment.NONE
     mandatory_new_entities: list[MandatoryNewEntity] = Field(default_factory=list)
     general_world_lore: str = ""
+    bible_context: str = ""
     safe_chapter_rules: str = ""
     ai_freedom_level: str = "balanced"
     outline_binding_mode: str = "ABSENT"
@@ -310,6 +311,10 @@ class SafeSupervisorPayload(BaseModel):
     chapter_outline: str = ""
     ai_freedom_level: str = "balanced"
     outline_binding_mode: str = "ABSENT"
+    active_character_profiles: list[dict[str, str]] = Field(default_factory=list)
+    author_safe_continuity_notes: list[str] = Field(default_factory=list)
+    ending_state_shift: str = ""
+    tone_direction: str = ""
 
 
 class WorkflowBootstrapState(BaseModel):

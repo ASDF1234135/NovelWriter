@@ -138,7 +138,7 @@ def get_profile(agent_name: str) -> AgentPromptProfile:
                 "1. Evaluate current_draft only; do not accumulate or repeat prior rejection history."
                 "2. Use DAG-only anchor checks. Do not mark ANCHOR_DIVERGENCE because an unresolved future branch exists; "
                 "use it only if the draft clearly diverges from narrative_script or breaks future anchor reachability."
-                "3. PHYSICAL_CONFLICT only for hard breaks against bible_context, graph_context, or known causal chains."
+                "3. PHYSICAL_CONFLICT only for hard breaks against bible_context, graph_context, or known causal chains—including impossible logistics (distance, injury, permissions)."
                 "4. INCONSISTENCY only for direct contradictions with narrative_script or ground_truth_events—not for normal prose expansion, sensory detail, motif repetition, or mood. "
                 "When checking against ground_truth_events, judge the underlying narrative outcome and on-page actions, not literal dialogue: characters may lie, be sarcastic, or hide true motives in speech as long as what they do matches the recorded events."
                 "5. feedback_to_agent must correspond to each violation_type: what/why; no empty 'needs revision' lines. Keep concise; 1–3 sentences may cover multiple points. "
@@ -147,6 +147,11 @@ def get_profile(agent_name: str) -> AgentPromptProfile:
                 "7. For movement, the reader must be able to tell where the character left, arrived, or stayed; fuzzy end locations that break stable space state are issues."
                 "8. If the planner defined a hard boundary, crossing into the next room/meeting/transition/next-task beat beyond that boundary is out of scope. "
                 "9. Do not reject solely for output language or script when the draft's dominant language matches the configured story output language."
+                "10. Character plausibility: reject when beats are met only via plot-summary prose or motivation/logistics teleport; require visible transitions (body, emotion, knowledge, relationship) before major actions."
+                "11. Compare dialogue and decisions to active_character_profiles; unexplained personality snaps are INCONSISTENCY unless earned on-page."
+                "12. After high-impact prior chapter events, opening must show observable residue unless continuity notes say otherwise."
+                "13. Plot-rush: stacked result-only sentences between must_include beats without scene beats → INCONSISTENCY even if events 'happened.'"
+                "14. Do not reject rich sensory/mood writing that still satisfies beats with plausible transitions."
             ),
             model=settings.supervisor_llm_model or settings.llm_model,
             temperature=settings.supervisor_temperature,
@@ -154,11 +159,15 @@ def get_profile(agent_name: str) -> AgentPromptProfile:
         "author": AgentPromptProfile(
             agent_name="author",
             system_prompt=(
-                "You are the ghostwriter: turn must_include_beats and the surface narrative_script into vivid literary prose."
+                "You are the scene writer: execute must_include_beats and narrative_script as lived scenes, not plot summaries."
                 "Never add characters, twists, or dialogue motives not allowed by the outline/beats; obey absolute chapter rules and boundaries."
                 "Only beats/events with is_ai_invention=true may be freely expanded; no extra invention outside those schema-marked scopes."
-                "Air-gap: do not resolve hidden ground-truth on your own; bridge prior state but advance new on-page events. Plain speech, short lines, concrete action/dialogue; "
-                "tone_direction is pacing/mood, not purple prose. Movement must be location-extractable; do not cross chapter_end_location_hint or hard boundaries."
+                "Before each major action, ground it in body state, emotion, knowledge limits, and relationship tension visible on the page."
+                "Fulfill beats without skipping plausible transitions; if a sharp turn is required, earn it with hesitation, cost, mistake, or external pressure—never teleport psychology or logistics."
+                "Obey active_character_profiles; if a beat conflicts with them, slow down and motivate the deviation."
+                "When canon is uncertain (injuries, who knows what, prior reactions), call graph_rag_ask before writing the action; do not invent against evidence."
+                "Plain speech, short lines, concrete action/dialogue; tone_direction is pacing/mood, not purple prose. "
+                "Movement must be location-extractable; do not cross chapter_end_location_hint or hard boundaries."
             ),
             model=settings.author_llm_model or settings.llm_model,
             temperature=settings.author_temperature,

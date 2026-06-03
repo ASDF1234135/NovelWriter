@@ -226,6 +226,34 @@ def test_planner_payload_includes_story_premise_volume_and_anchor_context() -> N
     assert planner_payload.general_world_lore == "短句優先\n避免過度抒情"
 
 
+def test_draft_supervisor_payload_includes_character_audit_fields() -> None:
+    state = {
+        "story_id": "story_1",
+        "chapter_id": 2,
+        "active_epoch_id": "epoch_present",
+        "pov_character_id": "char_a",
+        "ground_truth_events": [],
+        "narrative_script": "script",
+        "current_draft": "draft",
+        "graph_context": "",
+        "vector_context": "",
+        "bible_context": "full bible",
+        "cast_slim_view": [{"node_id": "char_a", "name": "Alice", "personality": "calm", "speech_style": "short"}],
+        "cast_full_view": [],
+        "recent_entity_names": ["Alice"],
+        "author_safe_continuity_notes": ["note"],
+        "ending_state_shift": "tense",
+        "tone_direction": "dark",
+        "story_output_language": "zh-Hant",
+    }
+    payload = build_draft_supervisor_payload(state)
+    assert payload.bible_context == "full bible"
+    assert payload.active_character_profiles
+    assert payload.author_safe_continuity_notes == ["note"]
+    assert payload.ending_state_shift == "tense"
+    assert payload.tone_direction == "dark"
+
+
 def test_draft_supervisor_payload_includes_normalized_length() -> None:
     state = {
         "chapter_id": 1,

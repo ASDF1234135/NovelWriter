@@ -9,7 +9,6 @@ from app.services.workflow.context import WorkflowContext
 from app.services.workflow.output_language import augment_profile_system_prompt
 from app.services.workflow.profiles import get_profile
 
-LOGIC_ALIGN_BIBLE_CAP = 4500
 LOGIC_ALIGN_GRAPH_CAP = 3500
 LOGIC_ALIGN_VECTOR_CAP = 2500
 
@@ -42,7 +41,7 @@ def _build_logic_alignment_prompt(state: dict[str, Any]) -> str:
     boundary = str(state.get("ending_boundary_rule") or "")
     forbidden = list(state.get("forbidden_reveals") or [])
     human_outline = str(state.get("chapter_outline") or "").strip()
-    bible = _clip(str(state.get("bible_context") or ""), LOGIC_ALIGN_BIBLE_CAP)
+    bible = str(state.get("bible_context") or "")
     graph = _clip(str(state.get("graph_context") or ""), LOGIC_ALIGN_GRAPH_CAP)
     vector = _clip(str(state.get("vector_context") or ""), LOGIC_ALIGN_VECTOR_CAP)
 

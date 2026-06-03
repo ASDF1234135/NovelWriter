@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from time import perf_counter
+from collections.abc import Callable
 from typing import Any, Iterator, Protocol, TypeVar
 
 import httpx
@@ -219,6 +220,17 @@ class LLMClient(Protocol):
     ) -> tuple[StructuredModelT, LLMResult]:
         ...
 
+    def invoke_text_with_tools(
+        self,
+        messages: list[dict[str, Any]],
+        profile: AgentPromptProfile,
+        tools: list[dict[str, Any]],
+        tool_handler: Callable[[str, dict[str, Any]], str],
+        *,
+        max_tool_rounds: int = 4,
+    ) -> LLMResult:
+        ...
+
 
 class EmbeddingClient(Protocol):
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
@@ -252,6 +264,22 @@ class MockLLMClient:
         profile: AgentPromptProfile,
     ) -> tuple[StructuredModelT, LLMResult]:
         raise NotImplementedError("MockLLMClient does not synthesize structured outputs; node fallback should be used.")
+
+    def invoke_text_with_tools(
+        self,
+        messages: list[dict[str, Any]],
+        profile: AgentPromptProfile,
+        tools: list[dict[str, Any]],
+        tool_handler: Callable[[str, dict[str, Any]], str],
+        *,
+        max_tool_rounds: int = 4,
+    ) -> LLMResult:
+        user_content = ""
+        for msg in reversed(messages):
+            if msg.get("role") == "user" and isinstance(msg.get("content"), str):
+                user_content = msg["content"]
+                break
+        return self.invoke_text(user_content or "(empty)", profile)
 
 
 def _iter_sse_chat_events(response: httpx.Response) -> Iterator[dict[str, Any]]:
@@ -405,6 +433,7 @@ class OpenAICompatibleLLMClient:
         temperature: float,
         request_kind: str,
         response_format: dict[str, Any] | None = None,
+        tools: list[dict[str, Any]] | None = None,
         started: float,
     ) -> tuple[dict[str, Any], int]:
         headers = {
@@ -418,6 +447,9 @@ class OpenAICompatibleLLMClient:
         }
         if response_format is not None:
             payload["response_format"] = response_format
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
         timeout = self._httpx_timeout_non_stream()
         with httpx.Client(timeout=timeout) as client:
             try:
@@ -677,6 +709,74 @@ class OpenAICompatibleLLMClient:
         usage = data.get("usage", {})
         token_usage = usage.get("total_tokens", max(32, len(prompt) // 2))
         return LLMResult(content=content, token_usage=token_usage, latency_ms=latency_ms)
+
+    def invoke_text_with_tools(
+        self,
+        messages: list[dict[str, Any]],
+        profile: AgentPromptProfile,
+        tools: list[dict[str, Any]],
+        tool_handler: Callable[[str, dict[str, Any]], str],
+        *,
+        max_tool_rounds: int = 4,
+    ) -> LLMResult:
+        msgs: list[dict[str, Any]] = list(messages)
+        total_tokens = 0
+        total_latency = 0
+        model = profile.model or self.model
+        last_content = ""
+        for round_idx in range(max_tool_rounds + 1):
+            use_tools = bool(tools) and round_idx < max_tool_rounds
+            data, latency_ms = self._request_non_stream(
+                messages=msgs,
+                agent_name=profile.agent_name,
+                model=model,
+                temperature=profile.temperature,
+                request_kind="text_generation_with_tools",
+                response_format=None,
+                tools=tools if use_tools else None,
+                started=perf_counter(),
+            )
+            total_latency += latency_ms
+            usage = data.get("usage", {})
+            total_tokens += int(usage.get("total_tokens") or 0)
+            choice0 = (data.get("choices") or [{}])[0]
+            msg = choice0.get("message") or {}
+            tool_calls = msg.get("tool_calls") if isinstance(msg.get("tool_calls"), list) else []
+            last_content = _coerce_message_content(msg.get("content"))
+            if not tool_calls:
+                return LLMResult(
+                    content=last_content,
+                    token_usage=total_tokens or max(32, sum(len(str(m.get("content") or "")) for m in msgs) // 2),
+                    latency_ms=total_latency,
+                )
+            assistant_msg: dict[str, Any] = {"role": "assistant", "content": msg.get("content") or ""}
+            assistant_msg["tool_calls"] = tool_calls
+            msgs.append(assistant_msg)
+            for tc in tool_calls:
+                if not isinstance(tc, dict):
+                    continue
+                fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+                name = str(fn.get("name") or "")
+                raw_args = fn.get("arguments") or "{}"
+                try:
+                    args = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args)
+                except json.JSONDecodeError:
+                    args = {}
+                if not isinstance(args, dict):
+                    args = {}
+                result = tool_handler(name, args)
+                msgs.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": str(tc.get("id") or ""),
+                        "content": result,
+                    }
+                )
+        return LLMResult(
+            content=last_content,
+            token_usage=total_tokens or max(32, sum(len(str(m.get("content") or "")) for m in msgs) // 2),
+            latency_ms=total_latency,
+        )
 
     def invoke_json(
         self,

@@ -167,6 +167,7 @@ def build_author_payload(state: dict) -> SafeAuthorPayload:
         length_adjustment=state.get("length_adjustment", "NONE"),
         mandatory_new_entities=sanitized["mandatory_new_entities"],
         general_world_lore=str(state.get("general_world_lore") or ""),
+        bible_context=str(state.get("bible_context") or ""),
         safe_chapter_rules=str(state.get("safe_chapter_rules") or ""),
         ai_freedom_level=str(state.get("ai_freedom_level") or "balanced"),
         outline_binding_mode=str(state.get("outline_binding_mode") or "ABSENT"),
@@ -270,6 +271,17 @@ def build_plan_supervisor_payload(state: dict) -> SafeSupervisorPayload:
     )
 
 
+def _draft_supervisor_character_profiles(state: dict) -> list[dict[str, str]]:
+    ol = normalize_output_language(str(state.get("story_output_language") or ""))
+    return _build_active_character_profiles(
+        int(state.get("chapter_id") or 0),
+        list(state.get("cast_slim_view") or []),
+        list(state.get("recent_entity_names") or []),
+        list(state.get("cast_full_view") or []),
+        output_language=ol,
+    )
+
+
 def build_draft_supervisor_payload(state: dict) -> SafeSupervisorPayload:
     settings = get_settings()
     ready_candidates, blocked_candidates = _anchor_candidate_views(state)
@@ -318,6 +330,10 @@ def build_draft_supervisor_payload(state: dict) -> SafeSupervisorPayload:
         resolution_cooldown_constraint=dict(state.get("resolution_cooldown_constraint") or {}),
         ending_vibe_cooldown_constraint=dict(state.get("ending_vibe_cooldown_constraint") or {}),
         allowed_identity_reveals_this_chapter=list(state.get("allowed_identity_reveals_this_chapter") or []),
+        active_character_profiles=_draft_supervisor_character_profiles(state),
+        author_safe_continuity_notes=list(state.get("author_safe_continuity_notes") or []),
+        ending_state_shift=str(state.get("ending_state_shift") or ""),
+        tone_direction=str(state.get("tone_direction") or ""),
     )
 
 

@@ -139,10 +139,12 @@ def run_director(state: dict, context: WorkflowContext) -> dict:
         )
     next_anchor = anchors[0] if anchors else None
     story = context.story_repository.get_story(state["story_id"]) or {}
-    bible_context = context.bible_service.compile_context(
-        story.get("bible_json") or {},
-        macro_author_notes=str(story.get("macro_author_notes") or ""),
-    )
+    bible_context = str(state.get("bible_context") or "").strip()
+    if not bible_context:
+        bible_context = context.bible_service.compile_full_context(
+            story.get("bible_json") or {},
+            macro_author_notes=str(story.get("macro_author_notes") or ""),
+        )
     previous_outline = _previous_chapter_outline(state)
     if not isinstance(context.llm_client, MockLLMClient):
         profile = augment_profile_system_prompt(get_profile("director"), context.output_language)
@@ -198,7 +200,7 @@ def _build_director_prompt(
         f"- current_anchor_description: {(next_anchor or {}).get('description', '')}\n"
         f"- visible_unachieved_anchors: {json.dumps(window, ensure_ascii=False)}\n\n"
         "## Inputs You Must Use\n"
-        f"- bible_context: {bible_context[:1800]}\n"
+        f"- bible_context:\n{bible_context}\n"
         f"- previous_chapter_outline: {previous_outline[:1200]}\n\n"
         "## Output Requirements\n"
         "- Choose selected_anchor_ids with 1-2 anchor ids for this chapter.\n"

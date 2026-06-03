@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 
 from app.domain.schema import AuthorExtractionHintsOutput, AuthorExtractionSurfaceEntry, AuthorOutput
+from app.services.graph_rag_service import GraphRAGService
 from app.services.llm import MockLLMClient
+from app.services.workflow.author_tools import AUTHOR_GRAPH_RAG_TOOLS, make_author_tool_handler
 from app.services.workflow.constants import LOCAL_ENFORCED_RULES_CONTEXT_CAP
 from app.services.workflow.context import WorkflowContext
 from app.services.workflow.masking import build_author_payload
@@ -118,7 +120,30 @@ def run_author(state: dict, context: WorkflowContext) -> tuple[dict, dict, int, 
             ),
             context.output_language,
         )
-        llm_result = context.llm_client.invoke_text(prompt, profile)
+        query_log: list[dict[str, str]] = []
+        graph_rag = context.graph_rag_service or GraphRAGService(
+            graph_store=context.graph_store,
+            vector_store=context.vector_store,
+            llm=context.llm_client,
+        )
+        tool_handler = make_author_tool_handler(
+            graph_rag=graph_rag,
+            story_id=str(state.get("story_id") or ""),
+            active_epoch_id=str(state.get("active_epoch_id") or "epoch_present"),
+            pov_character_id=str(state.get("pov_character_id") or "char_public_observer"),
+            query_log=query_log,
+        )
+        messages = [
+            {"role": "system", "content": profile.system_prompt},
+            {"role": "user", "content": prompt},
+        ]
+        llm_result = context.llm_client.invoke_text_with_tools(
+            messages,
+            profile,
+            AUTHOR_GRAPH_RAG_TOOLS,
+            tool_handler,
+            max_tool_rounds=4,
+        )
         chapter_content = _ensure_chapter_heading(
             state["chapter_id"], llm_result.content, context.output_language
         )
@@ -222,6 +247,8 @@ def run_author(state: dict, context: WorkflowContext) -> tuple[dict, dict, int, 
         dumped["author_extraction_surface_hints"] = dumped.pop("extraction_surface_hints", [])
         if hints_diagnostics:
             dumped["author_extraction_hints_diagnostics"] = hints_diagnostics
+        if query_log:
+            dumped["author_graph_rag_queries"] = query_log
         return dumped, payload.model_dump(mode="json"), token_usage, latency_ms
 
     llm_result = context.llm_client.invoke(prompt)
@@ -251,9 +278,9 @@ def run_author(state: dict, context: WorkflowContext) -> tuple[dict, dict, int, 
         if payload.ending_boundary_rule
         else "",
         "Some moves must wait—doing them now would jump the story too early." if payload.forbidden_next_scene_actions else "",
-        "The street is quiet; he cannot afford to stall. Another slow minute and the trail goes cold.",
-        "He handles what is in front of him before choosing the next move—emotion does not drive the feet.",
-        "Every line, glance, and pause on-site could shove him into worse trouble.",
+        "His hands still shook from the stairwell; he pressed them flat on the table before speaking.",
+        "She heard her own voice too loud in the empty room and lowered it, waiting for an answer that did not come.",
+        "Cold air from the broken seal raised the hairs on his neck; he stepped closer anyway, slow enough to see what moved.",
         f"{payload.narrative_script}",
         "He does not forecast too far ahead; he grips the change already in his hands.",
         f"By chapter end the board should shift: {payload.ending_state_shift}"
@@ -288,9 +315,12 @@ def _format_mandatory_new_entities(payload) -> str:
     return "\n".join(lines)
 
 
-def _format_general_world_lore(payload) -> str:
-    text = str(getattr(payload, "general_world_lore", None) or "").strip()
-    return text if text else "(none)"
+def _format_bible_context(payload) -> str:
+    text = str(getattr(payload, "bible_context", None) or "").strip()
+    if text:
+        return text
+    fallback = str(getattr(payload, "general_world_lore", None) or "").strip()
+    return fallback if fallback else "(none)"
 
 
 def _format_active_character_profiles(payload) -> str:
@@ -340,7 +370,7 @@ def _build_author_prompt(payload) -> str:
     freedom = str(getattr(payload, "ai_freedom_level", None) or "balanced")
     bind = str(getattr(payload, "outline_binding_mode", None) or "ABSENT")
     return f"""
-You are this chapter's ghostwriter: write only from the surface narrative_script and beats—do not invent extra truth.
+You are this chapter's scene writer: execute narrative_script and must_include_beats as lived scenes the reader experiences—not as a plot summary retold in third person.
 Do not add characters, twists, or dialogue motives outside must_include_beats / narrative_script; expand only where schema marks is_ai_invention=true.
 Output novel prose only—no JSON, no field labels, no meta commentary.
 
@@ -356,13 +386,17 @@ Normalized allowed band: {payload.normalized_length_min} - {payload.normalized_l
 
 ## Length adjustment mode
 length_adjustment: {payload.length_adjustment}
-- EXPAND: prior draft too short—add new actions, dialogue, reactions, or plot push.
-- COMPRESS: prior draft too long—keep core events/beats, cut repeated waiting, repeated interior monologue, dead-end atmosphere padding.
+- EXPAND: prior draft too short—deepen the same scene with reactions, dialogue, body detail, and environmental resistance; do not add new mainline events or mysteries for word count.
+- COMPRESS: prior draft too long—keep core events/beats and transitions between beats; cut repeated waiting, spiral interior monologue, dead-end atmosphere padding—not the psychological/logistics beats that make actions believable.
 - NONE: normal chapter writing, still stay inside the allowed band.
 
-## Author world / craft lore (hard)
-{_format_general_world_lore(payload)}
-This block is a hard constraint for this chapter; if it conflicts with generic style advice, obey this lore.
+## Full bible (hard)
+{_format_bible_context(payload)}
+World/craft rules constrain style and physics; they do not excuse skipping transitions required to execute beats believably.
+
+## Canon tool: graph_rag_ask
+When unsure about injuries, who was present, relationships, prior reactions, or world rules before a major action, call graph_rag_ask first.
+Do not use tool results to add unauthorized beats; internalize answers into prose only. If evidence is insufficient, write uncertainty or trial action—not confirmed facts.
 
 ## Absolute chapter laws (hard; treat as physics)
 {str(getattr(payload, "safe_chapter_rules", "") or "").strip() or "(no hard rules)"}
@@ -370,22 +404,18 @@ Character actions and any system/game beats must never violate the laws above.
 
 {_format_local_enforced_rules_for_author(payload)}
 
-## Naming discipline (show, don't label)
-1. Name only when needed: skip new proper nouns unless the entity recurs, drives decisions, or is a core beat anchor.
-2. If you must name, stay sparse: avoid stacking multiple new parallel names in one chapter; keep names short—no "quote + subtitle + colon" packaging.
-3. Describe before you label: prefer observable light, sound, touch, outcomes before slapping a term on something.
-4. Unless a mandatory seed entity requires it, avoid invented move codenames, system jargon, or location codes—express effects in plain prose.
-
+## Naming & Description Discipline
+1. Show before labeling: Describe observable light, sound, touch, or effects before introducing a term.
+2. Minimize jargon: Avoid inventing new proper nouns, location codes, or colon-heavy system jargon unless explicitly demanded by mandatory seeds.
 Primary author_goal:
 {payload.author_goal}
 
 ## Continuity pack
 
 ### Hard bridge from prior chapter prose
-1. This chapter **continues** time: the opening must move **forward** (new action, dialogue, observation)—do not stall retelling the prior ending.
-2. Use "previous summary" and "tail excerpt" only for causal/positional/mood grounding—**do not** paste whole sentences from them as this chapter's opening.
-3. Do not repeat the tail excerpt as your first paragraph; at most one very short transition, then **new** sentences absent from those sources.
-4. If you echo a prior beat, **rewrite** wording and specifics; avoid 10+ consecutive characters identical to summary/tail (ignore punctuation/space).
+1. Push forward immediately: Start with new action, dialogue, or observation. Do not stall or retell the prior ending.
+2. No copy-pasting: Never paste sentences from the `previous_chapter_summary` or `tail_excerpt`. 
+3. Carry the weight: Maintain physical and emotional residue (injuries, mood) from the prior chapter's end.
 
 Previous chapter summary:
 {payload.previous_chapter_summary}
@@ -406,8 +436,14 @@ Recent important entities:
 ## Character voice reference
 {_format_active_character_profiles(payload)}
 Rules:
-- Obey current_personality and current_speech_style for present action.
+- Obey current_personality and current_speech_style for present action; violating them without on-page cost/pressure is a failed draft.
 - past_personality_reference is only for flashbacks, retellings, or historical contrast scenes.
+
+## Character plausibility and pacing (hard)
+A. No Logistics Teleporting: Before movement, fights, or acquisitions, show the path, stamina, and obstacles. No "they had already arrived" skips.
+B. No Motivation Teleporting (Psychology Chain): Before major decisions, show the internal process (perception → emotion → inner tension → action). Treat psychological shifts as valid, required beats. Do not use summary lines like "he suddenly decided."
+C. Anti Plot-Rush: Do not chain physical beats with only "then/next". Insert emotional or psychological reactions between actions.
+D. Ending Shift: `ending_state_shift` must emerge naturally from on-page actions or internal epiphanies, not just a closing thesis sentence.
 
 ## This chapter's narrative direction
 Surface narrative_script:
@@ -447,10 +483,11 @@ After this chapter the reader should still not know:
 {previous_attempt_draft}
 
 ## Revision priority
+0) Fix character activity/psychology plausibility and missing transitions (hard)—before cosmetic polish.
 1) Satisfy author_goal, must_include_beats, ending_state_shift, chapter_end_location_hint, ending_boundary_rule.
-2) Fix hard issues in draft_feedback (broken chain, inconsistent locations, boundary overshoot, POV leaks).
-3) Only if (1)(2) are met, apply reader_feedback polish (wording, rhythm, repetition, tension).
-4) If reader_feedback conflicts with (1)(2), ignore reader_feedback.
+2) Fix hard issues in draft_feedback (broken chain, inconsistent locations, boundary overshoot, POV leaks, plot-rush, profile mismatch).
+3) Only if (0)(1)(2) are met, apply reader_feedback polish (wording, rhythm, repetition, tension).
+4) If reader_feedback conflicts with (0)(1)(2), ignore reader_feedback.
 
 ## Historical rejection notes (logic)
 {draft_feedback_text}
@@ -460,26 +497,13 @@ After this chapter the reader should still not know:
 
 Reader feedback is literary polish only—it cannot override the locked event chain, beats, end location, or hard boundaries.
 
-## Writing checklist
-1) If a prior draft exists, revise—do not nuke working material untouched by feedback.
-2) Finish all must-do beats before cosmetic polish; never delete key events to please readers.
-3) Add at least one clear on-page push: new action, discovery, or conflict.
-4) End state must differ from the opening and match ending_state_shift.
-5) If the prior draft already satisfied beats and draft_feedback is silent, patch locally—do not swap in a different event set.
-6) draft_feedback is hard; reader_feedback is soft.
-7) Use knowledge asymmetry for suspense—never violate forbidden_reveals.
-8) If characters move, make leave/arrive/stay explicit for extraction.
-9) No off-task new puzzles, systems, or world rules; no resolving hidden ground-truth on your own.
-10) Plain, short sentences; concrete action and dialogue first.
-11) Avoid purple stacks of metaphor; do not open every paragraph with mood-only staging.
-12) Length checks use normalized counts; for EXPAND/short drafts add real scenes/dialogue, not repetition padding.
-13) chapter_end_location_hint and hard boundaries are ceilings, not suggestions.
-14) If you execute any forbidden_next_scene_actions beat, you have jumped to the next chapter—rewrite the ending.
-15) For localized feedback (ending overshoot, missing beat), patch the affected spans only—do not rewrite the whole front half.
-16) For COMPRESS/long drafts, cut redundant patrol loops, idle waiting, spiral interior monologue, and repeated mood lines—never drop must_include_beats, ending_state_shift, or end location.
-17) Honor the four bridge rules: no near-copy of summary/tail; the opening must be new forward motion.
-18) For unfamiliar mechanisms/objects/areas, show perceivable effects before naming; do not substitute jargon for description.
-19) Without plot need, avoid inventing quoted/colon-heavy proprietary names; if you must name, keep density low.
+## Writing checklist (Execution Rules)
+1. Beat Execution: Finish all `must_include_beats` before cosmetic polish. Each beat needs a believable transition; never summarize a beat in a single sentence.
+2. Style: Use plain, short sentences. Concrete action and dialogue first. Avoid purple prose and mood-only staging paragraphs.
+3. Suspense: Use knowledge asymmetry—never violate `forbidden_reveals`.
+4. Boundaries: `chapter_end_location_hint` and `forbidden_next_scene_actions` are absolute ceilings. Crossing them means you skipped into the next chapter—rewrite the ending.
+5. Revisions: If a prior draft exists, patch locally based on feedback. Do not nuke working material untouched by feedback.
+6. Length Constraints: For EXPAND, deepen current scenes (dialogue/resistance) rather than inventing new events. For COMPRESS, cut dead air, not transitions.
 """.strip()
 
 
@@ -533,9 +557,9 @@ def _build_expansion_prompt(payload, chapter_content: str, missing_length: int) 
     return f"""
 Continue the SAME chapter body—do not rewrite the opening and do not summarize prior text.
 Normalized length is still short by at least {missing_length}.
-Continue from the last paragraph with new plot, dialogue, action, and reaction—no padding, no repeating already-stated facts.
+Continue from the last paragraph with dialogue, body reactions, sensory detail, and environmental resistance in the same scene—no new mainline events, mysteries, or scene launches for padding.
 Keep plain, short sentences; avoid heavy metaphor.
-Do not cross hard boundaries; if must_include_beats are satisfied, extend only with reactions/aftermath in the same scene—no new scene launch.
+Do not cross hard boundaries; if must_include_beats are satisfied, extend only with reactions/aftermath in the same scene.
 End-of-chapter location hint: {payload.chapter_end_location_hint}
 Hard boundary: {payload.ending_boundary_rule}
 Forbidden early beats: {payload.forbidden_next_scene_actions}
@@ -549,9 +573,9 @@ Current body:
 
 def _build_compression_prompt(payload, chapter_content: str, excess_length: int) -> str:
     return f"""
-Compress the SAME chapter body—do not turn it into summary and do not delete core events.
+Compress the SAME chapter body—do not turn it into a plot summary and do not delete core events or the transitions that make them believable.
 Normalized length exceeds the cap; shorten by at least {excess_length}.
-Keep event order, must_include_beats, ending state, and end location—cut redundant waiting, patrol loops, spiral interior monologue, repeated setting lines, and dead sentences.
+Keep event order, must_include_beats, ending state, end location, and key psychology/logistics beats—cut redundant waiting, patrol loops, spiral interior monologue, repeated setting lines, and dead sentences only.
 Rewrite as tighter prose in plain short sentences.
 End-of-chapter location hint: {payload.chapter_end_location_hint}
 Hard boundary: {payload.ending_boundary_rule}

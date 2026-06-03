@@ -169,10 +169,12 @@ def run_graph_rag(state: dict, context: WorkflowContext) -> dict:
             resolved_pov_character_id,
         )
         local_enforced_rules_context = format_local_enforced_rules_block(enforced, location_display)
-        bible_context = context.bible_service.compile_context(
-            (story.get("bible_json") or {}) if story else {},
-            macro_author_notes=str(story.get("macro_author_notes") or "") if story else "",
-        )
+        bible_context = str(state.get("bible_context") or "").strip()
+        if not bible_context:
+            bible_context = context.bible_service.compile_full_context(
+                (story.get("bible_json") or {}) if story else {},
+                macro_author_notes=str(story.get("macro_author_notes") or "") if story else "",
+            )
         cast_index: dict[str, dict] = {}
         cast_full: dict[str, dict] = {}
         for raw in (story.get("cast_json") or []) if story else []:

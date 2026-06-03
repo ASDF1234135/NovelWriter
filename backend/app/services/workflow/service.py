@@ -47,10 +47,11 @@ from app.repositories.sqlite.story_repository import StoryRepository
 from app.repositories.sqlite.workflow_repository import WorkflowRepository
 from app.services.anchor_service import AnchorService
 from app.services.bible_service import BibleService
+from app.services.graph_rag_service import GraphRAGService
 from app.services.graph_store import GraphStore
 from app.services.llm import LLMClient
 from app.services.vector_store import VectorStore
-from app.domain.story_runtime import normalize_anchor_candidates_from_hydrated
+from app.domain.story_runtime import bible_user_view as _bible_user_view, normalize_anchor_candidates_from_hydrated
 from app.services.workflow.bible_general_lore import effective_general_world_lore
 from app.services.workflow.chapter_pacing import (
     build_ending_vibe_cooldown_constraint,
@@ -578,29 +579,6 @@ def _normalize_for_compare(value: object) -> object:
     return value
 
 
-# Bible payload fields that are populated by compile / runtime (not user-editable in the bible UI),
-# stored in dedicated DB columns or derived state. The frontend may round-trip them inside
-# `bible` (e.g. straight from a macro_compile response) so they must be stripped before diffing.
-_BIBLE_NON_USER_KEYS = (
-    "storylines",
-    "anchor_nodes",
-    "branch_count_final",
-    "llm_weave_debug",
-    "compile_warnings",
-    "compile_config",
-    "resolved_anchors",
-    "anchor_candidates",
-    "lore_mysteries_progression",
-)
-
-
-def _bible_user_view(bible: dict) -> dict:
-    out = dict(bible or {})
-    for key in _BIBLE_NON_USER_KEYS:
-        out.pop(key, None)
-    return out
-
-
 def _volume_compare_key(v: dict) -> dict:
     """Volume identity for diff: id, title, summary, chapter range, target words."""
     return {
@@ -889,6 +867,11 @@ class WorkflowService:
             llm_client=self.llm_client,
             run_id=run_id,
             output_language=ol,
+            graph_rag_service=GraphRAGService(
+                graph_store=self.graph_store,
+                vector_store=self.vector_store,
+                llm=self.llm_client,
+            ),
         )
 
     def _execute_workflow(self, run_id: str, state: dict) -> dict:
@@ -1345,6 +1328,10 @@ class WorkflowService:
         initial_state["state_version"] = 2
         initial_state["lore_mysteries_progression"] = list(rt.get("lore_mysteries_progression") or [])
         initial_state["general_world_lore"] = effective_general_world_lore(bible)
+        initial_state["bible_context"] = self.bible_service.compile_full_context(
+            bible if isinstance(bible, dict) else {},
+            macro_author_notes=str(story.get("macro_author_notes") or ""),
+        )
         _refresh_anchor_runtime_state(self.story_repository, initial_state)
         normalize_workflow_state(initial_state)
         canonicalize_workflow_state_contract(initial_state)

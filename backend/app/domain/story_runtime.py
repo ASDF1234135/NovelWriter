@@ -10,6 +10,20 @@ BIBLE_RUNTIME_KEYS: frozenset[str] = frozenset(
     {"resolved_anchors", "anchor_candidates", "lore_mysteries_progression"}
 )
 
+# Compile / macro fields not shown in bible JSON appendix for LLM prompts.
+BIBLE_NON_USER_KEYS: frozenset[str] = frozenset(
+    {
+        *BIBLE_RUNTIME_KEYS,
+        "storylines",
+        "anchor_nodes",
+        "branch_count_final",
+        "llm_weave_debug",
+        "compile_warnings",
+        "compile_config",
+        "general_world_lore",
+    }
+)
+
 DEFAULT_STORY_RUNTIME: dict[str, Any] = {
     "resolved_anchors": [],
     "anchor_candidates": [],
@@ -23,6 +37,14 @@ def strip_runtime_keys_from_bible(bible: dict[str, Any] | None) -> dict[str, Any
     out = dict(bible or {})
     for k in BIBLE_RUNTIME_KEYS:
         out.pop(k, None)
+    return out
+
+
+def bible_user_view(bible: dict[str, Any] | None) -> dict[str, Any]:
+    """User-editable bible fields for prompts (excludes runtime and compile artifacts)."""
+    out = dict(bible or {})
+    for key in BIBLE_NON_USER_KEYS:
+        out.pop(key, None)
     return out
 
 

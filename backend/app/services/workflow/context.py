@@ -6,6 +6,7 @@ from app.repositories.sqlite.story_repository import StoryRepository
 from app.repositories.sqlite.workflow_repository import WorkflowRepository
 from app.services.anchor_service import AnchorService
 from app.services.bible_service import BibleService
+from app.services.graph_rag_service import GraphRAGService
 from app.services.graph_store import GraphStore
 from app.services.llm import LLMClient
 from app.services.vector_store import VectorStore
@@ -23,3 +24,4 @@ class WorkflowContext:
     run_id: str
     """BCP-47 style story setting: en | zh-Hant | zh-Hans."""
     output_language: str = "zh-Hant"
+    graph_rag_service: GraphRAGService | None = None

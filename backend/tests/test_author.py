@@ -15,6 +15,10 @@ class FakeTextLLMClient:
             latency_ms=456,
         )
 
+    def invoke_text_with_tools(self, messages, profile, tools, tool_handler, *, max_tool_rounds=4):
+        user = next((m.get("content") for m in reversed(messages) if m.get("role") == "user"), "")
+        return self.invoke_text(user, profile)
+
     def invoke_json(self, prompt, response_model, profile):
         raise NotImplementedError
 
@@ -38,6 +42,10 @@ class SequenceTextLLMClient:
         self.calls += 1
         return LLMResult(content=response, token_usage=50, latency_ms=60)
 
+    def invoke_text_with_tools(self, messages, profile, tools, tool_handler, *, max_tool_rounds=4):
+        user = next((m.get("content") for m in reversed(messages) if m.get("role") == "user"), "")
+        return self.invoke_text(user, profile)
+
     def invoke_json(self, prompt, response_model, profile):
         raise NotImplementedError
 
@@ -59,6 +67,10 @@ class HintRetryLLMClient:
 
     def invoke_text(self, prompt: str, profile: AgentPromptProfile) -> LLMResult:
         return LLMResult(content=self.chapter, token_usage=10, latency_ms=10)
+
+    def invoke_text_with_tools(self, messages, profile, tools, tool_handler, *, max_tool_rounds=4):
+        user = next((m.get("content") for m in reversed(messages) if m.get("role") == "user"), "")
+        return self.invoke_text(user, profile)
 
     def invoke_json(self, prompt, response_model, profile):
         idx = min(self.json_calls, len(self.hint_payloads) - 1)
@@ -243,12 +255,13 @@ def test_author_prompt_includes_writing_note_block() -> None:
             recent_entity_names=[],
             draft_feedback=[],
             reader_feedback=[],
-            general_world_lore="短句優先\n避免過度抒情",
+            bible_context="## World lore\n\n短句優先\n避免過度抒情",
             safe_chapter_rules="遊戲規則：每回合只能行動一次；不可瞬間破局。",
             length_adjustment="NONE",
         )
     )
-    assert "## Author world / craft lore (hard)" in prompt
+    assert "## Full bible (hard)" in prompt
+    assert "短句優先" in prompt
     assert "## Absolute chapter laws" in prompt
     assert "每回合只能行動一次" in prompt
     assert "短句優先" in prompt
